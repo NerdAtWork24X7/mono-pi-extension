@@ -1,0 +1,46 @@
+{
+  "lastChangelogVersion": "0.58.0",
+  "doubleEscapeAction": "tree",
+  "quietStartup": true,
+  "defaultProvider": "openrouter",
+  "defaultModel": "openrouter/hunter-alpha",
+  "enabledModels": [
+    "zai/glm-4.7-flash",
+    "zai/glm-4.7",
+    "openrouter/arcee-ai/trinity-mini:free",
+    "openrouter/arcee-ai/trinity-large-preview:free",
+    "openrouter/openai/gpt-oss-20b:free",
+    "openrouter/hunter-alpha"
+  ],
+  "defaultThinkingLevel": "low",
+  "theme": "cyberpunk",
+  "extensions": [],
+  "skills": [
+    "-skills/architect/SKILL.md",
+    "-skills/git-workflow/SKILL.md",
+    "-skills/requirement_enginer/SKILL.md",
+    "+skills/research/SKILL.md",
+    "-skills/scout-and-plan/SKILL.md"
+  ],
+  "prompts": [
+    "-prompts/commit.md",
+    "-prompts/optimize.md",
+    "-prompts/pr.md"
+  ],
+  "whimsical": {
+    "enabled": true,
+    "weights": {
+      "A": 10,
+      "B": 10,
+      "C": 10,
+      "D": 10,
+      "E": 30,
+      "F": 15,
+      "G": 15
+    },
+    "spinnerPreset": "neonPulse"
+  },
+  "images": {
+    "blockImages": false
+  }
+}
