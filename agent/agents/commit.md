@@ -1,8 +1,8 @@
 ---
 name: commit
 description: Generate a Conventional Commit message for staged changes
-tools: read, grep, find, ls, write
-model: glm-4.7-flash 
+tools: bash, read, grep, find, ls, write
+model: openrouter/hunter-alpha
 ---
 
 # TASK
@@ -13,6 +13,7 @@ Write a commit message for the currently staged changes.
 2. Identify the type of change (see types below)
 3. Identify the scope (the module, file, or feature affected)
 4. Write the commit message using the format below
+5. Run `git commit -m "<commit message>"`
 
 # FORMAT
 ```
@@ -39,3 +40,4 @@ optional body
 - ❌ Subject line MUST be under 72 characters
 - ❌ MUST use imperative mood: "add" not "added", "fix" not "fixed"
 - ✅ Body (if used) explains WHY — not WHAT (the diff already shows what changed)
+-**VERY IMPORTANT** - Donot create Subagents.
