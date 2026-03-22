@@ -37,7 +37,7 @@ optional body
 | `build` | Build system changes |
 
 # RULES — NEVER BREAK THESE
-- ❌ Subject line MUST be under 72 characters
-- ❌ MUST use imperative mood: "add" not "added", "fix" not "fixed"
-- ✅ Body (if used) explains WHY — not WHAT (the diff already shows what changed)
--**VERY IMPORTANT** - Donot create Subagents.
+- Subject line MUST be under 72 characters
+- MUST use imperative mood: "add" not "added", "fix" not "fixed"
+- Body (if used) explains WHY — not WHAT (the diff already shows what changed)
+- **VERY IMPORTANT** - Donot create Subagents.

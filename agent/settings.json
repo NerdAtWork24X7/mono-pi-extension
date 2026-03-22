@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.58.0",
+  "lastChangelogVersion": "0.60.0",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
   "defaultProvider": "openrouter",
@@ -10,17 +10,22 @@
     "openrouter/arcee-ai/trinity-mini:free",
     "openrouter/arcee-ai/trinity-large-preview:free",
     "openrouter/openai/gpt-oss-20b:free",
-    "openrouter/hunter-alpha"
+    "openrouter/openrouter/hunter-alpha",
+    "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
   ],
   "defaultThinkingLevel": "low",
   "theme": "cyberpunk",
-  "extensions": [],
+  "extensions": [
+    "-extensions/agent-manager/index.ts",
+    "-extensions/subagent/index.ts"
+  ],
   "skills": [
     "-skills/architect/SKILL.md",
     "-skills/git-workflow/SKILL.md",
     "-skills/requirement_enginer/SKILL.md",
-    "+skills/research/SKILL.md",
-    "-skills/scout-and-plan/SKILL.md"
+    "-skills/scout-and-plan/SKILL.md",
+    "-skills/Project_Orchestrator/SKILL.md",
+    "-skills/research/SKILL.md"
   ],
   "prompts": [
     "-prompts/commit.md",
@@ -42,5 +47,27 @@
   },
   "images": {
     "blockImages": false
-  }
+  },
+  "hideThinkingBlock": false,
+  "packages": [
+    {
+      "source": "npm:pi-powerline-footer",
+      "extensions": [
+        "-index.ts"
+      ]
+    },
+    {
+      "source": "git:github.com/tmustier/pi-extensions",
+      "extensions": [
+        "usage-extension/index.ts",
+        "+tab-status/tab-status.ts"
+      ],
+      "skills": [
+        "-ralph-wiggum/SKILL.md",
+        "-extending-pi/skill-creator/SKILL.md",
+        "-extending-pi/SKILL.md"
+      ]
+    },
+    "npm:pi-subagents"
+  ]
 }

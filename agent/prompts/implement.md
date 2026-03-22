@@ -3,8 +3,8 @@ description: Full implementation workflow — scout finds context, planner desig
 ---
 
 # TASK
-Implement: $@
 
+Implement: $@
 
 # STEPS — RUN IN ORDER USING THE SUBAGENT
 
@@ -23,7 +23,7 @@ Implement: $@
   - Ask questions to clarify the context
   - Ask questions to clarify the requirements
 - Output: Passed as `{previous}` to Step 3
-- **VERY IMPORTANT**: write question answers in file <cwd>/tmp/interview.md
+- **VERY IMPORTANT**: write or update current question answers in file <cwd>/tmp/interview.md
 
 ## Step 3 — Planner
 - Agent: `planner`
@@ -35,17 +35,16 @@ Implement: $@
   - Define interfaces between components before any implementation step
 - Output: Passed as `{previous}` to Step 4
 
-
 ## Step 4 — Worker
-- Agent: `worker`
+- **VERY IMPORTANT**: Donot use subagent for this step
 - Task: Implement the plan exactly as written
 - Input: Use `{previous}` — the planner's full plan
 - Rules:
   - Follow the plan exactly — do NOT deviate or improve beyond scope
-  - If a step is blocked or unclear, stop and report — do NOT guess
   - Report every file changed in the output
-
+  - **VERY IMPORTANT**: append your findings to file <cwd>/tmp/Changelog.md
 
 # TASK EXECUTION
-Run scout, planner and worker steps as a task using the `subagent` tool with `task` parameter.
-Pass output between steps using the `{previous}` placeholder.
+- Run scout, planner and worker steps as a task using the `subagent` tool with `task` parameter.
+- Pass output between steps using the `{previous}` placeholder.
+- If any of subagent fails check the error and restart the subagent with required fix.

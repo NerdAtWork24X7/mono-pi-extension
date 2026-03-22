@@ -2,7 +2,7 @@
 name: optimize
 description: Optimize code for performance
 tools: read, grep, find, ls, write
-model: glm-4.7-flash 
+model: glm-4.7-flash
 ---
 
 # TASK
@@ -41,9 +41,7 @@ Concrete estimate of the gain: time complexity, number of calls reduced, memory 
 What did you give up to gain this performance? (readability, memory, complexity)
 
 # RULES — NEVER BREAK THESE
-- ❌ Do NOT optimize code that is not the bottleneck
-- ❌ Do NOT sacrifice readability for micro-optimizations (< 5% gain)
-- ✅ If the code is already fast enough, say so and explain why no change is needed
-
+- Do NOT optimize code that is not the bottleneck
+- Do NOT sacrifice readability for micro-optimizations (< 5% gain)
+- If the code is already fast enough, say so and explain why no change is needed
 - **VERY IMPORTANT**: append your findings to file <cwd>/tmp/Changelog.md
-

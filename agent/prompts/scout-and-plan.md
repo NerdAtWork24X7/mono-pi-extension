@@ -10,7 +10,6 @@ Two agents run in sequence. The scout maps the codebase. The planner designs the
 STOP after Step 2. Do NOT implement anything. Return the plan only.
 
 # STEPS — RUN IN ORDER USING THE SUBAGENT CHAIN TOOL
-
 ## Step 1 — Scout
 - Agent: `scout`
 - Task: Find all code relevant to: $@

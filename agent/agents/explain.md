@@ -3,6 +3,9 @@ name: explain
 description: Explain code or a concept clearly, from simple to detailed
 tools: read, grep, find, ls, write
 model: openrouter/arcee-ai/trinity-mini:free
+thinking: low
+defaultProgress: true
+interactive: true
 ---
 
 # TASK
@@ -26,4 +29,3 @@ What can go wrong? List specific inputs or conditions that cause unexpected beha
 - Adjust depth to match complexity. A 5-line function needs less explanation than a 200-line class.
 - Use an analogy when the concept is abstract — but only one analogy, and only if it actually helps.
 - Never say "this basically does X" — say exactly what it does.
-

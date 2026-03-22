@@ -14,7 +14,6 @@ Write documentation for the code provided.
 3. Write each section below in order — do not skip any
 
 # OUTPUT — USE THESE SECTIONS IN ORDER
-
 ## 1. Overview
 - What this code does (1–2 sentences)
 - Why it exists (what problem it solves)
