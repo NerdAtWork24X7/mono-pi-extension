@@ -1,73 +1,30 @@
 {
-  "lastChangelogVersion": "0.60.0",
+  "lastChangelogVersion": "0.70.2",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
-  "defaultProvider": "openrouter",
-  "defaultModel": "openrouter/hunter-alpha",
-  "enabledModels": [
-    "zai/glm-4.7-flash",
-    "zai/glm-4.7",
-    "openrouter/arcee-ai/trinity-mini:free",
-    "openrouter/arcee-ai/trinity-large-preview:free",
-    "openrouter/openai/gpt-oss-20b:free",
-    "openrouter/openrouter/hunter-alpha",
-    "openrouter/nvidia/nemotron-3-super-120b-a12b:free"
-  ],
+  "defaultProvider": "kilo",
+  "defaultModel": "zai-coding/glm-5.1",
   "defaultThinkingLevel": "low",
-  "theme": "cyberpunk",
-  "extensions": [
-    "-extensions/agent-manager/index.ts",
-    "-extensions/subagent/index.ts"
-  ],
-  "skills": [
-    "-skills/architect/SKILL.md",
-    "-skills/git-workflow/SKILL.md",
-    "-skills/requirement_enginer/SKILL.md",
-    "-skills/scout-and-plan/SKILL.md",
-    "-skills/Project_Orchestrator/SKILL.md",
-    "-skills/research/SKILL.md"
-  ],
-  "prompts": [
-    "-prompts/commit.md",
-    "-prompts/optimize.md",
-    "-prompts/pr.md"
-  ],
-  "whimsical": {
-    "enabled": true,
-    "weights": {
-      "A": 10,
-      "B": 10,
-      "C": 10,
-      "D": 10,
-      "E": 30,
-      "F": 15,
-      "G": 15
-    },
-    "spinnerPreset": "neonPulse"
-  },
-  "images": {
-    "blockImages": false
-  },
-  "hideThinkingBlock": false,
   "packages": [
-    {
-      "source": "npm:pi-powerline-footer",
-      "extensions": [
-        "-index.ts"
-      ]
-    },
-    {
-      "source": "git:github.com/tmustier/pi-extensions",
-      "extensions": [
-        "usage-extension/index.ts",
-        "+tab-status/tab-status.ts"
-      ],
-      "skills": [
-        "-ralph-wiggum/SKILL.md",
-        "-extending-pi/skill-creator/SKILL.md",
-        "-extending-pi/SKILL.md"
-      ]
-    },
-    "npm:pi-subagents"
+    "npm:pi-vitals",
+    "npm:pi-peon-ping",
+    "npm:@aliou/pi-guardrails",
+    "npm:pi-ask-user-question",
+    "npm:pi-updater",
+    "npm:pi-web-access",
+    "npm:@marckrenn/pi-sub-bar"
+  ],
+  "theme": "cyberpunk",
+  "hideThinkingBlock": false,
+  "skills": [
+    ".claude/skills",
+    "~/.claude/skills"
+  ],
+  "enabledModels": [
+    "kilo/qwen/qwen3.6-plus",
+    "kilo/zai-coding/glm-5.1",
+    "kilo/nvidia/nemotron-3-super-120b-a12b:free",
+    "xiaomi/mimo-v2.5-pro",
+    "xiaomi/mimo-v2.5"
   ]
 }
