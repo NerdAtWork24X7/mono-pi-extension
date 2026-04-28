@@ -149,6 +149,7 @@ export default function (pi: ExtensionAPI) {
 	let widgetInvalidate: (() => void) | null = null;
 	let sessionDir = "";
 	let tmuxLogFile: string | null = null;
+	let enabled = true;
 
 	function initTmuxLogPane(cwd: string) {
 		if (!process.env.TMUX) return;
@@ -283,6 +284,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function initWidget() {
+		if (!enabled) return;
 		if (!widgetCtx) return;
 		widgetInvalidate = null;
 
@@ -525,6 +527,7 @@ export default function (pi: ExtensionAPI) {
 
 		async execute(_toolCallId, params, _signal, onUpdate, ctx) {
 			const { agent, task } = params as { agent: string; task: string };
+			if (!enabled) return { output: "Agent team is currently disabled. Use /agents-team-toggle on to enable." };
 
 			try {
 				if (onUpdate) {
@@ -674,9 +677,33 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.registerCommand("agents-team-toggle", {
+		description: "Enable or disable agent team at runtime (on/off/status)",
+		handler: async (args, ctx) => {
+			const sub = (args.trim().split(/\s+/)[0] ?? "").toLowerCase();
+			if (sub === "on") {
+				enabled = true;
+				pi.setActiveTools(["dispatch_agent", "askUserQuestion"]);
+				await ctx.ui.notify("✓ Agent team enabled");
+			} else if (sub === "off") {
+				enabled = false;
+				widgetCtx = ctx;
+				ctx.ui.setWidget("agent-team", undefined);
+				widgetInvalidate = null;
+				pi.setActiveTools(pi.getAllTools().map(t => t.name));
+				await ctx.ui.notify("✓ Agent team disabled");
+			} else if (sub === "status") {
+				await ctx.ui.notify(enabled ? "Agent team is enabled" : "Agent team is disabled");
+			} else {
+				await ctx.ui.notify("Usage: /agents-team-toggle on|off|status");
+			}
+		},
+	});
+
 	// ── System Prompt Override ───────────────────
 
 	pi.on("before_agent_start", async (_event, _ctx) => {
+		if (!enabled) return;
 		// Build dynamic agent catalog from active team only
 		const agentCatalog = Array.from(agentStates.values())
 			.map(s => `### ${displayName(s.def.name)}\n**Dispatch as:** \`${s.def.name}\`\n${s.def.description}\n**Tools:** ${s.def.tools}`)

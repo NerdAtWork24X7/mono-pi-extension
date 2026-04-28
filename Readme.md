@@ -14,21 +14,26 @@ After installation, your directory structure should look like:
 
 ```
 ~/.pi/agent/
-  agents/          # 11 agent .md files + teams.yaml
-  extensions/      # 7 extensions (agent-team, pi-rules, custom-footer, etc.)
-  models.json      # custom model providers (kilo, xiaomi)
-  settings.json    # default config, enabled models, packages
-  themes/          # cyberpunk.json
-  skills/          # electron-scaffold
-  rules/           # system prompt rules (injected by pi-rules)
+  agents/              # 11 agent .md files + teams.yaml
+  extensions/          # 7 extensions (agent-team, pi-rules, custom-footer, etc.)
+  models.json          # custom model providers (kilo, xiaomi)
+  settings.json        # default config, enabled models, packages
+  pi-sub-bar-settings.json  # pi-sub-bar display & provider config
+  themes/              # cyberpunk.json
+  skills/              # electron-scaffold
+  rules/               # system prompt rules (injected by pi-rules)
+  prompts/             # custom prompt templates
+  sessions/            # session data
+  agent-sessions/      # agent session state (run counts, status)
 ```
 
 ## Quick Start
 
 1. Start pi: `pi`
 2. The cyberpunk theme loads automatically
-3. The `agent-team` extension activates on session start, selects the first team (scout), and locks the primary agent to dispatcher mode
+3. The `agent-team` extension activates on session start, selects the first team (`scout`), and locks the primary agent to dispatcher mode
 4. Use `/agents-team` to switch teams, then dispatch work via the `dispatch_agent` tool
+5. Agent session state (run counts, status) is persisted in `agent-sessions/`
 
 To use an agent directly (without the team orchestrator), run pi with the agent flag:
 
@@ -44,6 +49,7 @@ All registered slash commands from the extensions in this repo:
 
 | Command | Extension | Description |
 |---------|-----------|-------------|
+| `/agents-team-toggle` | agent-team | Enable or disable agent teams. |
 | `/agents-team` | agent-team | Open team selector. Switches which team of agents is active. |
 | `/agents-list` | agent-team | List all loaded agents with status, session state, and run count. |
 | `/agents-grid <1-6>` | agent-team | Set the number of columns in the agent dashboard widget. |
@@ -85,15 +91,15 @@ Teams are defined in `agents/teams.yaml`. The `agent-team` extension loads teams
 | `fix` | fix |
 | `build` | scout, planner, builder |
 | `plan` | scout, planner, documenter |
-| `plan-build` | scout, conventions-analyst, planner, greenfield-web, ui-designer, builder, reviewer, wcag-auditor |
-| `info` | scout, browser, documenter, reviewer |
-| `next` | scout, browser |
-| `ads` | scout |
-| `brand` | scout, browser, documenter |
-| `full` | scout, conventions-analyst, planner, builder, reviewer, documenter, browser |
-| `business` | scout, browser |
+| `plan-build` | scout, conventions-analyst, planner, greenfield-web, brownfield-planner, ui-designer, builder, reviewer, wcag-auditor |
+| `info` | scout, browser, documenter, reviewer, negotiator, agent-builder, agent-researcher |
+| `next` | scout, browser, scheduler |
+| `ads` | scout, negotiator, ad-strategist, sales-coach |
+| `brand` | scout, browser, negotiator, ad-strategist, brand-strategist, personal-brand-strategist, documenter, sales-coach, linkedin-coach, brand-psychologist, storybrand |
+| `full` | scout, conventions-analyst, planner, builder, reviewer, documenter, scheduler, ad-strategist, negotiator, browser |
+| `business` | scout, browser, regulatory-specialist, brand-strategist, financial-modeler, distribution-strategist, trade-marketer, consumer-marketer |
 
-**Note:** Teams in `teams.yaml` can reference agents not included in this repo (e.g., `negotiator`, `scheduler`, `ad-strategist`). Those agents work only if installed separately at `~/.pi/agent/agents/` or `.pi/agents/`. The table above shows only agents that ship with this repo.
+**Note:** Teams in `teams.yaml` reference agents not included in this repo (e.g., `negotiator`, `scheduler`, `ad-strategist`, `brownfield-planner`, `agent-builder`, `agent-researcher`, `brand-strategist`, `financial-modeler`, and others). Those agents work only if installed separately at `~/.pi/agent/agents/` or `.pi/agents/`. The 11 agents that ship with this repo are listed in the Agents section above.
 
 ## Extensions
 
@@ -155,20 +161,12 @@ Settings persist in `~/.pi/agent/settings.json` under the `whimsical` key.
 
 ```json
 {
+  "lastChangelogVersion": "0.70.2",
+  "doubleEscapeAction": "tree",
+  "quietStartup": true,
   "defaultProvider": "kilo",
   "defaultModel": "zai-coding/glm-5.1",
   "defaultThinkingLevel": "low",
-  "theme": "cyberpunk",
-  "quietStartup": true,
-  "hideThinkingBlock": false,
-  "doubleEscapeAction": "tree",
-  "enabledModels": [
-    "kilo/qwen/qwen3.6-plus",
-    "kilo/zai-coding/glm-5.1",
-    "kilo/nvidia/nemotron-3-super-120b-a12b:free",
-    "xiaomi/mimo-v2.5-pro",
-    "xiaomi/mimo-v2.5"
-  ],
   "packages": [
     "npm:pi-vitals",
     "npm:pi-peon-ping",
@@ -178,7 +176,16 @@ Settings persist in `~/.pi/agent/settings.json` under the `whimsical` key.
     "npm:pi-web-access",
     "npm:@marckrenn/pi-sub-bar"
   ],
-  "skills": [".claude/skills", "~/.claude/skills"]
+  "theme": "cyberpunk",
+  "hideThinkingBlock": false,
+  "skills": [".claude/skills", "~/.claude/skills"],
+  "enabledModels": [
+    "kilo/qwen/qwen3.6-plus",
+    "kilo/zai-coding/glm-5.1",
+    "kilo/nvidia/nemotron-3-super-120b-a12b:free",
+    "xiaomi/mimo-v2.5-pro",
+    "xiaomi/mimo-v2.5"
+  ]
 }
 ```
 
@@ -190,6 +197,14 @@ Settings persist in `~/.pi/agent/settings.json` under the `whimsical` key.
 | `xiaomi` | `https://token-plan-ams.xiaomimimo.com/v1` | mimo-v2.5-pro, mimo-v2.5 |
 
 Both providers use OpenAI-compatible completions API.
+
+### pi-sub-bar-settings.json
+
+Configuration for the `@marckrenn/pi-sub-bar` package. Controls the status bar's visual layout, provider display options, usage thresholds, and keybindings. Key settings:
+
+- **Display**: bar style (`horizontal-bar`), alignment (`split`), color scheme (`base-warning-error`), character sets, padding
+- **Providers**: per-provider status toggles and windows (Anthropic, Copilot, Gemini, Antigravity, Codex, Kiro, ZAI)
+- **Keybindings**: `ctrl+alt+p` to cycle providers, `ctrl+alt+r` to toggle reset time format
 
 ### Theme
 
