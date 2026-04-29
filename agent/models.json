@@ -21,7 +21,7 @@
           "id": "nvidia/nemotron-3-super-120b-a12b:free",
           "reasoning": true
         },
-		{
+        {
           "id": "google/gemma-4-26b-a4b-it:free",
           "reasoning": true
         }
@@ -30,16 +30,27 @@
     "xiaomi": {
       "baseUrl": "https://token-plan-ams.xiaomimimo.com/v1",
       "api": "openai-completions",
-      "apiKey": "tp-e0ika8mfj6g1oqif5qadk4d1x2cjsu3qdx6yzinrs82m5uk6",
+      "apiKey": "xiaomi",
       "models": [
         {
           "id": "mimo-v2.5-pro",
           "reasoning": true
         },
-		{
+        {
           "id": "mimo-v2.5",
           "reasoning": true
         }
+      ]
+    },
+    "nvidia": {
+      "baseUrl": "https://integrate.api.nvidia.com/v1",
+      "api": "openai-completions",
+      "apiKey": "nvidia",
+      "models": [
+        {
+          "id": "minimaxai/minimax-m2.7",
+          "reasoning": true
+        },
       ]
     }
   }
