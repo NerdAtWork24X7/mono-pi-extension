@@ -27,7 +27,50 @@ async function callContext7(method: string, args: Record<string, any>) {
 		throw new Error(`HTTP ${res.status}: ${res.statusText}`);
 	}
 
-	const data = await res.json();
+	const text = await res.text();
+	let data: any;
+
+	try {
+		data = JSON.parse(text);
+	} catch (e) {
+		// If not valid JSON, try parsing as SSE
+		const lines = text.split("\n");
+		let dataBuffer = "";
+		for (const line of lines) {
+			if (line.startsWith("data: ")) {
+				dataBuffer += line.substring(6);
+			} else if (line.trim() === "") {
+				if (dataBuffer) {
+					try {
+						const parsed = JSON.parse(dataBuffer);
+						if (parsed.id === 1 || (parsed.result && !parsed.id)) {
+							data = parsed;
+							break;
+						}
+					} catch (err) {
+						// ignore
+					}
+					dataBuffer = "";
+				}
+			}
+		}
+		// Final attempt if no empty line at the end
+		if (!data && dataBuffer) {
+			try {
+				const parsed = JSON.parse(dataBuffer);
+				if (parsed.id === 1 || (parsed.result && !parsed.id)) {
+					data = parsed;
+				}
+			} catch (err) {
+				// ignore
+			}
+		}
+	}
+
+	if (!data) {
+		throw new Error(`Failed to parse response from Context7 API. Raw response: ${text.substring(0, 100)}...`);
+	}
+
 	if (data.error) {
 		throw new Error(data.error.message);
 	}

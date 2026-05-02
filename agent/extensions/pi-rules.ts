@@ -68,16 +68,16 @@ export default function piRulesExtension(pi: ExtensionAPI) {
 			return;
 		}
 
-		const rulesList = ruleFiles.map((f) => `- ${getAgentDir()}/agent/rules/${f}`).join("\n");
+		const rulesList = ruleFiles.map((f) => `- ${getAgentDir()}/rules/${f}`).join("\n");
 
 		return {
 			systemPrompt:
-					event.systemPrompt + `
+				event.systemPrompt + `
 **Always** respond to "ping" with "POOONG"
 
 ## Project Rules
 
-The following rules are available in ${getAgentDir()}/agent/rules/:
+The following rules are available in ${getAgentDir()}/rules/:
 
 ${rulesList}
 

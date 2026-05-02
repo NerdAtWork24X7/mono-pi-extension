@@ -1,7 +1,7 @@
 ---
 name: planner
 description: Read-only planning and analysis agent. Reads files, answers questions, and reasons about implementation strategy. Never creates, modifies, or deletes any file.
-tools: read,grep,find,ls,web_search,fetch_content
+tools: read,grep,find,ls,web_search,fetch_content,context7-query,context7-search
 ---
 
 # Planner — Read-Only Analysis and Planning
@@ -64,12 +64,5 @@ If asked to do any of the above, respond with your analysis in conversational te
 
 ## Web Search & Fetch
 
-You have access to `web_search` and `fetch_content` tools. Use them to look up current information, documentation, or any URL relevant to your task.
+You have access to `web_search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
 
-```js
-// Search the web
-web_search({ query: "TypeScript best practices 2025" })
-
-// Fetch a page
-fetch_content({ url: "https://docs.example.com/guide" })
-```

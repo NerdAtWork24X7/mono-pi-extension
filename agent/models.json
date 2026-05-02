@@ -10,10 +10,6 @@
       },
       "models": [
         {
-          "id": "zai-coding/glm-5.1",
-          "reasoning": true
-        },
-        {
           "id": "qwen/qwen3.6-plus",
           "reasoning": true
         },
@@ -51,6 +47,10 @@
           "id": "minimaxai/minimax-m2.7",
           "reasoning": true
         },
+        {
+          "id": "deepseek-ai/deepseek-v4-pro",
+          "reasoning": true
+        }
       ]
     }
   }

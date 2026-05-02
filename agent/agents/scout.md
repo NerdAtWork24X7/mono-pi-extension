@@ -145,12 +145,4 @@ Use this format:
 
 ## Web Search & Fetch
 
-You have access to `web_search` and `fetch_content` tools. Use them to look up current information, documentation, or any URL relevant to your task.
-
-```js
-// Search the web
-web_search({ query: "TypeScript best practices 2025" })
-
-// Fetch a page
-fetch_content({ url: "https://docs.example.com/guide" })
-```
+You have access to `web_search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
