@@ -1,30 +1,24 @@
 # Mono-Pi Extension
 
-A collection of pi agent definitions, extensions, teams, and configuration that turns pi into a multi-agent development environment. Drop it into `~/.pi/agent/` and get 11 specialist agents, 11 pre-built teams, 7 extensions, and a cyberpunk theme out of the box.
+A multi-agent development environment for pi. Drop it into `~/.pi/agent/` and get 11 specialist agents, 11 pre-built teams, and 7 extensions ready to go.
 
 ## Installation
-
-Clone or copy this repository into your pi agent directory:
 
 ```bash
 git clone <repo-url> ~/.pi/agent
 ```
 
-After installation, your directory structure should look like:
-
+Directory structure after install:
 ```
 ~/.pi/agent/
   agents/              # 11 agent .md files + teams.yaml
   extensions/          # 7 extensions (agent-team, pi-rules, custom-footer, etc.)
   models.json          # custom model providers (kilo, xiaomi)
   settings.json        # default config, enabled models, packages
-  pi-sub-bar-settings.json  # pi-sub-bar display & provider config
   themes/              # cyberpunk.json
   skills/              # electron-scaffold
   rules/               # system prompt rules (injected by pi-rules)
   prompts/             # custom prompt templates
-  sessions/            # session data
-  agent-sessions/      # agent session state (run counts, status)
 ```
 
 ## Quick Start
@@ -35,39 +29,49 @@ After installation, your directory structure should look like:
 4. Use `/agents-team` to switch teams, then dispatch work via the `dispatch_agent` tool
 5. Agent session state (run counts, status) is persisted in `agent-sessions/`
 
-To use an agent directly (without the team orchestrator), run pi with the agent flag:
-
+To use an agent directly (without the team orchestrator):
 ```bash
 pi --agent scout "explore the src/ directory"
 pi --agent fix "fix the login timeout bug"
-pi --agent documenter "write a README for this project"
 ```
 
-## Commands
+## Agent Teams
 
-All registered slash commands from the extensions in this repo:
+The core of this extension. Teams define groups of specialist agents that work together. The `agent-team` extension manages the orchestration.
 
-| Command | Extension | Description |
-|---------|-----------|-------------|
-| `/agents-team-toggle` | agent-team | Enable or disable agent teams. |
-| `/agents-team` | agent-team | Open team selector. Switches which team of agents is active. |
-| `/agents-list` | agent-team | List all loaded agents with status, session state, and run count. |
-| `/agents-grid <1-6>` | agent-team | Set the number of columns in the agent dashboard widget. |
-| `/whimsy` | whimsical | Open the chaos mixer: adjust message bucket weights and spinner preset interactively. |
-| `/whimsy on` | whimsical | Enable whimsical loading messages. |
-| `/whimsy off` | whimsical | Disable whimsical loading messages. |
-| `/whimsy status` | whimsical | Show current weights, spinner preset, and enabled state. |
-| `/whimsy reset` | whimsical | Reset to default weights and spinner. |
-| `/exit` | whimsical | Exit pi with a weighted goodbye message. |
-| `/bye` | whimsical | Alias for `/exit`. |
+### How It Works
+
+1. On session start, the extension scans agent directories, loads `teams.yaml`, and activates the first team
+2. The primary agent becomes a dispatcher - its tools are replaced with `dispatch_agent` (plus `askUserQuestion`)
+3. Tasks are sent to subagents via RPC to persistent `pi --mode rpc` processes in tmux panes
+4. Subagents accumulate context across dispatches - no respawn between tasks
+5. Use `/agents-team` to switch teams, `/agents-list` to see status, `/agents-restart` to restart processes
+
+### Teams
+
+| Team | Purpose | Members |
+|------|---------|---------|
+| `scout` | Quick exploration | scout |
+| `fix` | Bug fixes | fix |
+| `build` | Code implementation | scout, planner, builder |
+| `plan` | Analysis & planning | scout, planner, documenter |
+| `plan-build` | Full development | scout, conventions-analyst, planner, greenfield-web, brownfield-planner, ui-designer, builder, reviewer, wcag-auditor |
+| `info` | Information gathering | scout, browser, documenter, reviewer, negotiator, agent-builder, agent-researcher |
+| `next` | Quick tasks | scout, browser, scheduler |
+| `ads` | Ad operations | scout, negotiator, ad-strategist, sales-coach |
+| `brand` | Brand management | scout, browser, negotiator, ad-strategist, brand-strategist, personal-brand-strategist, documenter, sales-coach, linkedin-coach, brand-psychologist, storybrand |
+| `full` | Complete toolkit | scout, conventions-analyst, planner, builder, reviewer, documenter, scheduler, ad-strategist, negotiator, browser |
+| `business` | Business operations | scout, browser, regulatory-specialist, brand-strategist, financial-modeler, distribution-strategist, trade-marketer, consumer-marketer |
+
+**Note:** Some teams reference agents not included in this repo (e.g., `negotiator`, `scheduler`, `ad-strategist`, `brand-strategist`). Those work only if installed separately.
 
 ## Agents
 
-11 agent definitions included in `agents/`:
+11 specialist agents included in `agents/`:
 
 | Agent | Role | Tools | Model | Thinking |
 |-------|------|-------|-------|----------|
-| `scout` | Confidence-gated codebase exploration. Scores readiness across 5 dimensions, produces a context map. Read-only. | read, grep, find, ls, web_search, fetch_content | default | high |
+| `scout` | Codebase exploration. Scores readiness across 5 dimensions, produces context map. Read-only. | read, grep, find, ls, web_search, fetch_content | default | high |
 | `planner` | Read-only analysis and planning. Reads files, answers questions, reasons about strategy. | read, grep, find, ls, web_search, fetch_content | default | none |
 | `builder` | Implements code from a plan. Reads files, makes changes, verifies. | read, write, edit, bash, web_search, fetch_content | default | none |
 | `reviewer` | Spec-aware code review. Reads git diff, produces structured findings. Read-only. | read, grep, bash, web_search, fetch_content | default | high |
@@ -79,53 +83,56 @@ All registered slash commands from the extensions in this repo:
 | `ui-designer` | UI/UX design intelligence. Generates design systems across 13 tech stacks. | read, grep, find, ls, bash, write, web_search, fetch_content | default | none |
 | `wcag-auditor` | WCAG 2.1 accessibility auditing. Reviews code against all 78 success criteria. | read, grep, find, ls, bash, write, web_search, fetch_content | default | none |
 
-All agents use the default model unless listed otherwise. "default" means whichever model is set in `settings.json` (currently `kilo/zai-coding/glm-5.1`).
+All agents use the default model unless listed otherwise. "default" = whatever is set in `settings.json`.
 
-## Teams
+## Commands
 
-Teams are defined in `agents/teams.yaml`. The `agent-team` extension loads teams at session start and lets you switch between them. Only team members are available for dispatch.
-
-| Team | Members (local .md files only) |
-|------|-------------------------------|
-| `scout` | scout |
-| `fix` | fix |
-| `build` | scout, planner, builder |
-| `plan` | scout, planner, documenter |
-| `plan-build` | scout, conventions-analyst, planner, greenfield-web, brownfield-planner, ui-designer, builder, reviewer, wcag-auditor |
-| `info` | scout, browser, documenter, reviewer, negotiator, agent-builder, agent-researcher |
-| `next` | scout, browser, scheduler |
-| `ads` | scout, negotiator, ad-strategist, sales-coach |
-| `brand` | scout, browser, negotiator, ad-strategist, brand-strategist, personal-brand-strategist, documenter, sales-coach, linkedin-coach, brand-psychologist, storybrand |
-| `full` | scout, conventions-analyst, planner, builder, reviewer, documenter, scheduler, ad-strategist, negotiator, browser |
-| `business` | scout, browser, regulatory-specialist, brand-strategist, financial-modeler, distribution-strategist, trade-marketer, consumer-marketer |
-
-**Note:** Teams in `teams.yaml` reference agents not included in this repo (e.g., `negotiator`, `scheduler`, `ad-strategist`, `brownfield-planner`, `agent-builder`, `agent-researcher`, `brand-strategist`, `financial-modeler`, and others). Those agents work only if installed separately at `~/.pi/agent/agents/` or `.pi/agents/`. The 11 agents that ship with this repo are listed in the Agents section above.
+| Command | Description |
+|---------|-------------|
+| `/agents-team` | Open team selector. Switches which team of agents is active. |
+| `/agents-list` | List all loaded agents with status, session state, and run count. |
+| `/agents-grid <1-6>` | Set the number of columns in the agent dashboard widget. |
+| `/agents-team-toggle` | Enable or disable agent teams. |
+| `/agents-restart` | Restart all subagent processes. |
+| `/agents-autocompact` | Toggle auto-compact for subagents (on/off/status). |
+| `/whimsy` | Open the chaos mixer: adjust message bucket weights and spinner preset. |
+| `/whimsy on` | Enable whimsical loading messages. |
+| `/whimsy off` | Disable whimsical loading messages. |
+| `/whimsy status` | Show current weights, spinner preset, and enabled state. |
+| `/whimsy reset` | Reset to default weights and spinner. |
+| `/exit` | Exit pi with a weighted goodbye message. |
+| `/bye` | Alias for `/exit`. |
 
 ## Extensions
 
 ### agent-team
 
-Multi-agent orchestrator. On session start, it scans agent directories, loads `teams.yaml`, activates the first team, and replaces the primary agent's tools with `dispatch_agent` (plus `askUserQuestion`). The primary agent becomes a pure dispatcher that spawns pi subprocesses for each specialist.
+Multi-agent orchestrator. On session start, it spawns ALL subagents as persistent `pi --mode rpc` processes in tmux panes. Tasks are dispatched via RPC prompt commands and results are streamed back as JSONL events. The same process is reused for every dispatch - no respawn between tasks.
 
-Renders a live dashboard widget showing agent status (idle, running, done, error), elapsed time, and animated progress indicators.
+**Features:**
+- Persistent subagent processes (no respawn between tasks)
+- Tmux pane visualization with live dashboard
+- Auto-compact: automatically compacts subagent context when usage exceeds threshold
+- Session state persistence (run counts, status)
+- Team switching at runtime
 
-Hooks: `session_start`, `before_agent_start` (injects dynamic system prompt with agent catalog).
+**Hooks:** `session_start`, `before_agent_start` (injects dynamic system prompt with agent catalog)
 
 ### pi-rules
 
-Scans `~/.pi/agent/rules/` for `.md` files and lists them in the system prompt so the agent can load specific rules on demand. Supports subdirectories for grouped rules.
+Scans `~/.pi/agent/rules/` for `.md` files and lists them in the system prompt so the agent can load specific rules on demand.
 
-Hooks: `session_start`, `before_agent_start`.
+**Hooks:** `session_start`, `before_agent_start`
 
 ### custom-footer
 
 Renders a status bar footer showing: active model, thinking level, token I/O counts, cost, context window percentage, elapsed time, working directory, git branch, and plan mode status.
 
-Hooks: `session_start`, `session_switch`.
+**Hooks:** `session_start`, `session_switch`
 
 ### web-fetch
 
-Registers the `web-fetch` tool. Fetches a URL and extracts readable text by stripping HTML tags, scripts, and styles. Pass `raw: true` to get the full HTML response.
+Registers the `web-fetch` tool. Fetches a URL and extracts readable content (Markdown via Crawl4AI). Pass `raw: true` to get the full HTML response.
 
 ### web-search
 
@@ -151,9 +158,7 @@ A chaos loader extension. Replaces standard loading messages with weighted, humo
 | F | Pi Tips | Helpful tips for using pi |
 | G | Whimsical Verbs | "Combobulating... Skedaddling..." |
 
-Default weights: A=10, B=10, C=10, D=10, E=30, F=15, G=15 (Bollywood-heavy). Adjust via `/whimsy`. Includes 5 animated spinner presets (Sleek Orbit, Neon Pulse, Scanline, Chevron Flow, Matrix Glyph). Context-aware overrides apply for morning, late-night, and long-wait scenarios. Goodbye messages on `/exit` and `/bye` use the same weighted buckets.
-
-Settings persist in `~/.pi/agent/settings.json` under the `whimsical` key.
+Default weights: A=10, B=10, C=10, D=10, E=30, F=15, G=15 (Bollywood-heavy). Adjust via `/whimsy`. Includes 5 animated spinner presets. Context-aware overrides apply for morning, late-night, and long-wait scenarios.
 
 ## Configuration
 
@@ -161,11 +166,11 @@ Settings persist in `~/.pi/agent/settings.json` under the `whimsical` key.
 
 ```json
 {
-  "lastChangelogVersion": "0.70.2",
+  "lastChangelogVersion": "0.72.1",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
-  "defaultProvider": "kilo",
-  "defaultModel": "zai-coding/glm-5.1",
+  "defaultProvider": "zai",
+  "defaultModel": "glm-5.1",
   "defaultThinkingLevel": "low",
   "packages": [
     "npm:pi-vitals",
@@ -177,12 +182,10 @@ Settings persist in `~/.pi/agent/settings.json` under the `whimsical` key.
     "npm:@marckrenn/pi-sub-bar"
   ],
   "theme": "cyberpunk",
-  "hideThinkingBlock": false,
-  "skills": [".claude/skills", "~/.claude/skills"],
   "enabledModels": [
-    "kilo/qwen/qwen3.6-plus",
-    "kilo/zai-coding/glm-5.1",
-    "kilo/nvidia/nemotron-3-super-120b-a12b:free",
+    "openrouter/qwen/qwen3.6-plus",
+    "zai/glm-5.1",
+    "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
     "xiaomi/mimo-v2.5-pro",
     "xiaomi/mimo-v2.5"
   ]
@@ -193,26 +196,17 @@ Settings persist in `~/.pi/agent/settings.json` under the `whimsical` key.
 
 | Provider | Base URL | Models |
 |----------|----------|--------|
-| `kilo` | `https://api.kilo.ai/api/gateway` | zai-coding/glm-5.1, qwen/qwen3.6-plus, nvidia/nemotron-3-super-120b-a12b:free, google/gemma-4-26b-a4b-it:free |
+| `kilo` | `https://api.kilo.ai/api/gateway` | qwen/qwen3.6-plus, nvidia/nemotron-3-super-120b-a12b:free, google/gemma-4-26b-a4b-it:free |
 | `xiaomi` | `https://token-plan-ams.xiaomimimo.com/v1` | mimo-v2.5-pro, mimo-v2.5 |
+| `nvidia` | `https://integrate.api.nvidia.com/v1` | minimaxai/minimax-m2.7, deepseek-ai/deepseek-v4-pro |
 
-Both providers use OpenAI-compatible completions API.
-
-### pi-sub-bar-settings.json
-
-Configuration for the `@marckrenn/pi-sub-bar` package. Controls the status bar's visual layout, provider display options, usage thresholds, and keybindings. Key settings:
-
-- **Display**: bar style (`horizontal-bar`), alignment (`split`), color scheme (`base-warning-error`), character sets, padding
-- **Providers**: per-provider status toggles and windows (Anthropic, Copilot, Gemini, Antigravity, Codex, Kiro, ZAI)
-- **Keybindings**: `ctrl+alt+p` to cycle providers, `ctrl+alt+r` to toggle reset time format
+All providers use OpenAI-compatible completions API.
 
 ### Theme
 
-`themes/cyberpunk.json` provides a neon/electric/acid color scheme on a dark background. Key colors: neon magenta (`#ff00ff`), electric cyan (`#00ffff`), acid green (`#39ff14`), hot pink (`#ff3366`), amber (`#ffaa00`). Includes full syntax highlighting, diff colors, markdown rendering, and thinking-level indicators.
+`themes/cyberpunk.json` - neon/electric/acid color scheme on dark background. Key colors: neon magenta (`#ff00ff`), electric cyan (`#00ffff`), acid green (`#39ff14`), hot pink (`#ff3366`), amber (`#ffaa00`).
 
 ### NPM Packages
-
-Loaded automatically via the `packages` array in `settings.json`:
 
 | Package | Purpose |
 |---------|---------|
@@ -228,4 +222,4 @@ Loaded automatically via the `packages` array in `settings.json`:
 
 ### electron-scaffold
 
-Located at `skills/electron-scaffold/`. A complete guide for scaffolding production-ready Electron applications with security hardening, Vite + TypeScript tooling, proper IPC patterns, auto-updates, native UI elements, and optimal build configuration. The skill directory contains `SKILL.md` (instructions), `references/` (pattern examples), and `scripts/scaffold.sh` (automated setup).
+Located at `skills/electron-scaffold/`. A complete guide for scaffolding production-ready Electron applications with security hardening, Vite + TypeScript tooling, proper IPC patterns, auto-updates, native UI elements, and optimal build configuration.
