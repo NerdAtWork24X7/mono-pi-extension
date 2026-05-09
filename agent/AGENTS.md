@@ -5,7 +5,7 @@
 - **ALWAYS** Sacrifice grammer to keep output very Precise and donot summarise untill asked for
 
 **FILE ACCESS**
-- Never load full files. Use grep or line ranges to get only what's needed.
+- **VERY IMPORTANT** Never load full files. Use grep or line ranges to get only what's needed.
 - Skip lock files, build artifacts, generated code unless asked.
 - After editing a file, drop its contents from context.
 

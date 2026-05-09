@@ -487,15 +487,26 @@ export default function (pi: ExtensionAPI) {
 		clearTimers(ap);
 	}
 
-	function killAll() {
+	async function killAll() {
 		killPanes();
-		for (const ap of procs.values()) killProc(ap);
+		const exitPromises: Promise<void>[] = [];
+		for (const ap of procs.values()) {
+			const dying = ap.proc;
+			if (dying) {
+				exitPromises.push(new Promise<void>(res => {
+					const timer = setTimeout(res, 5000);
+					dying.on("close", () => { clearTimeout(timer); res(); });
+				}));
+			}
+			killProc(ap);
+		}
+		if (exitPromises.length) await Promise.all(exitPromises);
 	}
 
 	// Write system prompt to temp file (avoids shell escaping issues with multi-line prompts)
 	function writeSystemPrompt(ap: AgentProc) {
 		ap.systemPromptFile = join(sessionDir, `${agentKey(ap)}-system-prompt.txt`);
-		writeFileSync(ap.systemPromptFile, `You are working in the project cwd. ${ap.def.systemPrompt}`);
+		writeFileSync(ap.systemPromptFile, `You are working in the project cwd.\n\n ${ap.def.systemPrompt}`);
 	}
 
 	function cleanSystemPrompt(ap: AgentProc) {
@@ -843,7 +854,7 @@ export default function (pi: ExtensionAPI) {
 	// ── Team Activation ─────────────────────────────────────────────
 
 	async function activateTeam(name: string) {
-		killAll();
+		await killAll();
 		procs.clear();
 		activeTeam = name;
 		persist();
@@ -1263,7 +1274,7 @@ export default function (pi: ExtensionAPI) {
 				persist();
 
 				// Kill old sessions, reload agents, spawn new processes + tmux panes
-				killAll();
+				await killAll();
 				procs.clear();
 
 				loadAgents(ctx.cwd);
@@ -1283,7 +1294,7 @@ export default function (pi: ExtensionAPI) {
 			} else if (sub === "off") {
 				enabled = false;
 				persist();
-				killAll();
+				await killAll();
 				wCtx = ctx;
 				pi.setActiveTools(pi.getAllTools().map(t => t.name));
 				invalidate();
@@ -1302,7 +1313,7 @@ export default function (pi: ExtensionAPI) {
 			wCtx = ctx;
 			if (!enabled) { ctx.ui.notify("Agent team is disabled. Use /agents-team-toggle on", "warning"); return; }
 			ctx.ui.notify("Restarting all subagent processes...", "info");
-			killAll();
+			await killAll();
 			await spawnAll();
 			ctx.ui.notify(`Restarted ${procs.size} agents`, "success");
 			invalidate();
@@ -1356,7 +1367,8 @@ Usage: /agents-autocompact on|off`);
 			.join("\n\n");
 
 		const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
-
+                const t0 = Date.now();
+		const cwd = process.cwd();
 		return {
 			systemPrompt: `You are a dispatcher agent. You coordinate specialist agents to accomplish tasks.
 You do NOT have direct access to the codebase. You MUST delegate all work through agents using the dispatch_agent tool.
@@ -1388,7 +1400,11 @@ You CAN dispatch the same agent multiple times - it reuses the same process and 
 
 ## Agents
 
-${catalog}`,
+${catalog}
+
+Date : ${new Date(t0).toISOString().split("T")[0]}
+Current Directory : ${cwd}
+`,
 		};
 	});
 
@@ -1396,7 +1412,7 @@ ${catalog}`,
 
 	pi.on("session_start", async (_event, _ctx) => {
 		// Clean up old processes
-		killAll();
+		await killAll();
 
 		if (wCtx) { wCtx.ui.setWidget("agent-team", undefined); wInvalidate = null; }
 		wCtx = _ctx;
@@ -1451,7 +1467,7 @@ ${catalog}`,
 
 	pi.on("session_shutdown", async () => {
 		persist();
-		killAll();
+		await killAll();
 		if (healthInterval) { clearInterval(healthInterval); healthInterval = null; }
 	});
 

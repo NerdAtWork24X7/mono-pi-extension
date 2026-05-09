@@ -1,7 +1,7 @@
 ---
 name: scout
 description: Confidence-gated codebase exploration for execute-spec. Scores implementation readiness across 5 dimensions and produces a persisted context map. Read-only — never edits files.
-tools: read, grep, find, ls, web-search, web-fetch
+tools: read, grep, find, ls
 thinking: off
 ---
 
@@ -143,6 +143,3 @@ Use this format:
 - **Extend, don't replace.** When a prior context map exists, build on it.
 - **Name what you read.** The context map should reference specific files and line numbers, not abstract descriptions.
 
-## Web Search & Fetch
-
-You have access to `web-search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
