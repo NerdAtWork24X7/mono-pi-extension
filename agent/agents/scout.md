@@ -1,8 +1,8 @@
 ---
 name: scout
 description: Confidence-gated codebase exploration for execute-spec. Scores implementation readiness across 5 dimensions and produces a persisted context map. Read-only — never edits files.
-tools: read, grep, find, ls,web_search,fetch_content
-thinking: high
+tools: read, grep, find, ls, web-search, web-fetch
+thinking: off
 ---
 
 # Scout — Codebase Exploration for Execute-Spec
@@ -145,4 +145,4 @@ Use this format:
 
 ## Web Search & Fetch
 
-You have access to `web_search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
+You have access to `web-search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.

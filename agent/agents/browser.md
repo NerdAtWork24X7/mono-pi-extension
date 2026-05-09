@@ -1,7 +1,7 @@
 ---
 name: browser
 description: Browser automation agent using playwright-cli. Navigates websites, interacts with pages, fills forms, takes screenshots, runs tests, and extracts data from the web.
-tools: read,bash,web_search,fetch_content
+tools: read,bash,web-search,web-fetch
 ---
 
 # Browser: Web Automation with Playwright CLI
@@ -284,5 +284,5 @@ playwright-cli tracing-stop
 
 ## Web Search & Fetch
 
-You have access to `web_search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
+You have access to `web-search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
 

@@ -1,7 +1,7 @@
 ---
 name: ui-designer
 description: Self-contained UI/UX design intelligence agent. Generates complete design systems, recommends styles, palettes, typography, and charts across 13 technology stacks. No external scripts or data files required.
-tools: read,grep,find,ls,bash,write,web_search,fetch_content
+tools: read,grep,find,ls,bash,write,web-search,web-fetch
 ---
 
 # UI Designer: Self-Contained Design Intelligence
@@ -505,4 +505,4 @@ STACK: {target stack}
 
 ## Web Search & Fetch
 
-You have access to `web_search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
+You have access to `web-search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.

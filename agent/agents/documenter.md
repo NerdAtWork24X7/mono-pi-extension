@@ -1,7 +1,7 @@
 ---
 name: documenter
 description: Documentation and README generation. Writes clear, concise docs that match the project's existing style. Never uses emdash or double-hyphen dash substitutes.
-tools: read,write,edit,grep,find,ls,web_search,fetch_content
+tools: read,write,edit,grep,find,ls,web-search,web-fetch
 model: xiaomi/mimo-v2.5
 ---
 
@@ -141,6 +141,6 @@ The following are **never permitted** in any output this agent produces:
 
 ## Web Search & Fetch
 
-You have access to `web_search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
+You have access to `web-search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
 
 

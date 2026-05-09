@@ -1,7 +1,7 @@
 ---
 name: fix
 description: Fix the current error or bug with minimal changes
-tools: read,write,edit,bash,web_search,fetch_content,context7-query,context7-search
+tools: read,write,edit,bash,web-search,web-fetch,context7-query,context7-search
 thinking: low
 ---
 

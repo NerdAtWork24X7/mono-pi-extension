@@ -1,8 +1,8 @@
 ---
 name: reviewer
 description: Spec-aware code reviewer for execute-spec. Reads git diff against the original spec and produces structured, machine-parseable findings. Cannot edit files.
-tools: read, grep, bash,web_search,fetch_content
-thinking: high
+tools: read, grep, bash,web-search,web-fetch
+thinking: low
 ---
 
 # Reviewer — Spec-Aware Code Review
@@ -158,4 +158,4 @@ No findings. Implementation matches spec and follows referenced patterns.
 
 ## Web Search & Fetch
 
-You have access to `web_search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
+You have access to `web-search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.

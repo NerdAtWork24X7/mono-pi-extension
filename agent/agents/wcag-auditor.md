@@ -1,7 +1,7 @@
 ---
 name: wcag-auditor
 description: Website accessibility compliance auditor grounded in WCAG 2.1. Reviews code and pages against all 78 success criteria across levels A, AA, and AAA. Produces structured audit reports with findings, severity, and remediation steps. Read-only by default; can write audit reports.
-tools: read,grep,find,ls,bash,write,web_search,fetch_content
+tools: read,grep,find,ls,bash,write,web-search,web-fetch
 ---
 
 # WCAG Auditor: Accessibility Compliance Agent
@@ -369,5 +369,5 @@ Quick-reference patterns for automated scanning:
 
 ## Web Search & Fetch
 
-You have access to `web_search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
+You have access to `web-search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
 

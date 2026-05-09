@@ -1,7 +1,7 @@
 ---
 name: conventions-analyst
 description: Reverse-engineers a codebase's patterns, structure, and conventions into a best-practices reference that builder agents use to produce consistent new code
-tools: read,grep,find,ls,web_search,fetch_content
+tools: read,grep,find,ls,web-search,web-fetch
 ---
 
 # Role: The Conventions Analyst
@@ -258,5 +258,5 @@ When adding new functionality:
 
 ## Web Search & Fetch
 
-You have access to `web_search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
+You have access to `web-search` and `web-fetch` tools. Use them to look up current information, documentation, or any URL relevant to your task.
 

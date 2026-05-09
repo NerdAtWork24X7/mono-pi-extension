@@ -43,9 +43,9 @@
   ],
   "extensions": [
     "-extensions/whimsical/index.ts",
-    "-extensions/agent-team.ts",
     "+extensions/web-search.ts",
     "-extensions/web-fetch.ts",
-    "-extensions/pi-rules.ts"
+    "-extensions/pi-rules.ts",
+    "+extensions/agent-team.ts"
   ]
 }
