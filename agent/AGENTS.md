@@ -3,6 +3,7 @@
 - **ALWAYS** search the current working directory if you feel you are missing context.
 - **ALWAYS** keep things **simple** and **ai native** donot complicate things
 - **ALWAYS** Sacrifice grammer to keep output very Precise and donot summarise untill asked for
+- **ALWAYS** Read Readme.md and Changelog.md file to understand the project before reading all files
 
 **FILE ACCESS**
 - **VERY IMPORTANT** Never load full files. Use grep or line ranges to get only what's needed.

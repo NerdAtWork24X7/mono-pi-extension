@@ -1,6 +1,5 @@
 {
   "activeTeam": "build",
   "gridCols": 1,
-  "enabled": true,
-  "autocompact": true
+  "enabled": true
 }

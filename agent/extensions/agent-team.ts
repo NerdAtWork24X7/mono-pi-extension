@@ -1,31 +1,29 @@
 /**
- * Agent Team - Persistent subagent orchestrator
+ * Agent Team - Ephemeral subagent orchestrator
  *
- * Each subagent runs as a long-lived `pi --mode rpc` process in its own tmux
- * pane. The orchestrator sends tasks via RPC prompt commands and reads
- * streaming JSONL events. The SAME process is reused for every dispatch -
- * no respawn between tasks. Context accumulates within each subagent's
- * session file.
+ * Subagents are spawned on-demand per task. A fresh `pi --mode rpc` process
+ * is created for each dispatch, the task runs, and the process is killed
+ * once the result is reported back to the orchestrator. No context
+ * accumulates between dispatches — each task starts with a clean slate.
  *
  * Lifecycle:
- *   session_start  → spawn ALL subagents + create tmux panes
- *   dispatch       → send RPC prompt to existing process, await agent_end
- *   session_end    → kill ALL processes + close tmux panes
+ *   session_start  → load agent defs only (NO spawning)
+ *   dispatch       → spawn fresh process → send task → await result → kill
+ *   session_end    → cleanup any residual processes
  *
  * Commands:
  *   /agents-team          - switch active team
  *   /agents-list          - list agents + process status
  *   /agents-grid N        - set grid columns (default 1)
  *   /agents-team-toggle   - enable/disable (on/off/status)
- *   /agents-restart       - restart all subagent processes
- *   /agents-autocompact   - toggle auto-compact for subagents (on/off/status)
+ *   /agents-restart       - kill any running subagent processes
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { Text, type AutocompleteItem } from "@mariozechner/pi-tui";
-import { spawn, type ChildProcess } from "child_process";
+import { spawn, spawnSync, type ChildProcess } from "child_process";
 import {
 	readdirSync, readFileSync, existsSync, mkdirSync,
 	unlinkSync, writeFileSync, createWriteStream,
@@ -56,8 +54,11 @@ interface AgentProc {
 	task: string;
 	collectedText: string;
 	contextWindow: number;   // model context window (tokens)
-	tokensUsed: number;      // last known input token usage
+	tokensUsed: number;      // last known input token usage (excl. cache)
 	tokensOut: number;       // last known output token usage
+	cacheRead: number;       // last known cached input tokens (prompt cache hits)
+	cacheWrite: number;      // last known cache write tokens
+	cacheSavedTotal: number; // cumulative cache-read tokens across all dispatches
 	toolCount: number;
 	elapsed: number;
 	lastWork: string;
@@ -68,9 +69,8 @@ interface AgentProc {
 	resolveDispatch: ((output: string, code: number) => void) | null;
 	sessionFile: string;
 	systemPromptFile: string;
-	logFile: string;
-	logStream: WriteStream | null;
-	tmuxPaneId: string | null;
+	lastPromptHash?: string;
+	streamLineBuf: string;   // partial line buffer for streaming text box-wrapping
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -207,7 +207,6 @@ interface TeamConfig {
 	activeTeam: string;
 	gridCols: number;
 	enabled: boolean;
-	autocompact: boolean;
 }
 
 const CONFIG_FILE = "agent-team-config.json";
@@ -237,11 +236,13 @@ export default function (pi: ExtensionAPI) {
 	let sessionDir = "";
 	let logDir = "";
 	let enabled = _saved.enabled ?? true;
-	let autocompact = _saved.autocompact ?? true; // auto-compact subagents when ctx > 60%
-	const AUTOCOMPACT_THRESHOLD = 0.60;
+
 	let tmuxCwd = "";
 	let cachedExtPaths: string[] = []; // resolved once per session_start
 	let orchestratorModel = ""; // model id from orchestrator's context
+	let sharedPaneId: string | null = null; // single tmux pane for combined session log
+	let sessionLogFile = "";           // single combined log file path
+	let sessionLogStream: WriteStream | null = null; // single combined log stream
 
 	// Persist current runtime state to disk
 	function persist() {
@@ -249,7 +250,6 @@ export default function (pi: ExtensionAPI) {
 			activeTeam,
 			gridCols,
 			enabled,
-			autocompact,
 		});
 	}
 
@@ -258,12 +258,9 @@ export default function (pi: ExtensionAPI) {
 	//  Log format uses Unicode box-drawing characters, no ANSI codes.
 	//  Each major lifecycle phase (spawn, task, error) gets its own box.
 	//
-	//  ╭── Scout · model-name ──────────────────────╮
-	//  │ SPAWN  rpc model=...                        │
-	//  │ READY ✓ cmd=get_state success=true          │
-	//  ╰────────────────────────────────────────────╯
+
 	//
-	//  ╭── Task #1 ─────────────────────────────────╮
+	//  ╭── Task #1 · Scout · model-name ─────────────╮
 	//  │ Search for configuration files...           │
 	//  │                                            │
 	//  │  ┌ grep pattern=... path=...               │
@@ -272,12 +269,33 @@ export default function (pi: ExtensionAPI) {
 	//  │  (streaming text)                           │
 	//  ╰── DONE  77s · 13 tools ───────────────────╯
 
-	const LOG_WIDTH = 60; // target width for box borders
+	const MIN_logWidth = 60;
+	const MAX_logWidth = 300;
+	let logWidth = MIN_logWidth; // updated dynamically
 
-	function openLog(ap: AgentProc) {
-		ap.logFile = join(logDir, `${agentKey(ap)}.log`);
-		writeFileSync(ap.logFile, "");
-		ap.logStream = createWriteStream(ap.logFile, { flags: "a" });
+	function getTerminalWidth(): number {
+		try {
+			const r = spawnSync("tmux", ["display-message", "-p", "#{client_width}"], { encoding: "utf-8" });
+			const w = parseInt(r.stdout?.trim() || "0", 10);
+			return w > 0 ? w : 0;
+		} catch { return 0; }
+	}
+
+	function updateLogWidth() {
+		const tw = getTerminalWidth();
+		logWidth = tw > 0 ? Math.min(Math.max(tw, MIN_logWidth), MAX_logWidth) : MIN_logWidth;
+	}
+
+	function openSessionLog() {
+		if (sessionLogStream) return; // already open
+		const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+		sessionLogFile = join(logDir, `session-${ts}.log`);
+		sessionLogStream = createWriteStream(sessionLogFile, { flags: "a" });
+		sessionLogStream.on("error", (err) => console.error(`Session log write error:`, err.message));
+	}
+
+	function closeSessionLog() {
+		if (sessionLogStream) { try { sessionLogStream.end(); } catch {} sessionLogStream = null; }
 	}
 
 	/** Agent header: "Scout · model-name" */
@@ -291,16 +309,31 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Low-level write helpers ──
 
-	function log(ap: AgentProc, msg: string) {
-		if (ap.logStream) ap.logStream.write(msg + "\n");
+	function log(_ap: AgentProc, msg: string) {
+		if (sessionLogStream) sessionLogStream.write(msg + "\n");
 	}
 
-	function logRaw(ap: AgentProc, msg: string) {
-		if (ap.logStream) ap.logStream.write(msg);
+	function logRaw(_ap: AgentProc, msg: string) {
+		if (sessionLogStream) sessionLogStream.write(msg);
 	}
 
-	function closeLog(ap: AgentProc) {
-		if (ap.logStream) { try { ap.logStream.end(); } catch {} ap.logStream = null; }
+	function logStreamingText(ap: AgentProc, chunk: string) {
+		if (!sessionLogStream) return;
+		ap.streamLineBuf += chunk;
+		let idx: number;
+		while ((idx = ap.streamLineBuf.indexOf("\n")) >= 0) {
+			const line = ap.streamLineBuf.slice(0, idx);
+			ap.streamLineBuf = ap.streamLineBuf.slice(idx + 1);
+			sessionLogStream.write(boxLine(line, logWidth) + "\n");
+		}
+	}
+
+	function flushStreamBuf(ap: AgentProc) {
+		if (!sessionLogStream) return;
+		if (ap.streamLineBuf) {
+			sessionLogStream.write(boxLine(ap.streamLineBuf, logWidth) + "\n");
+			ap.streamLineBuf = "";
+		}
 	}
 
 	// ── Box drawing helpers ──
@@ -320,142 +353,99 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Structured log events ──
 
-	function logSpawnBox(ap: AgentProc, model: string) {
-		log(ap, "");
-		log(ap, hrPad(` ${agentLabel(ap)} `, LOG_WIDTH, "╭", "╮"));
-		log(ap, boxLine(`SPAWN  rpc model=${model}`, LOG_WIDTH));
-	}
-
-	function logReadyOk(ap: AgentProc, cmd: string, success: boolean) {
-		log(ap, boxLine(`READY ✓ cmd=${cmd} success=${success}`, LOG_WIDTH));
-		log(ap, hrPad("", LOG_WIDTH, "╰", "╯"));
-		log(ap, "");
-	}
 
 	function logTaskBox(ap: AgentProc, taskNum: number, task: string) {
-		log(ap, "");
-		log(ap, hrPad(` Task #${taskNum} `, LOG_WIDTH, "╭", "╮"));
-		const inner = LOG_WIDTH - 4;
-		const words = task.split(" ");
-		let line = "";
-		for (const w of words) {
-			if (line && [...line].length + 1 + [...w].length > inner) {
-				log(ap, boxLine(line, LOG_WIDTH));
-				line = w;
-			} else {
-				line = line ? line + " " + w : w;
+	        log(ap, "");
+		const t0 = Date.now();
+		log(ap, `Date: ${new Date(t0).toISOString()}`);
+        	log(ap, hrPad(` Task #${taskNum} · ${agentLabel(ap)} `, logWidth, "╭", "╮"));
+		const inner = logWidth - 4;
+		const paragraphs = task.split("\n");
+		for (const para of paragraphs) {
+			const words = para.split(" ");
+			let line = "";
+			for (const w of words) {
+				if (line && [...line].length + 1 + [...w].length > inner) {
+					log(ap, boxLine(line, logWidth));
+					line = w;
+				} else {
+					line = line ? line + " " + w : w;
+				}
 			}
+			if (line) log(ap, boxLine(line, logWidth));
 		}
-		if (line) log(ap, boxLine(line, LOG_WIDTH));
-		log(ap, "");
+
+
 	}
 
 	function logToolStart(ap: AgentProc, tool: string, detail: string) {
 		const info = detail ? ` ${detail}` : "";
-		log(ap, boxLine(`┌ ${tool}${info}`, LOG_WIDTH));
+		log(ap, boxLine(`┌ ${tool}${info}`, logWidth));
 	}
 
 	function logToolEnd(ap: AgentProc, tool: string, ok: boolean, durMs?: number) {
 		const icon = ok ? "✓" : "✗";
 		const dur = durMs ? ` (${Math.round(durMs)}ms)` : "";
-		log(ap, boxLine(`└ ${icon} ${tool}${dur}`, LOG_WIDTH));
+		log(ap, boxLine(`└ ${icon} ${tool}${dur}`, logWidth));
 	}
 
 	function logDoneBox(ap: AgentProc, elapsedSec: number, tools: number) {
-		log(ap, "");
-		log(ap, hrPad(` DONE  ${elapsedSec}s · ${tools} tools `, LOG_WIDTH, "╰", "╯"));
-		log(ap, "");
+	        log(ap,"")
+		log(ap, hrPad(` DONE  ${elapsedSec}s · ${tools} tools `, logWidth, "╰", "╯"));
 	}
 
 	function logErrorBox(ap: AgentProc, heading: string, detail: string) {
-		log(ap, "");
-		log(ap, hrPad(` ✗ ${agentLabel(ap)} `, LOG_WIDTH, "╭", "╮"));
-		log(ap, boxLine(heading, LOG_WIDTH));
-		if (detail) log(ap, boxLine(detail, LOG_WIDTH));
-		log(ap, hrPad("", LOG_WIDTH, "╰", "╯"));
-		log(ap, "");
+		log(ap, hrPad(` ✗ ${agentLabel(ap)} `, logWidth, "╭", "╮"));
+		log(ap, boxLine(heading, logWidth));
+		if (detail) log(ap, boxLine(detail, logWidth));
+		log(ap, hrPad("", logWidth, "╰", "╯"));
 	}
 
 	// ── Tmux Panes ──────────────────────────────────────────────────
 
-	function createPanes() {
-		if (!enabled) return;
-		if (!process.env.TMUX) return;
-		const list = Array.from(procs.values()).filter(ap => ap.logFile);
-		if (!list.length) return;
-
-		const cwd = (tmuxCwd || process.cwd()).replace(/'/g, "'\\''");
-		const origPane = process.env.TMUX_PANE || "";
-		const lines: string[] = [];
-		const n = list.length;
-
-		for (let i = 0; i < n; i++) {
-			const ap = list[i];
-			const label = displayName(ap.def.name).replace(/'/g, "'\\''");
-			const lf = ap.logFile.replace(/'/g, "'\\''");
-
-			if (i === 0) {
-				// First pane: vertical split from main (fixed height)
-				lines.push(`P${i}=$(tmux split-window -v -d -l 8 -c '${cwd}' -P -F '#{pane_id}')`);
-			} else if (n === 2) {
-				// 2 agents: split the first subagent pane at 50%
-				lines.push(`P${i}=$(tmux split-window -h -d -p 50 -t $P0 -c '${cwd}' -P -F '#{pane_id}')`);
-			} else {
-				// 3+ agents: split from previous pane, calculate percentage for even widths
-				// Each split takes (100/(n-i))% of the source pane's width.
-				// This ensures all n subagent panes end up equal width.
-				const pct = Math.round(100 / (n - i));
-				lines.push(`P${i}=$(tmux split-window -h -d -p ${pct} -t $P${i - 1} -c '${cwd}' -P -F '#{pane_id}')`);
-			}
-			lines.push(`tmux select-pane -t $P${i} -T '${label}'`);
-			lines.push(`tmux send-keys -t $P${i} 'tail -n +1 -f ${lf}' Enter`);
-			lines.push(`echo $P${i}`);
-		}
-
-		if (origPane) lines.push(`tmux select-pane -t ${origPane}`);
-		lines.push("tmux select-layout -E");
-
-		const child = spawn("sh", ["-c", lines.join("\n")], { stdio: ["pipe", "pipe", "pipe"] });
-		let out = "";
-		child.stdout.setEncoding("utf-8");
-		child.stdout.on("data", (d: string) => { out += d; });
-		child.on("close", () => {
-			const ids = out.trim().split("\n").filter(Boolean);
-			for (let i = 0; i < ids.length && i < list.length; i++) {
-				list[i].tmuxPaneId = ids[i].trim();
-			}
-		});
+	function resizeSharedPane() {
+		if (!sharedPaneId || !/^%\d+$/.test(sharedPaneId)) return;
+		const tw = getTerminalWidth();
+		if (tw <= 0) return;
+		try {
+			spawn("tmux", ["resize-pane", "-t", sharedPaneId, "-x", String(tw)], { stdio: "ignore" });
+		} catch {}
 	}
 
-	function createSinglePane(ap: AgentProc) {
+	function createSessionPane() {
 		if (!enabled) return;
-		if (!process.env.TMUX || !ap.logFile || ap.tmuxPaneId) return;
+		if (!process.env.TMUX || !sessionLogFile) return;
+		if (sharedPaneId) return; // pane already exists
+
 		const cwd = (tmuxCwd || process.cwd()).replace(/'/g, "'\\''");
-		const label = displayName(ap.def.name).replace(/'/g, "'\\''");
-		const lf = ap.logFile.replace(/'/g, "'\\''");
+		const lf = sessionLogFile.replace(/'/g, "'\\''");
 		const origPane = process.env.TMUX_PANE || "";
+		if (origPane && !/^%\d+$/.test(origPane)) return;
+
+		const tw = getTerminalWidth();
+		const widthArg = tw > 0 ? `-x ${tw}` : "";
 		const script = [
 			`P=$(tmux split-window -v -d -l 8 -c '${cwd}' -P -F '#{pane_id}')`,
-			`tmux select-pane -t $P -T '${label}'`,
+			`tmux select-pane -t $P -T 'Agent Team Log'`,
+			widthArg ? `tmux resize-pane -t $P ${widthArg}` : "true",
 			`tmux send-keys -t $P 'tail -n +1 -f ${lf}' Enter`,
 			`echo $P`,
 			`tmux select-pane -t ${origPane}`,
-		].join("\n");
+		].filter(Boolean).join("\n");
 		const ch = spawn("sh", ["-c", script], { stdio: ["pipe", "pipe", "pipe"] });
 		let pid = "";
 		ch.stdout.setEncoding("utf-8");
 		ch.stdout.on("data", (d: string) => { pid += d; });
-		ch.on("close", () => { const id = pid.trim(); if (id) ap.tmuxPaneId = id; });
+		ch.on("close", () => { const id = pid.trim(); if (id) sharedPaneId = id; });
 	}
 
 	function killPanes() {
-		const ids: string[] = [];
-		for (const ap of procs.values()) {
-			closeLog(ap);
-			if (ap.tmuxPaneId) { ids.push(ap.tmuxPaneId); ap.tmuxPaneId = null; }
+		closeSessionLog();
+		if (sharedPaneId && /^%\d+$/.test(sharedPaneId)) {
+			const id = sharedPaneId;
+			sharedPaneId = null;
+			spawn("tmux", ["kill-pane", "-t", id], { stdio: "ignore" });
 		}
-		if (!ids.length) return;
-		spawn("sh", ["-c", ids.map(id => `tmux kill-pane -t ${id}`).join("\n")], { stdio: "ignore" });
 	}
 
 	// ── Spawn / Kill ────────────────────────────────────────────────
@@ -479,7 +469,6 @@ export default function (pi: ExtensionAPI) {
 			} catch {}
 			ap.proc = null;
 		}
-		closeLog(ap);
 		cleanSystemPrompt(ap);
 		ap.status = "dead";
 		ap.ready = false;
@@ -487,8 +476,8 @@ export default function (pi: ExtensionAPI) {
 		clearTimers(ap);
 	}
 
-	async function killAll() {
-		killPanes();
+	async function killAll(killPanesToo = false) {
+		if (killPanesToo) killPanes();
 		const exitPromises: Promise<void>[] = [];
 		for (const ap of procs.values()) {
 			const dying = ap.proc;
@@ -505,8 +494,11 @@ export default function (pi: ExtensionAPI) {
 
 	// Write system prompt to temp file (avoids shell escaping issues with multi-line prompts)
 	function writeSystemPrompt(ap: AgentProc) {
+		const content = `You are working in the project cwd.\n\n ${ap.def.systemPrompt}`;
+		if (ap.lastPromptHash === content) return; // skip if unchanged
+		ap.lastPromptHash = content;
 		ap.systemPromptFile = join(sessionDir, `${agentKey(ap)}-system-prompt.txt`);
-		writeFileSync(ap.systemPromptFile, `You are working in the project cwd.\n\n ${ap.def.systemPrompt}`);
+		writeFileSync(ap.systemPromptFile, content);
 	}
 
 	function cleanSystemPrompt(ap: AgentProc) {
@@ -524,6 +516,7 @@ export default function (pi: ExtensionAPI) {
 		ap.readyResolve = null;
 		ap.collectedText = "";
 		ap.stdoutBuf = "";
+		ap.streamLineBuf = "";
 		ap.resolveDispatch = null;
 		ap.toolCount = 0;
 		ap.task = "";
@@ -555,7 +548,6 @@ export default function (pi: ExtensionAPI) {
 			"--session", ap.sessionFile,
 		];
 
-		logSpawnBox(ap, model);
 		const proc = spawn(bin, args, {
 			stdio: ["pipe", "pipe", "pipe"],
 			env: { ...process.env },
@@ -567,6 +559,7 @@ export default function (pi: ExtensionAPI) {
 		// Read JSONL events from stdout
 		proc.stdout!.setEncoding("utf-8");
 		proc.stdout!.on("data", (chunk: string) => {
+			if (ap.proc !== proc) return; // stale process guard
 			ap.stdoutBuf += chunk;
 			while (true) {
 				const nl = ap.stdoutBuf.indexOf("\n");
@@ -580,9 +573,13 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		proc.stderr!.setEncoding("utf-8");
-		proc.stderr!.on("data", (d: string) => logRaw(ap, d));
+		proc.stderr!.on("data", (d: string) => {
+			if (ap.proc !== proc) return; // stale process guard
+			for (const line of d.split("\n")) if (line.trim()) log(ap, line);
+		});
 
 		proc.on("error", (err) => {
+			if (ap.proc !== proc) return; // stale process guard
 			logErrorBox(ap, "PROCESS ERROR", err.message);
 			ap.status = "error";
 			ap.lastWork = `Error: ${err.message}`;
@@ -591,8 +588,9 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		proc.on("close", (code) => {
+			if (ap.proc !== proc) return; // stale process guard
 			logErrorBox(ap, `PROCESS EXIT code=${code}`, "");
-			resolveIfPending(ap, `Process exited with code ${code}`, code ?? 1);
+			resolveIfPending(ap, `Process exited unexpectedly with code ${code}`, 1);
 			ap.proc = null;
 			ap.status = "dead";
 			ap.ready = false;
@@ -601,7 +599,6 @@ export default function (pi: ExtensionAPI) {
 		});
 
 		// ── Readiness probe: send get_state, wait for response ──
-		log(ap, boxLine("Waiting for RPC readiness...", LOG_WIDTH));
 
 		return new Promise<boolean>((resolve) => {
 			// Give process 15s to become ready
@@ -609,7 +606,7 @@ export default function (pi: ExtensionAPI) {
 				if (!ap.ready) {
 					logErrorBox(ap, "READY TIMEOUT", `status=${ap.status}`);
 					ap.status = ap.proc ? "idle" : "dead";
-					ap.ready = true;
+					ap.ready = ap.proc != null; // only ready if process is alive
 					resolve(ap.proc != null);
 				}
 			}, 15_000);
@@ -629,15 +626,7 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	async function spawnAll() {
-		// Spawn agents sequentially - avoids resource contention when
-		// multiple `pi --mode rpc` processes fork simultaneously.
-		for (const ap of procs.values()) {
-			openLog(ap);
-			await spawnProc(ap);
-		}
-		createPanes();
-	}
+
 
 	// ── Resolve helper ──────────────────────────────────────────────
 
@@ -649,20 +638,7 @@ export default function (pi: ExtensionAPI) {
 		resolve(output, code);
 	}
 
-	/** Send compact RPC command to subagent */
-	function triggerCompact(ap: AgentProc, pct: number) {
-		if (!ap.proc?.stdin.writable) return;
-		const pctStr = Math.round(pct * 100);
-		log(ap, boxLine(`AUTOCOMPACT ctx=${pctStr}% > ${Math.round(AUTOCOMPACT_THRESHOLD * 100)}% — sending compact`, LOG_WIDTH));
-		if (wCtx) {
-			wCtx.ui.notify(tag(ap, `autocompact ctx=${pctStr}%`), "info");
-		}
-		try {
-			ap.proc.stdin.write(JSON.stringify({ type: "compact" }) + "\n");
-		} catch {
-			log(ap, boxLine(`AUTOCOMPACT failed to write`, LOG_WIDTH));
-		}
-	}
+
 
 	// ── RPC Event Handling ──────────────────────────────────────────
 
@@ -676,7 +652,6 @@ export default function (pi: ExtensionAPI) {
 			if (!ap.ready) {
 				ap.ready = true;
 				ap.status = "idle";
-				logReadyOk(ap, ev.command, ev.success);
 				// Capture context window from get_state response
 				if (ev.success && ev.data?.model?.contextWindow) {
 					ap.contextWindow = ev.data.model.contextWindow;
@@ -703,7 +678,7 @@ export default function (pi: ExtensionAPI) {
 			if (delta?.type === "text_delta") {
 				const chunk = delta.delta || "";
 				ap.collectedText += chunk;
-				logRaw(ap, chunk);
+				logStreamingText(ap, chunk);
 				// Track last work line - scan only last portion
 				const lastNl = chunk.lastIndexOf("\n");
 				const tail = lastNl >= 0 ? chunk.slice(lastNl + 1) : chunk;
@@ -716,10 +691,19 @@ export default function (pi: ExtensionAPI) {
 		if (ev.type === "message_end" && ev.message?.role === "assistant") {
 			const u = ev.message.usage;
 			if (u) {
-				ap.tokensUsed = u.input || 0;
 				ap.tokensOut = u.output || 0;
-				if (u.totalTokens) ap.tokensUsed = u.totalTokens - ap.tokensOut;
+				ap.cacheRead = u.cacheRead || 0;
+				ap.cacheWrite = u.cacheWrite || 0;
+				ap.cacheSavedTotal += ap.cacheRead;
+				// input excludes cache tokens — use directly for real cost
+				ap.tokensUsed = u.input || 0;
+				if (u.totalTokens) {
+					// Fallback: derive input if provider didn't split it
+					const derived = u.totalTokens - ap.tokensOut - ap.cacheRead - ap.cacheWrite;
+					ap.tokensUsed = u.input || (derived > 0 ? derived : u.totalTokens - ap.tokensOut);
+				}
 			}
+			flushStreamBuf(ap);
 			invalidate();
 			return;
 		}
@@ -748,6 +732,7 @@ export default function (pi: ExtensionAPI) {
 		// Agent done - resolve the pending dispatch
 		if (ev.type === "agent_end") {
 			clearInterval(ap.timer);
+			flushStreamBuf(ap);
 			const full = ap.collectedText;
 			logDoneBox(ap, Math.round(ap.elapsed / 1000), ap.toolCount);
 			ap.status = "done";
@@ -774,38 +759,30 @@ export default function (pi: ExtensionAPI) {
 
 			resolveIfPending(ap, full, 0);
 
-			// Autocompact: if context usage > threshold, send compact command
-			if (autocompact && ap.contextWindow > 0 && ap.tokensUsed > 0) {
-				const pct = ap.tokensUsed / ap.contextWindow;
-				if (pct > AUTOCOMPACT_THRESHOLD) {
-					triggerCompact(ap, pct);
-				}
-			}
-
 			return;
 		}
 
-		// Compaction events (from autocompact or manual)
+		// Compaction events (manual)
 		if (ev.type === "compaction_start") {
-			log(ap, boxLine(`COMPACT start (reason: ${ev.reason || "auto"})`, LOG_WIDTH));
+			log(ap, boxLine(`COMPACT start (reason: ${ev.reason || "auto"})`, logWidth));
 			return;
 		}
 		if (ev.type === "compaction_end") {
 			if (ev.aborted) {
-				log(ap, boxLine(`COMPACT aborted`, LOG_WIDTH));
+				log(ap, boxLine(`COMPACT aborted`, logWidth));
 			} else {
-				log(ap, boxLine(`COMPACT done (${ev.reason || "auto"})`, LOG_WIDTH));
+				log(ap, boxLine(`COMPACT done (${ev.reason || "auto"})`, logWidth));
 			}
 			return;
 		}
 
 		// Auto-retry events: log for visibility (dispatch already resolved on agent_end)
 		if (ev.type === "auto_retry_start") {
-			log(ap, boxLine(`AUTO-RETRY attempt ${ev.attempt}/${ev.maxAttempts} (${ev.delayMs}ms)`, LOG_WIDTH));
+			log(ap, boxLine(`AUTO-RETRY attempt ${ev.attempt}/${ev.maxAttempts} (${ev.delayMs}ms)`, logWidth));
 			return;
 		}
 		if (ev.type === "auto_retry_end") {
-			log(ap, boxLine(`AUTO-RETRY ${ev.success ? "succeeded" : "failed"} (attempt ${ev.attempt})`, LOG_WIDTH));
+			log(ap, boxLine(`AUTO-RETRY ${ev.success ? "succeeded" : "failed"} (attempt ${ev.attempt})`, logWidth));
 			return;
 		}
 
@@ -842,6 +819,7 @@ export default function (pi: ExtensionAPI) {
 		logDir = join(cwd, ".pi", "agent-logs");
 		mkdirSync(sessionDir, { recursive: true });
 		mkdirSync(logDir, { recursive: true });
+		updateLogWidth();
 
 		allDefs = scanAgents(cwd);
 		cachedExtPaths = scanExtensionPaths(cwd);
@@ -876,6 +854,9 @@ export default function (pi: ExtensionAPI) {
 				contextWindow: 0,
 				tokensUsed: 0,
 				tokensOut: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cacheSavedTotal: 0,
 				toolCount: 0,
 				elapsed: 0,
 				lastWork: "",
@@ -885,13 +866,9 @@ export default function (pi: ExtensionAPI) {
 				systemPromptFile: "",
 				resolveDispatch: null,
 				sessionFile: "",
-				logFile: "",
-				logStream: null,
-				tmuxPaneId: null,
+				streamLineBuf: "",
 			});
 		}
-
-		await spawnAll();
 	}
 
 	// ── Dispatch ────────────────────────────────────────────────────
@@ -899,6 +876,7 @@ export default function (pi: ExtensionAPI) {
 	const DISPATCH_TIMEOUT = 600_000; // 10 minutes
 
 	async function dispatch(agentName: string, task: string): Promise<{ output: string; code: number; elapsed: number }> {
+		updateLogWidth();
 		const ap = procs.get(agentName.toLowerCase());
 		if (!ap) {
 			const available = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
@@ -908,35 +886,26 @@ export default function (pi: ExtensionAPI) {
 			});
 		}
 
-		if (ap.status === "running" || ap.status === "starting") {
-			// Check if process is actually dead (zombie detection)
-			if (ap.proc && (ap.proc.exitCode !== null || ap.proc.signalCode !== null)) {
-				// Process is dead but close event may not have fired
-				killProc(ap, true);
-				log(ap, boxLine("Detected zombie process - force-killed", LOG_WIDTH));
-			} else {
-				return { output: `${displayName(ap.def.name)} is ${ap.status}. Wait for it to finish.`, code: 1, elapsed: 0 };
-			}
+		// Kill ALL leftover processes from any previous dispatch
+		for (const other of procs.values()) {
+			if (other.proc) killProc(other, true);
 		}
 
-		// If status is "error" from a previous timeout, process may still be alive - kill it
-		if (ap.status === "error" && ap.proc) {
-			log(ap, boxLine("Previous error state - killing stale process", LOG_WIDTH));
-			killProc(ap, true);
+		// Wipe session file BEFORE spawn to guarantee clean slate
+		if (ap.sessionFile && existsSync(ap.sessionFile)) {
+			try { unlinkSync(ap.sessionFile); } catch {}
 		}
 
-		// Auto-respawn only if process actually died
-		if (!ap.proc || ap.status === "dead" || ap.status === "error") {
-			openLog(ap);
-			const started = await spawnProc(ap);
-			if (!started) {
-				return { output: `${displayName(ap.def.name)} failed to start.`, code: 1, elapsed: 0 };
-			}
-			// Re-create tmux pane for this agent
-			createSinglePane(ap);
+		// Also wipe system prompt cache to avoid leaking between agents
+		ap.lastPromptHash = undefined;
+
+		// Spawn fresh process for this task
+		ap.status = "dead";
+		const started = await spawnProc(ap);
+		if (!started) {
+			return { output: `${displayName(ap.def.name)} failed to start.`, code: 1, elapsed: 0 };
 		}
 
-		// spawnProc already waits for readiness - just verify
 		if (!ap.ready || !ap.proc) {
 			return { output: `${displayName(ap.def.name)} not ready.`, code: 1, elapsed: 0 };
 		}
@@ -948,6 +917,8 @@ export default function (pi: ExtensionAPI) {
 		ap.elapsed = 0;
 		ap.tokensUsed = 0;
 		ap.tokensOut = 0;
+		ap.cacheRead = 0;
+		ap.cacheWrite = 0;
 		ap.lastWork = "";
 		ap.runCount++;
 		invalidate();
@@ -962,7 +933,13 @@ export default function (pi: ExtensionAPI) {
 
 		const cmd = JSON.stringify({ type: "prompt", message: task }) + "\n";
 		try {
-			ap.proc!.stdin.write(cmd);
+			if (!ap.proc?.stdin?.writable) {
+				clearInterval(ap.timer);
+				ap.status = "error";
+				invalidate();
+				return { output: `Process died before task could be sent`, code: 1, elapsed: 0 };
+			}
+			ap.proc.stdin.write(cmd);
 		} catch (err: any) {
 			clearInterval(ap.timer);
 			ap.status = "error";
@@ -970,22 +947,44 @@ export default function (pi: ExtensionAPI) {
 			return { output: `Write error: ${err.message}`, code: 1, elapsed: 0 };
 		}
 
-		return new Promise<{ output: string; code: number; elapsed: number }>((resolve) => {
-			// Timeout safety net - KILL the stuck process so it respawns cleanly
+		const result = await new Promise<{ output: string; code: number; elapsed: number }>((resolve) => {
+			// Timeout safety net - KILL the stuck process so it doesn't leak
 			ap.dispatchTimeout = setTimeout(() => {
 				logErrorBox(ap, "TIMEOUT", `after ${Math.round(DISPATCH_TIMEOUT / 1000)}s - force-killing process`);
 				ap.lastWork = "Timed out";
-				killProc(ap, true);
+				// Resolve FIRST with the timeout message before killProc overwrites it
 				resolveIfPending(ap, `Dispatch timed out after ${Math.round(DISPATCH_TIMEOUT / 1000)}s`, 1);
+				killProc(ap, true);
 				if (wCtx) wCtx.ui.notify(tag(ap, `TIMEOUT (${Math.round(DISPATCH_TIMEOUT / 1000)}s) — killed`), "error");
 				invalidate();
 			}, DISPATCH_TIMEOUT);
 
 			ap.resolveDispatch = (output, code) => {
-				// timeout cleanup handled by resolveIfPending - don't double-clear
+				// Clear timeout immediately to prevent race with normal completion
+				if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
 				resolve({ output, code, elapsed: ap.elapsed });
 			};
 		});
+
+		// Write separator to combined session log
+		if (sessionLogStream) {
+			sessionLogStream.write("\n" + "═".repeat(logWidth) + "\n\n");
+		}
+
+		// Task complete — kill the subagent process but KEEP the tmux pane alive
+		// so the user can scroll back and see what the agent did.
+		// The pane will be reused on the next dispatch (same agent = same pane).
+		killProc(ap, true);
+
+		// Wipe session file so next dispatch starts fresh
+		if (ap.sessionFile && existsSync(ap.sessionFile)) {
+			try { unlinkSync(ap.sessionFile); } catch {}
+		}
+
+		ap.status = "dead";
+		invalidate();
+
+		return result;
 	}
 
 	// ── Widget ──────────────────────────────────────────────────────
@@ -1042,7 +1041,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function renderCard(ap: AgentProc, w: number, theme: any): string[] {
-		const trunc = (s: string, n: number) => s.length > n ? s.slice(0, n - 1) + "..." : s;
+		const trunc = (s: string, n: number) => [...s].length > n ? [...s].slice(0, n - 1).join("") + "..." : s;
 
 		const statusColor = ap.status === "idle" ? "dim"
 			: ap.status === "starting" ? "warning"
@@ -1051,13 +1050,13 @@ export default function (pi: ExtensionAPI) {
 		const statusIcon = ap.status === "idle" ? "○"
 			: ap.status === "starting" ? "◐"
 			: ap.status === "running" ? "●"
-			: ap.status === "done" ? "✓" : "✗";
+			: ap.status === "done" ? "✓" : "";
 
 		const name = displayName(ap.def.name);
 		const sm = shortModel(ap.model);
 		const modelStr = sm ? ` (${sm})` : "";
 		const timeStr = (ap.status === "running" || ap.status === "starting") ? ` ${Math.round(ap.elapsed / 1000)}s` : "";
-		const plug = ap.proc ? "🔌" : "💀";
+		const plug = ap.status === "running" ? "\u{1F50C}" : ap.status === "dead" ? "\u{1F916}" : "\u{1F50C}";
 		const statusStr = `${plug}${statusIcon}${timeStr}`;
 
 		const maxLabel = w - statusStr.length - 2;
@@ -1080,15 +1079,21 @@ export default function (pi: ExtensionAPI) {
 			const barColor = pct > 90 ? "error" : pct > 70 ? "warning" : "dim";
 
 			const fmtTok = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
-			const tokenStr = `ctx ${fmtTok(ap.tokensUsed)}/${fmtTok(ap.contextWindow)}`;
-			const outStr = `out ${fmtTok(ap.tokensOut)}`;
-			const pctStr = `${pct}%`;
-
+			const tokenStr = `In=${fmtTok(ap.tokensUsed)}  Out=${fmtTok(ap.tokensOut)}`;
+			const pctStr = ` Ctx=${pct}%/${fmtTok(ap.contextWindow)}` ;
+			
+			// Cache stats line — show cache hits when present
+		        const cacheHit = ap.cacheRead > 0 ? `Hit=${fmtTok(ap.cacheRead)}` : "";
+			const total = ap.cacheSavedTotal > 0 ? `Σ=${fmtTok(ap.cacheSavedTotal)}` : "";
+			const sep = cacheHit && total ? " " : "";
+			const cacheLabel = `Cache: ${cacheHit}${sep}${total}`;
+			
 			const line2 = theme.fg(barColor, bar) + " " +
 				theme.fg("dim", tokenStr) + " " +
-				theme.fg(barColor, pctStr) + " " +
-				theme.fg("dim", outStr);
+				theme.fg(barColor, pctStr) + " " + theme.fg("success", "  \u{1F4BE} " + cacheLabel);		
 			lines.push(line2);
+
+	
 		}
 
 		return lines;
@@ -1114,13 +1119,13 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "dispatch_agent",
 		label: "Dispatch Agent",
-		description: "Dispatch a task to a persistent specialist agent. The agent process stays alive across dispatches - context accumulates. See system prompt for available agent names.",
+		description: "Dispatch a task to a specialist agent. A fresh process is spawned per task — no context carries over between dispatches. Include all necessary context in the task description.",
 		parameters: Type.Object({
 			agent: Type.String({ description: "Agent name (case-insensitive)" }),
 			task: Type.String({ description: "Task description for the agent" }),
 		}),
 
-		async execute(_id, params, _sig, onUpdate, _ctx) {
+		async execute(_id, params, signal, onUpdate, _ctx) {
 			const { agent, task } = params as { agent: string; task: string };
 			if (!enabled) return {
 				content: [{ type: "text", text: "Agent team is disabled. /agents-team-toggle on" }],
@@ -1134,6 +1139,22 @@ export default function (pi: ExtensionAPI) {
 					content: [{ type: "text", text: `[${agent}][${modelTag}] - dispatching...` }],
 					details: { agent, task, status: "dispatching" },
 				});
+
+				// Listen for ESC / abort signal — kill running subagent
+				if (signal) {
+					signal.addEventListener("abort", () => {
+						const ap = procs.get(agent.toLowerCase());
+						if (ap && (ap.status === "running" || ap.status === "starting")) {
+							logErrorBox(ap, "ABORTED", "User pressed ESC");
+							killProc(ap, true);
+							if (ap.sessionFile && existsSync(ap.sessionFile)) {
+								try { unlinkSync(ap.sessionFile); } catch {}
+							}
+							ap.status = "dead";
+							invalidate();
+						}
+					});
+				}
 
 				const r = await dispatch(agent, task);
 
@@ -1152,7 +1173,7 @@ export default function (pi: ExtensionAPI) {
 					content: [{ type: "text", text: `${summary}\n\n${truncated}` }],
 					// If truncated, store the truncated version as fullOutput to avoid
 					// holding a 2x copy (truncated + original) in memory
-					details: { agent, task, status, elapsed: r.elapsed, exitCode: r.code, fullOutput: isLarge ? truncated : r.output },
+					details: { agent, task, status, elapsed: r.elapsed, exitCode: r.code, fullOutput: truncated },
 				};
 			} catch (err: any) {
 				if (wCtx) wCtx.ui.notify(`[${agent}] Error: ${err?.message || err}`, "error");
@@ -1273,7 +1294,6 @@ export default function (pi: ExtensionAPI) {
 				enabled = true;
 				persist();
 
-				// Kill old sessions, reload agents, spawn new processes + tmux panes
 				await killAll();
 				procs.clear();
 
@@ -1286,11 +1306,14 @@ export default function (pi: ExtensionAPI) {
 					await activateTeam(teamToActivate);
 				}
 
+				openSessionLog();
+				createSessionPane();
+
 				pi.setActiveTools(["dispatch_agent", "askUserQuestion"]);
 				invalidate();
 				const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
 				ctx.ui.setStatus("agent-team", `Team: ${activeTeam} (${procs.size})`);
-				await ctx.ui.notify(`✓ Agent team enabled — Team: ${activeTeam} (${members})`);
+				await ctx.ui.notify(`✓ Agent team enabled — Team: ${activeTeam} (${members}) — agents spawn on-demand`);
 			} else if (sub === "off") {
 				enabled = false;
 				persist();
@@ -1308,37 +1331,18 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("agents-restart", {
-		description: "Restart all subagent processes",
+		description: "Kill any running subagent processes",
 		handler: async (_args, ctx) => {
 			wCtx = ctx;
 			if (!enabled) { ctx.ui.notify("Agent team is disabled. Use /agents-team-toggle on", "warning"); return; }
-			ctx.ui.notify("Restarting all subagent processes...", "info");
+			ctx.ui.notify("Killing all running subagent processes...", "info");
 			await killAll();
-			await spawnAll();
-			ctx.ui.notify(`Restarted ${procs.size} agents`, "success");
+			ctx.ui.notify("All subagent processes killed", "success");
 			invalidate();
 		},
 	});
 
-	pi.registerCommand("agents-autocompact", {
-		description: "Toggle auto-compact subagents when ctx > 60% (on/off/status)",
-		handler: async (args, ctx) => {
-			const sub = (args.trim().split(/\s+/)[0] ?? "").toLowerCase();
-			if (sub === "on") {
-				autocompact = true;
-				persist();
-				await ctx.ui.notify("✓ Subagent autocompact enabled (triggers when ctx > 60%)");
-			} else if (sub === "off") {
-				autocompact = false;
-				persist();
-				await ctx.ui.notify("✓ Subagent autocompact disabled");
-			} else {
-				const status = autocompact ? "enabled" : "disabled";
-				await ctx.ui.notify(`Subagent autocompact is ${status} (threshold: ${Math.round(AUTOCOMPACT_THRESHOLD * 100)}%)
-Usage: /agents-autocompact on|off`);
-			}
-		},
-	});
+
 
 	// ── System Prompt Override ──────────────────────────────────────
 
@@ -1370,40 +1374,19 @@ Usage: /agents-autocompact on|off`);
                 const t0 = Date.now();
 		const cwd = process.cwd();
 		return {
-			systemPrompt: `You are a dispatcher agent. You coordinate specialist agents to accomplish tasks.
-You do NOT have direct access to the codebase. You MUST delegate all work through agents using the dispatch_agent tool.
-
-## Active Team: ${activeTeam}
-Members: ${members}
-
-All subagents are **persistent processes** - they stay alive for the entire session.
-Each agent retains full conversation context from previous dispatches.
-You CAN dispatch the same agent multiple times - it reuses the same process and remembers prior context.
-
-## How to Work
-- Analyze the user's request and break it into clear sub-tasks
-- Dispatch tasks to the right agent using dispatch_agent
-- Review results and dispatch follow-up tasks if needed
-- You can dispatch the same agent multiple times with different tasks
-- Keep tasks focused - one clear objective per dispatch
+			systemPrompt: `You are a dispatcher. Delegate ALL work via dispatch_agent. No direct file access.
+Team: ${activeTeam} | Members: ${members}
+Each dispatch is fresh — include ALL context. One dispatch at a time. On error: notify user + suggest fix.
 - Only ONE agent can be dispatched at a time
 
 ## Rules
 - NEVER try to read, write, or execute code directly - you have no such tools
 - ALWAYS use dispatch_agent to get work done
-- Summarize the outcome for the user
-- **Error handling**: If dispatch_agent returns an error (code !== 0), you MUST:
-  1. Immediately notify the user with the agent name and error details
-  2. Explain what went wrong in plain language
-  3. Suggest a recovery action (retry, different agent, manual fix)
-  4. Do NOT silently continue as if nothing happened
-
 ## Agents
 
 ${catalog}
 
-Date : ${new Date(t0).toISOString().split("T")[0]}
-Current Directory : ${cwd}
+Date: ${new Date(t0).toISOString().split("T")[0]} | CWD: ${cwd}
 `,
 		};
 	});
@@ -1411,7 +1394,7 @@ Current Directory : ${cwd}
 	// ── Session Start ───────────────────────────────────────────────
 
 	pi.on("session_start", async (_event, _ctx) => {
-		// Clean up old processes
+		// Clean up any leftover processes
 		await killAll();
 
 		if (wCtx) { wCtx.ui.setWidget("agent-team", undefined); wInvalidate = null; }
@@ -1419,19 +1402,12 @@ Current Directory : ${cwd}
 		const m0 = _ctx.model;
 		orchestratorModel = m0 ? (m0.provider ? `${m0.provider}/${m0.id}` : m0.id) : "";
 
-		// Wipe old session files
-		if (existsSync(sessionDir)) {
-			for (const f of readdirSync(sessionDir)) {
-				if (f.endsWith(".json")) try { unlinkSync(join(sessionDir, f)); } catch {}
-			}
-		}
-
 		loadAgents(_ctx.cwd);
 		tmuxCwd = _ctx.cwd;
 
+		initWidget();
+
 		if (!enabled) {
-			// Always show widget even when disabled
-			initWidget();
 			_ctx.ui.notify(
 				"Agent team is disabled. Use /agents-team-toggle on to enable.",
 				"info",
@@ -1439,11 +1415,15 @@ Current Directory : ${cwd}
 			return;
 		}
 
-		// Restore saved team or default to first
+		// Restore saved team or default to first — NO spawning
 		const names = Object.keys(teams);
 		const savedTeam = _saved.activeTeam || "";
 		const restoreTeam = (savedTeam && names.includes(savedTeam)) ? savedTeam : (names[0] || "");
 		if (restoreTeam) await activateTeam(restoreTeam);
+
+		// Open combined session log + create single tmux pane
+		openSessionLog();
+		createSessionPane();
 
 		// Lock to dispatcher-only tools
 		pi.setActiveTools(["dispatch_agent", "askUserQuestion"]);
@@ -1451,13 +1431,11 @@ Current Directory : ${cwd}
 		_ctx.ui.setStatus("agent-team", `Team: ${activeTeam} (${procs.size})`);
 		const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
 		_ctx.ui.notify(
-			`Team: ${activeTeam} (${members})\n` +
-			`All ${procs.size} subagent processes spawned (persistent RPC)\n\n` +
+			`Team: ${activeTeam} (${members}) — agents spawn on-demand per task\n\n` +
 			`/agents-team          Select a team\n` +
 			`/agents-list          List agents + process status\n` +
 			`/agents-grid <1-6>    Set grid columns\n` +
-			`/agents-restart       Restart all subagent processes\n` +
-			`/agents-autocompact   Toggle auto-compact (on/off/status)`,
+			`/agents-restart       Kill any running subagent processes`,
 			"info",
 		);
 		invalidate();
@@ -1467,36 +1445,8 @@ Current Directory : ${cwd}
 
 	pi.on("session_shutdown", async () => {
 		persist();
-		await killAll();
-		if (healthInterval) { clearInterval(healthInterval); healthInterval = null; }
+		await killAll(true);
 	});
 
-	// Periodic animation refresh + health check
-	// Tracked so we can clean up on session shutdown
-	let healthInterval: ReturnType<typeof setInterval> | null = null;
 
-	function startHealthCheck() {
-		if (healthInterval) return; // prevent duplicates
-		healthInterval = setInterval(() => {
-			if (!enabled) return;
-			animFrame++;
-			// Health check: detect zombie/dead processes that didn't trigger close event
-			for (const ap of procs.values()) {
-				if (ap.proc && (ap.status === "idle" || ap.status === "done")) {
-					try {
-						if (ap.proc.exitCode !== null || ap.proc.signalCode !== null) {
-							log(ap, boxLine(`Health check: process dead (exit=${ap.proc.exitCode})`, LOG_WIDTH));
-							ap.status = "dead";
-							ap.proc = null;
-							ap.ready = false;
-							if (wCtx) wCtx.ui.notify(tag(ap, "process died (detected by health check)"), "warning");
-						}
-					} catch {}
-				}
-			}
-			invalidate();
-		}, 3000);
-	}
-
-	startHealthCheck();
 }

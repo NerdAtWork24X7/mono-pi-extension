@@ -1,225 +1,385 @@
-# Mono-Pi Extension
+# Agent Team Extension for Pi Coding Agent
 
-A multi-agent development environment for pi. Drop it into `~/.pi/agent/` and get 11 specialist agents, 11 pre-built teams, and 7 extensions ready to go.
+A powerful extension that enables collaborative agent teams with ephemeral subagent orchestration. Each task spawns a fresh process, ensuring clean context and isolated work environments.
+
+## Prerequisites
+
+### System Requirements
+- **tmux** - Required for agent session management and combined logging
+- **Node.js** - Version compatible with pi-coding-agent
+- **pi-coding-agent** - Base agent system
+
+### Install tmux
+
+#### Ubuntu/Debian
+```bash
+sudo apt update
+sudo apt install tmux
+```
+
+#### macOS
+```bash
+brew install tmux
+```
+
+#### Windows (WSL2)
+```bash
+# Install tmux in WSL2
+sudo apt update
+sudo apt install tmux
+```
+
+#### Verify Installation
+```bash
+tmux -V
+```
 
 ## Installation
 
+### 1. Install Pi Coding Agent
 ```bash
-git clone <repo-url> ~/.pi/agent
+# Install globally
+npm install -g @mariozechner/pi-coding-agent
+
+# Or install locally
+npm install @mariozechner/pi-coding-agent
 ```
 
-Directory structure after install:
+### 2. Setup Agent Directory Structure
+Create the following directory structure in your project:
+
 ```
-~/.pi/agent/
-  agents/              # 11 agent .md files + teams.yaml
-  extensions/          # 7 extensions (agent-team, pi-rules, custom-footer, etc.)
-  models.json          # custom model providers (kilo, xiaomi)
-  settings.json        # default config, enabled models, packages
-  themes/              # cyberpunk.json
-  skills/              # electron-scaffold
-  rules/               # system prompt rules (injected by pi-rules)
-  prompts/             # custom prompt templates
-```
-
-## Quick Start
-
-1. Start pi: `pi`
-2. The cyberpunk theme loads automatically
-3. The `agent-team` extension activates on session start, selects the first team (`scout`), and locks the primary agent to dispatcher mode
-4. Use `/agents-team` to switch teams, then dispatch work via the `dispatch_agent` tool
-5. Agent session state (run counts, status) is persisted in `agent-sessions/`
-
-To use an agent directly (without the team orchestrator):
-```bash
-pi --agent scout "explore the src/ directory"
-pi --agent fix "fix the login timeout bug"
+your-project/
+├── .pi/
+│   ├── agents/
+│   │   ├── planner.md
+│   │   ├── worker.md
+│   │   ├── scout.md
+│   │   └── reviewer.md
+│   ├── agent-sessions/ (auto-created)
+│   └── agent-logs/ (auto-created)
+├── agents/
+│   ├── planner.md
+│   ├── worker.md
+│   ├── scout.md
+│   └── reviewer.md
+└── .pi/agents/
+    ├── teams.yaml
+    └── extensions/
+        └── agent-team.ts
 ```
 
-## Agent Teams
+### 3. Configure Agent Teams
+Create `.pi/agents/teams.yaml`:
 
-The core of this extension. Teams define groups of specialist agents that work together. The `agent-team` extension manages the orchestration.
+```yaml
+# Define agent teams
+planning-team:
+  - planner
+  - scout
 
-### How It Works
+development-team:
+  - worker
+  - planner
 
-1. On session start, the extension scans agent directories, loads `teams.yaml`, and activates the first team
-2. The primary agent becomes a dispatcher - its tools are replaced with `dispatch_agent` (plus `askUserQuestion`)
-3. Tasks are sent to subagents via RPC to persistent `pi --mode rpc` processes in tmux panes
-4. Subagents accumulate context across dispatches - no respawn between tasks
-5. Use `/agents-team` to switch teams, `/agents-list` to see status, `/agents-restart` to restart processes
+review-team:
+  - reviewer
+  - scout
 
-### Teams
+full-team:
+  - planner
+  - worker
+  - scout
+  - reviewer
+```
 
-| Team | Purpose | Members |
-|------|---------|---------|
-| `scout` | Quick exploration | scout |
-| `fix` | Bug fixes | fix |
-| `build` | Code implementation | scout, planner, builder |
-| `plan` | Analysis & planning | scout, planner, documenter |
-| `plan-build` | Full development | scout, conventions-analyst, planner, greenfield-web, brownfield-planner, ui-designer, builder, reviewer, wcag-auditor |
-| `info` | Information gathering | scout, browser, documenter, reviewer, negotiator, agent-builder, agent-researcher |
-| `next` | Quick tasks | scout, browser, scheduler |
-| `ads` | Ad operations | scout, negotiator, ad-strategist, sales-coach |
-| `brand` | Brand management | scout, browser, negotiator, ad-strategist, brand-strategist, personal-brand-strategist, documenter, sales-coach, linkedin-coach, brand-psychologist, storybrand |
-| `full` | Complete toolkit | scout, conventions-analyst, planner, builder, reviewer, documenter, scheduler, ad-strategist, negotiator, browser |
-| `business` | Business operations | scout, browser, regulatory-specialist, brand-strategist, financial-modeler, distribution-strategist, trade-marketer, consumer-marketer |
+### 4. Enable Agent Team Extension
+The agent-team extension is automatically included with pi-coding-agent. No additional installation required.
 
-**Note:** Some teams reference agents not included in this repo (e.g., `negotiator`, `scheduler`, `ad-strategist`, `brand-strategist`). Those work only if installed separately.
+## Usage
 
-## Agents
+### Starting with Agent Teams
 
-11 specialist agents included in `agents/`:
+1. **Launch Pi Coding Agent**
+   ```bash
+   pi
+   ```
 
-| Agent | Role | Tools | Model | Thinking |
-|-------|------|-------|-------|----------|
-| `scout` | Codebase exploration. Scores readiness across 5 dimensions, produces context map. Read-only. | read, grep, find, ls, web_search, fetch_content | default | high |
-| `planner` | Read-only analysis and planning. Reads files, answers questions, reasons about strategy. | read, grep, find, ls, web_search, fetch_content | default | none |
-| `builder` | Implements code from a plan. Reads files, makes changes, verifies. | read, write, edit, bash, web_search, fetch_content | default | none |
-| `reviewer` | Spec-aware code review. Reads git diff, produces structured findings. Read-only. | read, grep, bash, web_search, fetch_content | default | high |
-| `fix` | Minimal bug fixes. Finds root cause, writes the smallest fix. | read, write, edit, bash | default | low |
-| `documenter` | README and documentation generation. Matches existing doc style. | read, write, edit, grep, find, ls, web_search, fetch_content | xiaomi/mimo-v2.5 | none |
-| `browser` | Web automation via playwright-cli. Navigates, interacts, screenshots, extracts data. | read, bash, web_search, fetch_content | default | none |
-| `greenfield-web` | Scaffolds Astro + Vue + Tailwind projects. Handles init, directory structure, layouts. | read, grep, find, ls, bash, write, web_search, fetch_content | default | none |
-| `conventions-analyst` | Reverse-engineers codebase patterns into a conventions reference. Read-only. | read, grep, find, ls, web_search, fetch_content | default | none |
-| `ui-designer` | UI/UX design intelligence. Generates design systems across 13 tech stacks. | read, grep, find, ls, bash, write, web_search, fetch_content | default | none |
-| `wcag-auditor` | WCAG 2.1 accessibility auditing. Reviews code against all 78 success criteria. | read, grep, find, ls, bash, write, web_search, fetch_content | default | none |
+2. **Enable Agent Team Mode**
+   ```bash
+   /agents-team-toggle on
+   ```
 
-All agents use the default model unless listed otherwise. "default" = whatever is set in `settings.json`.
+3. **Select a Team**
+   ```bash
+   /agents-team
+   ```
 
-## Commands
+4. **List Available Agents**
+   ```bash
+   /agents-list
+   ```
+
+### Available Commands
 
 | Command | Description |
 |---------|-------------|
-| `/agents-team` | Open team selector. Switches which team of agents is active. |
-| `/agents-list` | List all loaded agents with status, session state, and run count. |
-| `/agents-grid <1-6>` | Set the number of columns in the agent dashboard widget. |
-| `/agents-team-toggle` | Enable or disable agent teams. |
-| `/agents-restart` | Restart all subagent processes. |
-| `/agents-autocompact` | Toggle auto-compact for subagents (on/off/status). |
-| `/whimsy` | Open the chaos mixer: adjust message bucket weights and spinner preset. |
-| `/whimsy on` | Enable whimsical loading messages. |
-| `/whimsy off` | Disable whimsical loading messages. |
-| `/whimsy status` | Show current weights, spinner preset, and enabled state. |
-| `/whimsy reset` | Reset to default weights and spinner. |
-| `/exit` | Exit pi with a weighted goodbye message. |
-| `/bye` | Alias for `/exit`. |
+| `/agents-team` | Select an agent team |
+| `/agents-list` | List agents and their status |
+| `/agents-grid <1-6>` | Set grid display columns |
+| `/agents-team-toggle on|off|status` | Enable/disable agent teams |
+| `/agents-restart` | Kill running subagent processes |
 
-## Extensions
+### Agent Types and Their Roles
 
-### agent-team
+#### Planner Agent
+- **Role**: Creates implementation plans from context and requirements
+- **Tools**: bash, read, grep, find, ls, write
+- **Output**: Implementation plans in `tmp/plan.md`
 
-Multi-agent orchestrator. On session start, it spawns ALL subagents as persistent `pi --mode rpc` processes in tmux panes. Tasks are dispatched via RPC prompt commands and results are streamed back as JSONL events. The same process is reused for every dispatch - no respawn between tasks.
+#### Worker Agent
+- **Role**: General-purpose execution agent with full capabilities
+- **Tools**: All available tools including web search and documentation queries
+- **Output**: Direct task execution and file modifications
 
-**Features:**
-- Persistent subagent processes (no respawn between tasks)
-- Tmux pane visualization with live dashboard
-- Auto-compact: automatically compacts subagent context when usage exceeds threshold
-- Session state persistence (run counts, status)
-- Team switching at runtime
+#### Scout Agent
+- **Role**: Fast codebase reconnaissance and context gathering
+- **Tools**: read, grep, find, ls, bash, write
+- **Output**: Compressed context in `tmp/scout_findings.md`
 
-**Hooks:** `session_start`, `before_agent_start` (injects dynamic system prompt with agent catalog)
+#### Reviewer Agent
+- **Role**: Code review and quality assurance
+- **Tools**: Code analysis tools
+- **Output**: Review reports and suggestions
 
-### pi-rules
+### Dispatching Tasks
 
-Scans `~/.pi/agent/rules/` for `.md` files and lists them in the system prompt so the agent can load specific rules on demand.
+Use the `dispatch_agent` tool to send tasks to specific agents:
 
-**Hooks:** `session_start`, `before_agent_start`
-
-### custom-footer
-
-Renders a status bar footer showing: active model, thinking level, token I/O counts, cost, context window percentage, elapsed time, working directory, git branch, and plan mode status.
-
-**Hooks:** `session_start`, `session_switch`
-
-### web-fetch
-
-Registers the `web-fetch` tool. Fetches a URL and extracts readable content (Markdown via Crawl4AI). Pass `raw: true` to get the full HTML response.
-
-### web-search
-
-Registers the `web-search` tool. Queries DuckDuckGo and returns up to 10 results with titles, URLs, and snippets. Default result count is 5.
-
-### context7
-
-Registers two tools:
-- `context7-search`: Resolves a library name to a Context7 library ID
-- `context7-query`: Queries documentation for a library using its Context7 ID
-
-### whimsical
-
-A chaos loader extension. Replaces standard loading messages with weighted, humorous alternatives from 7 buckets:
-
-| Bucket | Name | Examples |
-|--------|------|---------|
-| A | Absurd Nerd Lines | "Grepping the void for meaning..." |
-| B | Boss Progression | Phase-based messages by wait duration |
-| C | Fake Compiler Panic | "warning TS9999: vibes are not strongly typed" |
-| D | Terminal Meme Lines | "sudo rm -rf stress" |
-| E | Bollywood & Hinglish | Classic dialogues and desi dev humor |
-| F | Pi Tips | Helpful tips for using pi |
-| G | Whimsical Verbs | "Combobulating... Skedaddling..." |
-
-Default weights: A=10, B=10, C=10, D=10, E=30, F=15, G=15 (Bollywood-heavy). Adjust via `/whimsy`. Includes 5 animated spinner presets. Context-aware overrides apply for morning, late-night, and long-wait scenarios.
-
-## Configuration
-
-### settings.json
-
-```json
-{
-  "lastChangelogVersion": "0.72.1",
-  "doubleEscapeAction": "tree",
-  "quietStartup": true,
-  "defaultProvider": "zai",
-  "defaultModel": "glm-5.1",
-  "defaultThinkingLevel": "low",
-  "packages": [
-    "npm:pi-vitals",
-    "npm:pi-peon-ping",
-    "npm:@aliou/pi-guardrails",
-    "npm:pi-ask-user-question",
-    "npm:pi-updater",
-    "npm:pi-web-access",
-    "npm:@marckrenn/pi-sub-bar"
-  ],
-  "theme": "cyberpunk",
-  "enabledModels": [
-    "openrouter/qwen/qwen3.6-plus",
-    "zai/glm-5.1",
-    "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-    "xiaomi/mimo-v2.5-pro",
-    "xiaomi/mimo-v2.5"
-  ]
-}
+```bash
+dispatch_agent
+  agent: "planner"
+  task: "Create a plan for implementing user authentication system"
 ```
 
-### Model Providers (models.json)
+Example workflows:
 
-| Provider | Base URL | Models |
-|----------|----------|--------|
-| `kilo` | `https://api.kilo.ai/api/gateway` | qwen/qwen3.6-plus, nvidia/nemotron-3-super-120b-a12b:free, google/gemma-4-26b-a4b-it:free |
-| `xiaomi` | `https://token-plan-ams.xiaomimimo.com/v1` | mimo-v2.5-pro, mimo-v2.5 |
-| `nvidia` | `https://integrate.api.nvidia.com/v1` | minimaxai/minimax-m2.7, deepseek-ai/deepseek-v4-pro |
+#### Planning Phase
+```bash
+dispatch_agent
+  agent: "planner"
+  task: "Analyze the current codebase and create implementation plan for adding REST API endpoints"
+```
 
-All providers use OpenAI-compatible completions API.
+#### Development Phase
+```bash
+dispatch_agent
+  agent: "worker"
+  task: "Implement user authentication endpoints following the plan in tmp/plan.md"
+```
 
-### Theme
+#### Review Phase
+```bash
+dispatch_agent
+  agent: "reviewer"
+  task: "Review the newly implemented authentication code for security issues"
+```
 
-`themes/cyberpunk.json` - neon/electric/acid color scheme on dark background. Key colors: neon magenta (`#ff00ff`), electric cyan (`#00ffff`), acid green (`#39ff14`), hot pink (`#ff3366`), amber (`#ffaa00`).
+#### Scouting Phase
+```bash
+dispatch_agent
+  agent: "scout"
+  task: "Search for existing configuration files and dependencies in the project"
+```
 
-### NPM Packages
+## Agent Session Management
 
-| Package | Purpose |
-|---------|---------|
-| `pi-vitals` | System vitals monitoring |
-| `pi-peon-ping` | Health check / ping utility |
-| `@aliou/pi-guardrails` | Safety and guardrail enforcement |
-| `pi-ask-user-question` | Interactive user question prompting |
-| `pi-updater` | Self-update mechanism |
-| `pi-web-access` | Web access utilities |
-| `@marckrenn/pi-sub-bar` | Configurable status bar with provider awareness |
+### Tmux Integration
+- Each agent runs in a dedicated tmux pane
+- Combined session logs are displayed in a shared tmux pane
+- Logs are automatically saved to `.pi/agent-logs/`
 
-## Skills
+### Session Lifecycle
+1. **Session Start**: Load agent definitions, no spawning
+2. **Dispatch**: Spawn fresh process → send task → await result → kill
+3. **Session End**: Cleanup residual processes
 
-### electron-scaffold
+### Log Files
+- **Individual Agent Logs**: `.pi/agent-logs/scout.log`, `.pi/agent-logs/planner.log`, etc.
+- **Combined Session Log**: `.pi/agent-logs/session-YYYY-MM-DDTHH-MM-SS.log`
+- **Agent Findings**: `tmp/scout_findings.md`, `tmp/plan.md`
 
-Located at `skills/electron-scaffold/`. A complete guide for scaffolding production-ready Electron applications with security hardening, Vite + TypeScript tooling, proper IPC patterns, auto-updates, native UI elements, and optimal build configuration.
+## Agent Configuration
+
+### Creating Custom Agents
+
+Create agent files in `.pi/agents/` or `agents/` directories:
+
+```markdown
+---
+name: custom-agent
+description: Your custom agent description
+tools: read,write,grep,find,ls
+model: google/gemini-2.5-flash
+thinking: off
+---
+
+# WHO YOU ARE
+You are a custom agent with specific capabilities.
+
+# STRICT RULES - NEVER BREAK THESE
+- Your specific rules and constraints
+- Tools you can and cannot use
+- Output format requirements
+```
+
+### Tools Configuration
+Each agent specifies available tools:
+- **Basic**: read, write, grep, find, ls, bash
+- **Advanced**: web-search, web-fetch, context7-search, context7-query
+- **Custom**: Define tool combinations per agent
+
+## Best Practices
+
+### 1. Agent Selection
+- Use **planner** for analysis and planning
+- Use **worker** for implementation tasks
+- Use **scout** for codebase exploration
+- Use **reviewer** for quality assurance
+
+### 2. Task Description
+- Include all necessary context in task descriptions
+- Each dispatch is isolated - no context carries over
+- Be specific about requirements and constraints
+
+### 3. Team Composition
+- **Planning Team**: Planner + Scout
+- **Development Team**: Worker + Planner
+- **Full Team**: All agents for comprehensive projects
+
+### 4. Session Management
+- Use `/agents-restart` to clear stuck processes
+- Monitor agent status with `/agents-list`
+- Adjust grid layout with `/agents-grid <columns>`
+
+## Troubleshooting
+
+### Common Issues
+
+#### Tmux Not Available
+```bash
+# Error: tmux command not found
+# Solution: Install tmux (see prerequisites)
+tmux -V
+```
+
+#### Agent Process Stuck
+```bash
+# Kill stuck processes
+/agents-restart
+
+# Check status
+/agents-list
+```
+
+#### Agent Team Disabled
+```bash
+# Enable agent team mode
+/agents-team-toggle on
+```
+
+#### No Agents Loaded
+1. Check agent directory structure
+2. Verify agent files exist
+3. Check team configuration in `teams.yaml`
+
+### Debug Commands
+```bash
+# Check agent team status
+/agents-team-toggle status
+
+# List available agents
+/agents-list
+
+# Monitor logs
+tail -f .pi/agent-logs/session-*.log
+```
+
+## Architecture
+
+### Ephemeral Subagent System
+- Each task spawns a fresh `pi --mode rpc` process
+- No context accumulation between dispatches
+- Clean slate for every task
+- Processes killed after result returns
+
+### Component Interaction
+- **Orchestrator**: Main agent that manages subagents
+- **Subagents**: Specialized agents for specific tasks
+- **Tmux Manager**: Handles session and pane management
+- **Log System**: Centralized logging with combined output
+
+### File Structure
+```
+.pi/
+├── agent-logs/          # Session logs
+├── agent-sessions/      # Runtime session data
+├── agents/              # Agent definitions
+│   ├── agents/          # Agent files
+│   ├── extensions/      # Extensions (agent-team.ts)
+│   └── teams.yaml       # Team configuration
+```
+
+## Advanced Usage
+
+### Custom Teams
+Define custom teams in `teams.yaml`:
+
+```yaml
+frontend-team:
+  - worker
+  - scout
+  - reviewer
+
+backend-team:
+  - worker
+  - planner
+  - scout
+
+devops-team:
+  - worker
+  - scout
+```
+
+### Model Configuration
+Configure specific models for agents:
+
+```markdown
+---
+name: senior-developer
+description: Senior developer with advanced reasoning
+tools: read,write,grep,find,ls,web-search
+model: openrouter/nvidia/nemotron-3-super-120b-a12b:free
+thinking: on
+---
+```
+
+### Complex Workflows
+Combine multiple agents for complex tasks:
+
+1. **Exploration**: Scout → identify codebase structure
+2. **Planning**: Planner → create implementation plan
+3. **Implementation**: Worker → execute plan
+4. **Review**: Reviewer → validate results
+
+## Contributing
+
+To extend the agent system:
+1. Add new agent types in agent definition files
+2. Configure teams in `teams.yaml`
+3. Customize tools and capabilities per agent
+4. Extend the agent-team.ts for new features
+
+## License
+
+This extension is part of the pi-coding-agent ecosystem. See the main project for license details.

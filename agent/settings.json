@@ -1,37 +1,18 @@
 {
-  "lastChangelogVersion": "0.72.1",
+  "lastChangelogVersion": "0.74.0",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
   "defaultProvider": "zai",
-  "defaultModel": "glm-5.1",
+  "defaultModel": "glm-4.5-air",
   "defaultThinkingLevel": "low",
   "packages": [
-    "npm:pi-vitals",
-    "npm:pi-peon-ping",
-    {
-      "source": "npm:@aliou/pi-guardrails",
-      "extensions": [
-        "-src/index.ts"
-      ]
-    },
     "npm:pi-ask-user-question",
     "npm:pi-updater",
-    {
-      "source": "npm:pi-web-access",
-      "skills": [
-        "-skills/librarian/SKILL.md"
-      ],
-      "extensions": [
-        "-index.ts"
-      ]
-    },
     "npm:@marckrenn/pi-sub-bar"
   ],
   "theme": "cyberpunk",
   "hideThinkingBlock": false,
   "skills": [
-    ".claude/skills",
-    "~/.claude/skills",
     "-skills/electron-scaffold/SKILL.md"
   ],
   "enabledModels": [
@@ -39,13 +20,18 @@
     "zai/glm-5.1",
     "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
     "xiaomi/mimo-v2.5-pro",
-    "xiaomi/mimo-v2.5"
+    "xiaomi/mimo-v2.5",
+    "zai/glm-4.5-air"
   ],
   "extensions": [
-    "-extensions/whimsical/index.ts",
-    "+extensions/web-search.ts",
     "-extensions/web-fetch.ts",
-    "-extensions/pi-rules.ts",
-    "+extensions/agent-team.ts"
-  ]
+    "+extensions/custom-footer.ts"
+  ],
+  "terminal": {
+    "showTerminalProgress": true
+  },
+  "compaction": {
+    "enabled": true
+  },
+  "editorPaddingX": 1
 }

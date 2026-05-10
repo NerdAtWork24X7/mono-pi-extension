@@ -42,12 +42,14 @@ export default function (pi: ExtensionAPI) {
 				dispose() { unsub(); clearInterval(timer); },
 				invalidate() { },
 				render(width: number): string[] {
-					let input = 0, output = 0, cost = 0;
+					let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, cost = 0;
 					for (const e of ctx.sessionManager.getBranch()) {
 						if (e.type === "message" && e.message.role === "assistant") {
 							const m = e.message as AssistantMessage;
 							input += m.usage.input;
 							output += m.usage.output;
+							cacheRead += m.usage.cacheRead;
+							cacheWrite += m.usage.cacheWrite;
 							cost += m.usage.cost.total;
 						}
 					}
@@ -59,8 +61,13 @@ export default function (pi: ExtensionAPI) {
 
 					const pctColor = pct > 75 ? "error" : pct > 50 ? "warning" : "success";
 
+					const cacheParts: string[] = [];
+					cacheParts.push(`⬆${fmt(cacheRead)}`);
+					cacheParts.push(`⬇${fmt(cacheWrite)}`);
+					const cacheStr = cacheParts.length > 0 ? theme.fg("success", ` [${cacheParts.join(" ")}]`) : "";
+
 					const tokenStats = [
-						theme.fg("accent", `⬆${fmt(input)}: ⬇${fmt(output)} `),
+						theme.fg("accent", `⬆${fmt(input)}: ⬇${fmt(output)}`) + cacheStr,
 						theme.fg("warning", `$${cost.toFixed(2)} `),
 						theme.fg(pctColor, `${pct.toFixed(0)}% `),
 					].join(" ");
