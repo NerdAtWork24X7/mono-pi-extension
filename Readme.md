@@ -41,8 +41,6 @@ tmux -V
 # Install globally
 npm install -g @mariozechner/pi-coding-agent
 
-# Or install locally
-npm install @mariozechner/pi-coding-agent
 ```
 
 ### 2. Setup Agent Directory Structure
@@ -75,21 +73,22 @@ Create `.pi/agents/teams.yaml`:
 ```yaml
 # Define agent teams
 planning-team:
-  - planner
   - scout
+  - planner
 
 development-team:
-  - worker
+  - scout
   - planner
+  - worker
 
 review-team:
-  - reviewer
   - scout
+  - reviewer
 
 full-team:
+  - scout
   - planner
   - worker
-  - scout
   - reviewer
 ```
 
@@ -102,6 +101,7 @@ The agent-team extension is automatically included with pi-coding-agent. No addi
 
 1. **Launch Pi Coding Agent**
    ```bash
+   tmux
    pi
    ```
 
@@ -152,46 +152,6 @@ The agent-team extension is automatically included with pi-coding-agent. No addi
 - **Tools**: Code analysis tools
 - **Output**: Review reports and suggestions
 
-### Dispatching Tasks
-
-Use the `dispatch_agent` tool to send tasks to specific agents:
-
-```bash
-dispatch_agent
-  agent: "planner"
-  task: "Create a plan for implementing user authentication system"
-```
-
-Example workflows:
-
-#### Planning Phase
-```bash
-dispatch_agent
-  agent: "planner"
-  task: "Analyze the current codebase and create implementation plan for adding REST API endpoints"
-```
-
-#### Development Phase
-```bash
-dispatch_agent
-  agent: "worker"
-  task: "Implement user authentication endpoints following the plan in tmp/plan.md"
-```
-
-#### Review Phase
-```bash
-dispatch_agent
-  agent: "reviewer"
-  task: "Review the newly implemented authentication code for security issues"
-```
-
-#### Scouting Phase
-```bash
-dispatch_agent
-  agent: "scout"
-  task: "Search for existing configuration files and dependencies in the project"
-```
-
 ## Agent Session Management
 
 ### Tmux Integration
@@ -205,7 +165,6 @@ dispatch_agent
 3. **Session End**: Cleanup residual processes
 
 ### Log Files
-- **Individual Agent Logs**: `.pi/agent-logs/scout.log`, `.pi/agent-logs/planner.log`, etc.
 - **Combined Session Log**: `.pi/agent-logs/session-YYYY-MM-DDTHH-MM-SS.log`
 - **Agent Findings**: `tmp/scout_findings.md`, `tmp/plan.md`
 
