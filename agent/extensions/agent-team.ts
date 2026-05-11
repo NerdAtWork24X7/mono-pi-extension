@@ -66,6 +66,8 @@ interface AgentProc {
 	timer?: ReturnType<typeof setInterval>;
 	dispatchTimeout?: ReturnType<typeof setTimeout>;
 	sigkillTimeout?: ReturnType<typeof setTimeout>;
+	lastActivity: number;          // timestamp of last received RPC event
+	resetPongTimeout?: () => void; // resets the 10-min pong timer
 	resolveDispatch: ((output: string, code: number) => void) | null;
 	sessionFile: string;
 	systemPromptFile: string;
@@ -646,6 +648,12 @@ export default function (pi: ExtensionAPI) {
 		let ev: any;
 		try { ev = JSON.parse(line); } catch { return; }
 
+		// Any event while running = alive signal → reset 10-min timeout
+		if (ap.status === "running") {
+			ap.lastActivity = Date.now();
+			ap.resetPongTimeout?.();
+		}
+
 		// Command response
 		if (ev.type === "response") {
 			// First response = process is ready
@@ -863,6 +871,7 @@ export default function (pi: ExtensionAPI) {
 				runCount: 0,
 				ready: false,
 				readyResolve: null,
+				lastActivity: 0,
 				systemPromptFile: "",
 				resolveDispatch: null,
 				sessionFile: "",
@@ -873,7 +882,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Dispatch ────────────────────────────────────────────────────
 
-	const DISPATCH_TIMEOUT = 600_000; // 10 minutes
+	const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
 
 	async function dispatch(agentName: string, task: string): Promise<{ output: string; code: number; elapsed: number }> {
 		updateLogWidth();
@@ -921,6 +930,7 @@ export default function (pi: ExtensionAPI) {
 		ap.cacheWrite = 0;
 		ap.lastWork = "";
 		ap.runCount++;
+		ap.lastActivity = Date.now();
 		invalidate();
 
 		const t0 = Date.now();
@@ -928,6 +938,25 @@ export default function (pi: ExtensionAPI) {
 			ap.elapsed = Date.now() - t0;
 			invalidate();
 		}, 500);
+
+		// ── Activity-based timeout ──
+		// Resets on every RPC event (streaming, tool calls, responses, etc.)
+		// If 10 min passes with no activity → stuck → kill
+		const doResetPongTimeout = () => {
+			if (ap.dispatchTimeout) clearTimeout(ap.dispatchTimeout);
+			ap.dispatchTimeout = setTimeout(() => {
+				const silence = Math.round((Date.now() - ap.lastActivity) / 1000);
+				logErrorBox(ap, "NO ACTIVITY", `no event for ${silence}s — force-killing`);
+				ap.lastWork = `Timed out (${silence}s silence)`;
+				resolveIfPending(ap, `No activity for ${silence}s — killed`, 1);
+				killProc(ap, true);
+				if (wCtx) wCtx.ui.notify(tag(ap, `NO ACTIVITY (${silence}s) — killed`), "error");
+				invalidate();
+			}, PONG_TIMEOUT);
+		};
+		ap.resetPongTimeout = doResetPongTimeout;
+
+		doResetPongTimeout(); // start initial 10-min timer
 
 		logTaskBox(ap, ap.runCount, task);
 
@@ -948,17 +977,6 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const result = await new Promise<{ output: string; code: number; elapsed: number }>((resolve) => {
-			// Timeout safety net - KILL the stuck process so it doesn't leak
-			ap.dispatchTimeout = setTimeout(() => {
-				logErrorBox(ap, "TIMEOUT", `after ${Math.round(DISPATCH_TIMEOUT / 1000)}s - force-killing process`);
-				ap.lastWork = "Timed out";
-				// Resolve FIRST with the timeout message before killProc overwrites it
-				resolveIfPending(ap, `Dispatch timed out after ${Math.round(DISPATCH_TIMEOUT / 1000)}s`, 1);
-				killProc(ap, true);
-				if (wCtx) wCtx.ui.notify(tag(ap, `TIMEOUT (${Math.round(DISPATCH_TIMEOUT / 1000)}s) — killed`), "error");
-				invalidate();
-			}, DISPATCH_TIMEOUT);
-
 			ap.resolveDispatch = (output, code) => {
 				// Clear timeout immediately to prevent race with normal completion
 				if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
