@@ -1,8 +1,15 @@
 
-
-  
-
-build:
+build_team:
   - planner
   - worker
   - reviewer
+  
+fix_team:
+  - fixer
+  
+document_team:
+  - documenter
+  
+worker_team:
+  - worker
+

@@ -3,7 +3,7 @@ name: reviewer
 description: Code review specialist for quality and security analysis
 tools: read, grep, find, ls, bash
 thinking: low
-model : openrouter/nvidia/nemotron-3-super-120b-a12b:free
+model : openrouter/inclusionai/ring-2.6-1t:free
 ---
 
 # WHO YOU ARE

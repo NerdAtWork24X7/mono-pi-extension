@@ -103,7 +103,8 @@ function parseTeamsYaml(raw: string): Record<string, string[]> {
 
 function parseAgentFile(fp: string): AgentDef | null {
 	try {
-		const raw = readFileSync(fp, "utf-8");
+		let raw = readFileSync(fp, "utf-8");
+		raw = raw.replace(/\r\n/g, "\n"); // Normalize Windows line endings
 		const m = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
 		if (!m) return null;
 		const fm: Record<string, string> = {};
@@ -1337,7 +1338,9 @@ export default function (pi: ExtensionAPI) {
 				persist();
 				await killAll();
 				wCtx = ctx;
-				pi.setActiveTools(pi.getAllTools().map(t => t.name));
+				// Restore all tools EXCEPT dispatch_agent
+				const allNames = pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent");
+				pi.setActiveTools(allNames);
 				invalidate();
 				await ctx.ui.notify("✓ Agent team disabled - all subagent processes killed");
 			} else if (sub === "status") {
@@ -1426,6 +1429,9 @@ Date: ${new Date(t0).toISOString().split("T")[0]} | CWD: ${cwd}
 		initWidget();
 
 		if (!enabled) {
+			// Ensure dispatch_agent is NOT in active tools when disabled
+			const allNames = pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent");
+			pi.setActiveTools(allNames);
 			_ctx.ui.notify(
 				"Agent team is disabled. Use /agents-team-toggle on to enable.",
 				"info",

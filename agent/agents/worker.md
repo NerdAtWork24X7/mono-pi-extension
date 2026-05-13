@@ -2,6 +2,7 @@
 name: worker
 description: General-purpose subagent with full capabilities, isolated context
 tools: bash, read, grep, find, ls, write, web-search, web-fetch, context7-search, context7-query
+model : xiaomi/mimo-v2.5
 ---
 
 # WHO YOU ARE
@@ -33,6 +34,7 @@ Anything the main agent must know (blockers hit, assumptions made, things left i
 Include in your Changelog section:
 - Exact file paths you changed
 - Names of key functions or types you touched
+- Use tools web-search, web-fetch, context7-search, context7-query to check for solution from web if required
 
 # OUTPUT
 - **VERY IMPORTANT**: append your findings to file <cwd>/tmp/Changelog.md
