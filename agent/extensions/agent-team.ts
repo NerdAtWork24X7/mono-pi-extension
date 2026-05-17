@@ -46,6 +46,7 @@ interface AgentDef {
 interface AgentProc {
 	def: AgentDef;
 	model: string;
+	teamModel?: string;   // model override from teams.yaml (highest precedence)
 	proc: ChildProcess | null;
 	stdoutBuf: string;
 	status: "idle" | "running" | "starting" | "done" | "error" | "dead";
@@ -75,6 +76,11 @@ interface AgentProc {
 	streamLineBuf: string;   // partial line buffer for streaming text box-wrapping
 }
 
+interface TeamMember {
+	name: string;
+	model?: string;
+}
+
 // ── Helpers ────────────────────────────────────────────────────────────
 
 /** Extract short model name after last '/' */
@@ -89,14 +95,35 @@ const displayName = (name: string) =>
 const agentKey = (ap: { def: { name: string } }) =>
 	ap.def.name.toLowerCase().replace(/\s+/g, "-");
 
-function parseTeamsYaml(raw: string): Record<string, string[]> {
-	const teams: Record<string, string[]> = {};
+function parseTeamsYaml(raw: string): Record<string, TeamMember[]> {
+	const teams: Record<string, TeamMember[]> = {};
 	let cur = "";
+	let curMember: TeamMember | null = null;
 	for (const line of raw.split("\n")) {
+		if (!line.trim() || line.trim().startsWith("#")) continue;
 		const tm = line.match(/^(\S[^:]*):$/);
-		if (tm) { cur = tm[1].trim(); teams[cur] = []; continue; }
-		const im = line.match(/^\s+-\s+(.+)$/);
-		if (im && cur) teams[cur].push(im[1].trim());
+		if (tm) { cur = tm[1].trim(); teams[cur] = []; curMember = null; continue; }
+		if (!cur) continue;
+		// Named member: "  - name: worker"
+		const nm = line.match(/^\s*-\s+name:\s*(.+)$/);
+		if (nm) {
+			curMember = { name: nm[1].trim() };
+			teams[cur].push(curMember);
+			continue;
+		}
+		// Simple string member: "  - worker"
+		const im = line.match(/^\s*-\s+(\S+)$/);
+		if (im) {
+			curMember = { name: im[1].trim() };
+			teams[cur].push(curMember);
+			continue;
+		}
+		// Member property: "    model: foo"  (indented under a named member)
+		const pm = line.match(/^\s{2,}(\w+):\s*(.+)$/);
+		if (pm && curMember) {
+			if (pm[1].trim() === "model") curMember.model = pm[2].trim();
+			continue;
+		}
 	}
 	return teams;
 }
@@ -229,7 +256,7 @@ function savePersistedConfig(cfg: TeamConfig) {
 export default function (pi: ExtensionAPI) {
 	const procs = new Map<string, AgentProc>(); // key = lowercase name
 	let allDefs: AgentDef[] = [];
-	let teams: Record<string, string[]> = {};
+	let teams: Record<string, TeamMember[]> = {};
 	const _saved = loadPersistedConfig();
 	let activeTeam = "";
 	let gridCols = _saved.gridCols ?? 1;
@@ -532,7 +559,7 @@ export default function (pi: ExtensionAPI) {
 		writeSystemPrompt(ap);
 
 		// Sync model: if agent def has no model, always use current orchestrator model
-		const model = ap.def.model || orchestratorModel || "google/gemini-2.5-flash";
+		const model = ap.teamModel || ap.def.model || orchestratorModel || "google/gemini-2.5-flash";
 		ap.model = model;
 		const bin = process.platform === "win32" ? "pi.cmd" : "pi";
 
@@ -700,17 +727,20 @@ export default function (pi: ExtensionAPI) {
 		if (ev.type === "message_end" && ev.message?.role === "assistant") {
 			const u = ev.message.usage;
 			if (u) {
-				ap.tokensOut = u.output || 0;
+				// Compute per-dispatch values first, then accumulate
+				const dispatchTokensOut = u.output || 0;
 				ap.cacheRead = u.cacheRead || 0;
 				ap.cacheWrite = u.cacheWrite || 0;
 				ap.cacheSavedTotal += ap.cacheRead;
 				// input excludes cache tokens — use directly for real cost
-				ap.tokensUsed = u.input || 0;
+				let dispatchTokensUsed = u.input || 0;
 				if (u.totalTokens) {
 					// Fallback: derive input if provider didn't split it
-					const derived = u.totalTokens - ap.tokensOut - ap.cacheRead - ap.cacheWrite;
-					ap.tokensUsed = u.input || (derived > 0 ? derived : u.totalTokens - ap.tokensOut);
+					const derived = u.totalTokens - dispatchTokensOut - ap.cacheRead - ap.cacheWrite;
+					dispatchTokensUsed = u.input || (derived > 0 ? derived : u.totalTokens - dispatchTokensOut);
 				}
+				ap.tokensOut += dispatchTokensOut;
+				ap.tokensUsed += dispatchTokensUsed;
 			}
 			flushStreamBuf(ap);
 			invalidate();
@@ -835,7 +865,7 @@ export default function (pi: ExtensionAPI) {
 
 		const tp = join(getAgentDir(), "agents", "teams.yaml");
 		teams = existsSync(tp) ? parseTeamsYaml(readFileSync(tp, "utf-8")) : {};
-		if (!Object.keys(teams).length) teams = { all: allDefs.map(d => d.name) };
+		if (!Object.keys(teams).length) teams = { all: allDefs.map(d => ({ name: d.name })) };
 	}
 
 	// ── Team Activation ─────────────────────────────────────────────
@@ -850,11 +880,12 @@ export default function (pi: ExtensionAPI) {
 		const byName = new Map(allDefs.map(d => [d.name.toLowerCase(), d]));
 
 		for (const m of members) {
-			const def = byName.get(m.toLowerCase());
+			const def = byName.get(m.name.toLowerCase());
 			if (!def) continue;
 			procs.set(def.name.toLowerCase(), {
 				def,
-				model: def.model || orchestratorModel || "",
+				teamModel: m.model,
+				model: m.model || def.model || orchestratorModel || "",
 				proc: null,
 				stdoutBuf: "",
 				status: "dead",
@@ -1255,7 +1286,7 @@ export default function (pi: ExtensionAPI) {
 			if (!names.length) { ctx.ui.notify("No teams defined", "warning"); return; }
 
 			const opts = names.map(n => {
-				const m = teams[n].map(displayName).join(", ");
+				const m = teams[n].map(t => displayName(t.name)).join(", ");
 				return `${n} - ${m}`;
 			});
 
@@ -1380,7 +1411,7 @@ export default function (pi: ExtensionAPI) {
 			orchestratorModel = newModel;
 			// Update subagents that don't have their own model
 			for (const ap of procs.values()) {
-				if (!ap.def.model) ap.model = orchestratorModel;
+				if (!ap.teamModel && !ap.def.model) ap.model = orchestratorModel;
 			}
 		}
 

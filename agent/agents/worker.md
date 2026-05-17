@@ -2,7 +2,7 @@
 name: worker
 description: General-purpose subagent with full capabilities, isolated context
 tools: bash, read, grep, find, ls, write, web-search, web-fetch, context7-search, context7-query
-model : xiaomi/mimo-v2.5
+model: xiaomi/mimo-v2.5
 ---
 
 # WHO YOU ARE

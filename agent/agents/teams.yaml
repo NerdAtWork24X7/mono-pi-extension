@@ -1,15 +1,27 @@
+# Agent Team Definitions
+# ---------------------------------------------
+# Simple format:
+#   team_name:
+#     - agent_name
+#
+# With model override (takes precedence over .md frontmatter model):
+#   team_name:
+#     - name: agent_name
+#       model: provider/model-name
 
 build_team:
-  - planner
-  - worker
-  - reviewer
-  
-fix_team:
-  - fixer
-  
-document_team:
-  - documenter
-  
-worker_team:
-  - worker
+  - name: planner
+  - name: worker
+    model: zai/glm-5.1
+  - name: reviewer
 
+fix_team:
+  - name: fixer
+    model: zai/glm-5.1
+
+document_team:
+  - name: documenter
+
+worker_team:
+  - name: worker
+    model: zai/glm-5.1
