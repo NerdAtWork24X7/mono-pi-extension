@@ -176,7 +176,7 @@ function scanExtensionPaths(cwd: string): string[] {
 					if (!isDisabled(p, disabled)) paths.push(p);
 				}
 			}
-		} catch {}
+		} catch { }
 	}
 	return paths.filter(p => !p.includes("agent-team"));
 }
@@ -194,7 +194,7 @@ function loadDisabledExtensions(): Set<string> {
 				disabled.add(e.slice(1));
 			}
 		}
-	} catch {}
+	} catch { }
 	return disabled;
 }
 
@@ -226,7 +226,7 @@ function scanAgents(cwd: string): AgentDef[] {
 					agents.push(def);
 				}
 			}
-		} catch {}
+		} catch { }
 	}
 	return agents;
 }
@@ -325,7 +325,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function closeSessionLog() {
-		if (sessionLogStream) { try { sessionLogStream.end(); } catch {} sessionLogStream = null; }
+		if (sessionLogStream) { try { sessionLogStream.end(); } catch { } sessionLogStream = null; }
 	}
 
 	/** Agent header: "Scout · model-name" */
@@ -385,10 +385,10 @@ export default function (pi: ExtensionAPI) {
 
 
 	function logTaskBox(ap: AgentProc, taskNum: number, task: string) {
-	        log(ap, "");
+		log(ap, "");
 		const t0 = Date.now();
 		log(ap, `Date: ${new Date(t0).toISOString()}`);
-        	log(ap, hrPad(` Task #${taskNum} · ${agentLabel(ap)} `, logWidth, "╭", "╮"));
+		log(ap, hrPad(` Task #${taskNum} · ${agentLabel(ap)} `, logWidth, "╭", "╮"));
 		const inner = logWidth - 4;
 		const paragraphs = task.split("\n");
 		for (const para of paragraphs) {
@@ -420,7 +420,7 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function logDoneBox(ap: AgentProc, elapsedSec: number, tools: number) {
-	        log(ap,"")
+		log(ap, "")
 		log(ap, hrPad(` DONE  ${elapsedSec}s · ${tools} tools `, logWidth, "╰", "╯"));
 	}
 
@@ -439,7 +439,7 @@ export default function (pi: ExtensionAPI) {
 		if (tw <= 0) return;
 		try {
 			spawn("tmux", ["resize-pane", "-t", sharedPaneId, "-x", String(tw)], { stdio: "ignore" });
-		} catch {}
+		} catch { }
 	}
 
 	function createSessionPane() {
@@ -494,9 +494,9 @@ export default function (pi: ExtensionAPI) {
 				if (immediate) dying.kill("SIGKILL");
 				else {
 					dying.kill("SIGTERM");
-					ap.sigkillTimeout = setTimeout(() => { try { dying.kill("SIGKILL"); } catch {} }, 2000);
+					ap.sigkillTimeout = setTimeout(() => { try { dying.kill("SIGKILL"); } catch { } }, 2000);
 				}
-			} catch {}
+			} catch { }
 			ap.proc = null;
 		}
 		cleanSystemPrompt(ap);
@@ -533,7 +533,7 @@ export default function (pi: ExtensionAPI) {
 
 	function cleanSystemPrompt(ap: AgentProc) {
 		if (ap.systemPromptFile) {
-			try { unlinkSync(ap.systemPromptFile); } catch {}
+			try { unlinkSync(ap.systemPromptFile); } catch { }
 		}
 	}
 
@@ -651,7 +651,7 @@ export default function (pi: ExtensionAPI) {
 				if (!ap.proc?.stdin.writable) return;
 				try {
 					ap.proc.stdin.write(JSON.stringify({ type: "get_state" }) + "\n");
-				} catch {}
+				} catch { }
 			}, 500);
 		});
 	}
@@ -758,7 +758,7 @@ export default function (pi: ExtensionAPI) {
 					.map(([k, v]) => `${k}=${(v as string).slice(0, 80)}`)
 					.join(" ");
 			}
-				logToolStart(ap, ev.toolName, detail);
+			logToolStart(ap, ev.toolName, detail);
 			invalidate();
 			return;
 		}
@@ -791,7 +791,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (wCtx) {
 				wCtx.ui.notify(
-					tag(ap, `done (${Math.round(ap.elapsed / 1000)}s, ${ap.toolCount} tools)`) ,
+					tag(ap, `done (${Math.round(ap.elapsed / 1000)}s, ${ap.toolCount} tools)`),
 					"success",
 				);
 			}
@@ -848,7 +848,7 @@ export default function (pi: ExtensionAPI) {
 		} else {
 			resp = { type: "extension_ui_response", id, cancelled: true };
 		}
-		try { ap.proc.stdin.write(JSON.stringify(resp) + "\n"); } catch {}
+		try { ap.proc.stdin.write(JSON.stringify(resp) + "\n"); } catch { }
 	}
 
 	// ── Agent Loading ───────────────────────────────────────────────
@@ -934,7 +934,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Wipe session file BEFORE spawn to guarantee clean slate
 		if (ap.sessionFile && existsSync(ap.sessionFile)) {
-			try { unlinkSync(ap.sessionFile); } catch {}
+			try { unlinkSync(ap.sessionFile); } catch { }
 		}
 
 		// Also wipe system prompt cache to avoid leaking between agents
@@ -1028,7 +1028,7 @@ export default function (pi: ExtensionAPI) {
 
 		// Wipe session file so next dispatch starts fresh
 		if (ap.sessionFile && existsSync(ap.sessionFile)) {
-			try { unlinkSync(ap.sessionFile); } catch {}
+			try { unlinkSync(ap.sessionFile); } catch { }
 		}
 
 		ap.status = "dead";
@@ -1095,12 +1095,12 @@ export default function (pi: ExtensionAPI) {
 
 		const statusColor = ap.status === "idle" ? "dim"
 			: ap.status === "starting" ? "warning"
-			: ap.status === "running" ? "accent"
-			: ap.status === "done" ? "success" : "error";
+				: ap.status === "running" ? "accent"
+					: ap.status === "done" ? "success" : "error";
 		const statusIcon = ap.status === "idle" ? "○"
 			: ap.status === "starting" ? "◐"
-			: ap.status === "running" ? "●"
-			: ap.status === "done" ? "✓" : "";
+				: ap.status === "running" ? "●"
+					: ap.status === "done" ? "✓" : "";
 
 		const name = displayName(ap.def.name);
 		const sm = shortModel(ap.model);
@@ -1130,20 +1130,20 @@ export default function (pi: ExtensionAPI) {
 
 			const fmtTok = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 			const tokenStr = `In=${fmtTok(ap.tokensUsed)}  Out=${fmtTok(ap.tokensOut)}`;
-			const pctStr = ` Ctx=${pct}%/${fmtTok(ap.contextWindow)}` ;
-			
+			const pctStr = ` Ctx=${pct}%/${fmtTok(ap.contextWindow)}`;
+
 			// Cache stats line — show cache hits when present
-		        const cacheHit = ap.cacheRead > 0 ? `Hit=${fmtTok(ap.cacheRead)}` : "";
+			const cacheHit = ap.cacheRead > 0 ? `Hit=${fmtTok(ap.cacheRead)}` : "";
 			const total = ap.cacheSavedTotal > 0 ? `Σ=${fmtTok(ap.cacheSavedTotal)}` : "";
 			const sep = cacheHit && total ? " " : "";
 			const cacheLabel = `Cache: ${cacheHit}${sep}${total}`;
-			
+
 			const line2 = theme.fg(barColor, bar) + " " +
 				theme.fg("dim", tokenStr) + " " +
-				theme.fg(barColor, pctStr) + " " + theme.fg("success", "  \u{1F4BE} " + cacheLabel);		
+				theme.fg(barColor, pctStr) + " " + theme.fg("success", "  \u{1F4BE} " + cacheLabel);
 			lines.push(line2);
 
-	
+
 		}
 
 		return lines;
@@ -1198,7 +1198,7 @@ export default function (pi: ExtensionAPI) {
 							logErrorBox(ap, "ABORTED", "User pressed ESC");
 							killProc(ap, true);
 							if (ap.sessionFile && existsSync(ap.sessionFile)) {
-								try { unlinkSync(ap.sessionFile); } catch {}
+								try { unlinkSync(ap.sessionFile); } catch { }
 							}
 							ap.status = "dead";
 							invalidate();
@@ -1208,9 +1208,9 @@ export default function (pi: ExtensionAPI) {
 
 				const r = await dispatch(agent, task);
 
-				const isLarge = r.output.length > 8000;
+				const isLarge = r.output.length > 5000;
 				const truncated = isLarge
-					? r.output.slice(0, 8000) + "\n\n... [truncated]" : r.output;
+					? "[truncated] ...\n\n" + r.output.slice(-5000) : r.output;
 
 				const status = r.code === 0 ? "done" : "error";
 				const summary = `[${agent}][${modelTag}] - ${status} in ${Math.round(r.elapsed / 1000)}s`;
@@ -1423,7 +1423,7 @@ export default function (pi: ExtensionAPI) {
 			.join("\n\n");
 
 		const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
-                const t0 = Date.now();
+		const t0 = Date.now();
 		const cwd = process.cwd();
 		return {
 			systemPrompt: `You are a dispatcher. Delegate ALL work via dispatch_agent. No direct file access.

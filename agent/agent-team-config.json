@@ -1,5 +1,5 @@
 {
-  "activeTeam": "build",
+  "activeTeam": "worker_team",
   "gridCols": 1,
   "enabled": true
 }

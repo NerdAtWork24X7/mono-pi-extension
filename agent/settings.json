@@ -1,9 +1,9 @@
 {
-  "lastChangelogVersion": "0.74.0",
+  "lastChangelogVersion": "0.74.1",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
   "defaultProvider": "zai",
-  "defaultModel": "glm-4.5-air",
+  "defaultModel": "glm-5.1",
   "defaultThinkingLevel": "low",
   "packages": [
     "npm:pi-ask-user-question",
@@ -21,7 +21,11 @@
     "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
     "xiaomi/mimo-v2.5-pro",
     "xiaomi/mimo-v2.5",
-    "zai/glm-4.5-air"
+    "zai/glm-4.5-air",
+    "kilo/qwen/qwen3.6-plus",
+    "kilo/nvidia/nemotron-3-super-120b-a12b:free",
+    "kilo/google/gemma-4-26b-a4b-it:free",
+    "fcm/fcm"
   ],
   "extensions": [
     "-extensions/web-fetch.ts",

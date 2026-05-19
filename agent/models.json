@@ -52,6 +52,17 @@
           "reasoning": true
         }
       ]
+    },
+    "fcm": {
+      "baseUrl": "http://localhost:19280/v1",
+      "api": "openai-completions",
+      "apiKey": "fcm-local",
+      "models": [
+        {
+          "id": "fcm",
+          "reasoning": true
+        }
+      ]
     }
   }
 }
