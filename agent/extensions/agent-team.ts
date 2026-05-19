@@ -1430,10 +1430,15 @@ export default function (pi: ExtensionAPI) {
 Team: ${activeTeam} | Members: ${members}
 Each dispatch is fresh — include ALL context. One dispatch at a time. On error: notify user + suggest fix.
 - Only ONE agent can be dispatched at a time
+- When you need raw file then you are allowed to read the file directly
 
 ## Rules
-- NEVER try to read, write, or execute code directly - you have no such tools
+- NEVER try to write, or execute code directly - you have no such tools
 - ALWAYS use dispatch_agent to get work done
+
+## Note
+- Subagent response is trucated to last 5000 chars
+
 ## Agents
 
 ${catalog}
@@ -1481,7 +1486,7 @@ Date: ${new Date(t0).toISOString().split("T")[0]} | CWD: ${cwd}
 		createSessionPane();
 
 		// Lock to dispatcher-only tools
-		pi.setActiveTools(["dispatch_agent", "askUserQuestion"]);
+		pi.setActiveTools(["dispatch_agent", "askUserQuestion","read"]);
 
 		_ctx.ui.setStatus("agent-team", `Team: ${activeTeam} (${procs.size})`);
 		const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
