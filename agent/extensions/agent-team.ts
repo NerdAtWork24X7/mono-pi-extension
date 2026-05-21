@@ -54,6 +54,8 @@ interface AgentProc {
 	readyResolve: (() => void) | null;
 	task: string;
 	collectedText: string;
+	currentMessageText: string;   // accumulates text for the current assistant message
+	lastAssistantText: string;   // text of the last completed assistant message
 	contextWindow: number;   // model context window (tokens)
 	tokensUsed: number;      // last known input token usage (excl. cache)
 	tokensOut: number;       // last known output token usage
@@ -545,6 +547,8 @@ export default function (pi: ExtensionAPI) {
 		ap.ready = false;
 		ap.readyResolve = null;
 		ap.collectedText = "";
+		ap.currentMessageText = "";
+		ap.lastAssistantText = "";
 		ap.stdoutBuf = "";
 		ap.streamLineBuf = "";
 		ap.resolveDispatch = null;
@@ -714,6 +718,7 @@ export default function (pi: ExtensionAPI) {
 			if (delta?.type === "text_delta") {
 				const chunk = delta.delta || "";
 				ap.collectedText += chunk;
+				ap.currentMessageText += chunk;
 				logStreamingText(ap, chunk);
 				// Track last work line - scan only last portion
 				const lastNl = chunk.lastIndexOf("\n");
@@ -743,6 +748,11 @@ export default function (pi: ExtensionAPI) {
 				ap.tokensUsed += dispatchTokensUsed;
 			}
 			flushStreamBuf(ap);
+			// Save completed message text, reset for next message
+			if (ap.currentMessageText.trim()) {
+				ap.lastAssistantText = ap.currentMessageText;
+			}
+			ap.currentMessageText = "";
 			invalidate();
 			return;
 		}
@@ -772,20 +782,35 @@ export default function (pi: ExtensionAPI) {
 		if (ev.type === "agent_end") {
 			clearInterval(ap.timer);
 			flushStreamBuf(ap);
-			const full = ap.collectedText;
+
+			// Build output with fallback chain:
+			//   1. last completed assistant message (ideal)
+			//   2. current in-flight message text (subagent ended mid-stream)
+			//   3. full collected streaming text (no message_end ever fired)
+			//   4. "(no output)" sentinel (nothing was streamed at all)
+			const output = ap.lastAssistantText
+				|| ap.currentMessageText.trim()
+				|| ap.collectedText.trim()
+				|| "(no output)";
+
 			logDoneBox(ap, Math.round(ap.elapsed / 1000), ap.toolCount);
 			ap.status = "done";
-			// Extract last non-empty line from accumulated text
+
+			// Extract last non-empty line from resolved output for widget display
 			let lastLine = "";
-			let scanFrom = full.length - 1;
+			let scanFrom = output.length - 1;
 			while (scanFrom >= 0) {
-				const nl = full.lastIndexOf("\n", scanFrom);
-				const seg = full.slice(nl + 1, scanFrom + 1).trim();
+				const nl = output.lastIndexOf("\n", scanFrom);
+				const seg = output.slice(nl + 1, scanFrom + 1).trim();
 				if (seg) { lastLine = seg; break; }
 				scanFrom = nl - 1;
 			}
 			ap.lastWork = lastLine;
+
+			// Clear buffers AFTER building output
 			ap.collectedText = "";
+			ap.currentMessageText = "";
+			ap.lastAssistantText = "";
 
 			invalidate();
 
@@ -796,7 +821,7 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 
-			resolveIfPending(ap, full, 0);
+			resolveIfPending(ap, output, 0);
 
 			return;
 		}
@@ -891,6 +916,8 @@ export default function (pi: ExtensionAPI) {
 				status: "dead",
 				task: "",
 				collectedText: "",
+				currentMessageText: "",
+				lastAssistantText: "",
 				contextWindow: 0,
 				tokensUsed: 0,
 				tokensOut: 0,
@@ -914,6 +941,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Dispatch ────────────────────────────────────────────────────
 
+	const MAX_RESPONSE_LENGTH = 5000; // Truncate subagent output to last N characters
 	const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
 
 	async function dispatch(agentName: string, task: string): Promise<{ output: string; code: number; elapsed: number }> {
@@ -992,7 +1020,7 @@ export default function (pi: ExtensionAPI) {
 
 		logTaskBox(ap, ap.runCount, task);
 
-		const cmd = JSON.stringify({ type: "prompt", message: task }) + "\n";
+		const cmdPayload = { type: "prompt", message: task };
 		try {
 			if (!ap.proc?.stdin?.writable) {
 				clearInterval(ap.timer);
@@ -1000,7 +1028,7 @@ export default function (pi: ExtensionAPI) {
 				invalidate();
 				return { output: `Process died before task could be sent`, code: 1, elapsed: 0 };
 			}
-			ap.proc.stdin.write(cmd);
+			ap.proc.stdin.write(JSON.stringify(cmdPayload) + "\n");
 		} catch (err: any) {
 			clearInterval(ap.timer);
 			ap.status = "error";
@@ -1208,9 +1236,12 @@ export default function (pi: ExtensionAPI) {
 
 				const r = await dispatch(agent, task);
 
-				const isLarge = r.output.length > 5000;
-				const truncated = isLarge
-					? "[truncated] ...\n\n" + r.output.slice(-5000) : r.output;
+				// Guard rail: truncate response to last MAX_RESPONSE_LENGTH chars
+				let output = r.output;
+				if (output.length > MAX_RESPONSE_LENGTH) {
+					output = output.slice(-MAX_RESPONSE_LENGTH);
+					output = "... [truncated to last 5000 chars]\n" + output;
+				}
 
 				const status = r.code === 0 ? "done" : "error";
 				const summary = `[${agent}][${modelTag}] - ${status} in ${Math.round(r.elapsed / 1000)}s`;
@@ -1220,10 +1251,8 @@ export default function (pi: ExtensionAPI) {
 				}
 
 				return {
-					content: [{ type: "text", text: `${summary}\n\n${truncated}` }],
-					// If truncated, store the truncated version as fullOutput to avoid
-					// holding a 2x copy (truncated + original) in memory
-					details: { agent, task, status, elapsed: r.elapsed, exitCode: r.code, fullOutput: truncated },
+					content: [{ type: "text", text: output }],
+					details: { agent, task, status, elapsed: r.elapsed, exitCode: r.code, fullOutput: output },
 				};
 			} catch (err: any) {
 				if (wCtx) wCtx.ui.notify(`[${agent}] Error: ${err?.message || err}`, "error");
@@ -1267,9 +1296,7 @@ export default function (pi: ExtensionAPI) {
 			const header = theme.fg(color, `${icon} [${d.agent}][${modelTag}] - ${elapsed}s`);
 
 			if (options.expanded && d.fullOutput) {
-				const output = d.fullOutput.length > 4000
-					? d.fullOutput.slice(0, 4000) + "\n..." : d.fullOutput;
-				return new Text(header + "\n" + theme.fg("muted", output), 0, 0);
+				return new Text(header + "\n" + theme.fg("muted", d.fullOutput), 0, 0);
 			}
 
 			return new Text(header, 0, 0);
@@ -1430,7 +1457,7 @@ export default function (pi: ExtensionAPI) {
 Team: ${activeTeam} | Members: ${members}
 Each dispatch is fresh — include ALL context. One dispatch at a time. On error: notify user + suggest fix.
 - Only ONE agent can be dispatched at a time
-- When you need raw file then you are allowed to read the file directly
+- When you need raw file then you are allowed to read the file directly using read tool
 
 ## Rules
 - NEVER try to write, or execute code directly - you have no such tools
