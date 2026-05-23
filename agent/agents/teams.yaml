@@ -23,5 +23,8 @@ document_team:
   - name: documenter
 
 worker_team:
+  - name: scout
+    model: kilo/baidu/cobuddy:free
+  - name: planner
   - name: worker
     model: zai/glm-5.1

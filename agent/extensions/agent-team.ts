@@ -97,6 +97,62 @@ const displayName = (name: string) =>
 const agentKey = (ap: { def: { name: string } }) =>
 	ap.def.name.toLowerCase().replace(/\s+/g, "-");
 
+/** Format token count: >=1000 → "1.2k", else raw */
+const fmtTok = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+
+/** Iterate files in multiple directories, deduplicating by name */
+function scanDirs(dirs: string[], predicate: (name: string) => boolean): string[] {
+	const paths: string[] = [];
+	for (const dir of dirs) {
+		if (!existsSync(dir)) continue;
+		try {
+			for (const f of readdirSync(dir)) {
+				if (predicate(f)) paths.push(resolve(dir, f));
+			}
+		} catch { }
+	}
+	return paths;
+}
+
+/** Create a blank AgentProc state object */
+function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel"> {
+	return {
+		proc: null, stdoutBuf: "", status: "dead", ready: false, readyResolve: null,
+		task: "", collectedText: "", currentMessageText: "", lastAssistantText: "",
+		contextWindow: 0, tokensUsed: 0, tokensOut: 0,
+		cacheRead: 0, cacheWrite: 0, cacheSavedTotal: 0,
+		toolCount: 0, elapsed: 0, lastWork: "", runCount: 0,
+		timer: undefined, dispatchTimeout: undefined, sigkillTimeout: undefined,
+		lastActivity: 0, resetPongTimeout: undefined, resolveDispatch: null,
+		sessionFile: "", systemPromptFile: "", lastPromptHash: undefined,
+		streamLineBuf: "",
+	};
+}
+
+function clearTimers(ap: AgentProc) {
+	clearInterval(ap.timer);
+	if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
+	if (ap.sigkillTimeout) { clearTimeout(ap.sigkillTimeout); ap.sigkillTimeout = undefined; }
+}
+
+/** Reset mutable dispatch fields on an AgentProc (reuses blank state pattern) */
+function resetForDispatch(ap: AgentProc) {
+	ap.status = "dead";
+	ap.ready = false;
+	ap.readyResolve = null;
+	ap.collectedText = "";
+	ap.currentMessageText = "";
+	ap.lastAssistantText = "";
+	ap.stdoutBuf = "";
+	ap.streamLineBuf = "";
+	ap.resolveDispatch = null;
+	ap.toolCount = 0;
+	ap.task = "";
+	ap.lastWork = "";
+	ap.lastPromptHash = undefined;
+	clearTimers(ap);
+}
+
 function parseTeamsYaml(raw: string): Record<string, TeamMember[]> {
 	const teams: Record<string, TeamMember[]> = {};
 	let cur = "";
@@ -217,18 +273,12 @@ function scanAgents(cwd: string): AgentDef[] {
 	];
 	const agents: AgentDef[] = [];
 	const seen = new Set<string>();
-	for (const dir of dirs) {
-		if (!existsSync(dir)) continue;
-		try {
-			for (const f of readdirSync(dir)) {
-				if (!f.endsWith(".md")) continue;
-				const def = parseAgentFile(resolve(dir, f));
-				if (def && !seen.has(def.name.toLowerCase())) {
-					seen.add(def.name.toLowerCase());
-					agents.push(def);
-				}
-			}
-		} catch { }
+	for (const fp of scanDirs(dirs, f => f.endsWith(".md"))) {
+		const def = parseAgentFile(fp);
+		if (def && !seen.has(def.name.toLowerCase())) {
+			seen.add(def.name.toLowerCase());
+			agents.push(def);
+		}
 	}
 	return agents;
 }
@@ -284,22 +334,7 @@ export default function (pi: ExtensionAPI) {
 			enabled,
 		});
 	}
-
 	// ── Logging ─────────────────────────────────────────────────────
-	//
-	//  Log format uses Unicode box-drawing characters, no ANSI codes.
-	//  Each major lifecycle phase (spawn, task, error) gets its own box.
-	//
-
-	//
-	//  ╭── Task #1 · Scout · model-name ─────────────╮
-	//  │ Search for configuration files...           │
-	//  │                                            │
-	//  │  ┌ grep pattern=... path=...               │
-	//  │  └ ✓ grep (42ms)                           │
-	//  │                                            │
-	//  │  (streaming text)                           │
-	//  ╰── DONE  77s · 13 tools ───────────────────╯
 
 	const MIN_logWidth = 60;
 	const MAX_logWidth = 300;
@@ -341,11 +376,11 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Low-level write helpers ──
 
-	function log(_ap: AgentProc, msg: string) {
+	function log(msg: string) {
 		if (sessionLogStream) sessionLogStream.write(msg + "\n");
 	}
 
-	function logRaw(_ap: AgentProc, msg: string) {
+	function logRaw(msg: string) {
 		if (sessionLogStream) sessionLogStream.write(msg);
 	}
 
@@ -361,11 +396,9 @@ export default function (pi: ExtensionAPI) {
 	}
 
 	function flushStreamBuf(ap: AgentProc) {
-		if (!sessionLogStream) return;
-		if (ap.streamLineBuf) {
-			sessionLogStream.write(boxLine(ap.streamLineBuf, logWidth) + "\n");
-			ap.streamLineBuf = "";
-		}
+		if (!sessionLogStream || !ap.streamLineBuf) return;
+		sessionLogStream.write(boxLine(ap.streamLineBuf, logWidth) + "\n");
+		ap.streamLineBuf = "";
 	}
 
 	// ── Box drawing helpers ──
@@ -387,50 +420,43 @@ export default function (pi: ExtensionAPI) {
 
 
 	function logTaskBox(ap: AgentProc, taskNum: number, task: string) {
-		log(ap, "");
-		const t0 = Date.now();
-		log(ap, `Date: ${new Date(t0).toISOString()}`);
-		log(ap, hrPad(` Task #${taskNum} · ${agentLabel(ap)} `, logWidth, "╭", "╮"));
+		log("");
+		log(`Date: ${new Date().toISOString()}`);
+		log(hrPad(` Task #${taskNum} · ${agentLabel(ap)} `, logWidth, "╭", "╮"));
 		const inner = logWidth - 4;
-		const paragraphs = task.split("\n");
-		for (const para of paragraphs) {
+		for (const para of task.split("\n")) {
 			const words = para.split(" ");
 			let line = "";
 			for (const w of words) {
 				if (line && [...line].length + 1 + [...w].length > inner) {
-					log(ap, boxLine(line, logWidth));
+					log(boxLine(line, logWidth));
 					line = w;
 				} else {
 					line = line ? line + " " + w : w;
 				}
 			}
-			if (line) log(ap, boxLine(line, logWidth));
+			if (line) log(boxLine(line, logWidth));
 		}
-
-
 	}
 
 	function logToolStart(ap: AgentProc, tool: string, detail: string) {
-		const info = detail ? ` ${detail}` : "";
-		log(ap, boxLine(`┌ ${tool}${info}`, logWidth));
+		log(boxLine(`┌ ${tool}${detail ? " " + detail : ""}`, logWidth));
 	}
 
 	function logToolEnd(ap: AgentProc, tool: string, ok: boolean, durMs?: number) {
-		const icon = ok ? "✓" : "✗";
-		const dur = durMs ? ` (${Math.round(durMs)}ms)` : "";
-		log(ap, boxLine(`└ ${icon} ${tool}${dur}`, logWidth));
+		log(boxLine(`└ ${ok ? "✓" : "✗"} ${tool}${durMs ? ` (${Math.round(durMs)}ms)` : ""}`, logWidth));
 	}
 
 	function logDoneBox(ap: AgentProc, elapsedSec: number, tools: number) {
-		log(ap, "")
-		log(ap, hrPad(` DONE  ${elapsedSec}s · ${tools} tools `, logWidth, "╰", "╯"));
+		log("")
+		log(hrPad(` DONE  ${elapsedSec}s · ${tools} tools `, logWidth, "╰", "╯"));
 	}
 
 	function logErrorBox(ap: AgentProc, heading: string, detail: string) {
-		log(ap, hrPad(` ✗ ${agentLabel(ap)} `, logWidth, "╭", "╮"));
-		log(ap, boxLine(heading, logWidth));
-		if (detail) log(ap, boxLine(detail, logWidth));
-		log(ap, hrPad("", logWidth, "╰", "╯"));
+		log(hrPad(` ✗ ${agentLabel(ap)} `, logWidth, "╭", "╮"));
+		log(boxLine(heading, logWidth));
+		if (detail) log(boxLine(detail, logWidth));
+		log(hrPad("", logWidth, "╰", "╯"));
 	}
 
 	// ── Tmux Panes ──────────────────────────────────────────────────
@@ -482,11 +508,6 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Spawn / Kill ────────────────────────────────────────────────
 
-	function clearTimers(ap: AgentProc) {
-		clearInterval(ap.timer);
-		if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
-		if (ap.sigkillTimeout) { clearTimeout(ap.sigkillTimeout); ap.sigkillTimeout = undefined; }
-	}
 
 	function killProc(ap: AgentProc, immediate = false) {
 		resolveIfPending(ap, ap.status === "running" || ap.status === "starting" ? "Process killed" : "", 1);
@@ -526,7 +547,7 @@ export default function (pi: ExtensionAPI) {
 
 	// Write system prompt to temp file (avoids shell escaping issues with multi-line prompts)
 	function writeSystemPrompt(ap: AgentProc) {
-		const content = `You are working in the project cwd.\n\n ${ap.def.systemPrompt}`;
+		const content = `${ap.def.systemPrompt}`;
 		if (ap.lastPromptHash === content) return; // skip if unchanged
 		ap.lastPromptHash = content;
 		ap.systemPromptFile = join(sessionDir, `${agentKey(ap)}-system-prompt.txt`);
@@ -542,21 +563,9 @@ export default function (pi: ExtensionAPI) {
 	function spawnProc(ap: AgentProc): Promise<boolean> {
 		// Ensure clean slate
 		if (ap.proc) killProc(ap);
+		resetForDispatch(ap);
 
 		ap.status = "starting";
-		ap.ready = false;
-		ap.readyResolve = null;
-		ap.collectedText = "";
-		ap.currentMessageText = "";
-		ap.lastAssistantText = "";
-		ap.stdoutBuf = "";
-		ap.streamLineBuf = "";
-		ap.resolveDispatch = null;
-		ap.toolCount = 0;
-		ap.task = "";
-		ap.lastWork = "";
-		clearTimers(ap);
-
 		ap.sessionFile = join(sessionDir, `${agentKey(ap)}.json`);
 
 		// Write system prompt to temp file to avoid CLI escaping issues
@@ -577,8 +586,7 @@ export default function (pi: ExtensionAPI) {
 			...cachedExtPaths.flatMap(p => ["--extension", p]),
 			"--model", model,
 			"--tools", ap.def.tools,
-			"--thinking", ap.def.thinking || "off",
-			"--append-system-prompt", ap.systemPromptFile,
+			"--system-prompt", ap.systemPromptFile,
 			"--session", ap.sessionFile,
 		];
 
@@ -609,7 +617,7 @@ export default function (pi: ExtensionAPI) {
 		proc.stderr!.setEncoding("utf-8");
 		proc.stderr!.on("data", (d: string) => {
 			if (ap.proc !== proc) return; // stale process guard
-			for (const line of d.split("\n")) if (line.trim()) log(ap, line);
+			for (const line of d.split("\n")) if (line.trim()) log(line);
 		});
 
 		proc.on("error", (err) => {
@@ -662,6 +670,13 @@ export default function (pi: ExtensionAPI) {
 
 
 
+	/** Safely delete session file if it exists */
+	function wipeSessionFile(ap: AgentProc) {
+		if (ap.sessionFile && existsSync(ap.sessionFile)) {
+			try { unlinkSync(ap.sessionFile); } catch { }
+		}
+	}
+
 	// ── Resolve helper ──────────────────────────────────────────────
 
 	function resolveIfPending(ap: AgentProc, output: string, code: number) {
@@ -676,185 +691,149 @@ export default function (pi: ExtensionAPI) {
 
 	// ── RPC Event Handling ──────────────────────────────────────────
 
+	// Map of event type → log message formatter for simple delegation
+	const simpleLogEvents: Record<string, (ev: any) => string> = {
+		compaction_start: (ev) => `COMPACT start (reason: ${ev.reason || "auto"})`,
+		compaction_end: (ev) => ev.aborted ? `COMPACT aborted` : `COMPACT done (${ev.reason || "auto"})`,
+		auto_retry_start: (ev) => `AUTO-RETRY attempt ${ev.attempt}/${ev.maxAttempts} (${ev.delayMs}ms)`,
+		auto_retry_end: (ev) => `AUTO-RETRY ${ev.success ? "succeeded" : "failed"} (attempt ${ev.attempt})`,
+	};
+
 	function handleEvent(ap: AgentProc, line: string) {
 		let ev: any;
 		try { ev = JSON.parse(line); } catch { return; }
 
-		// Any event while running = alive signal → reset 10-min timeout
 		if (ap.status === "running") {
 			ap.lastActivity = Date.now();
 			ap.resetPongTimeout?.();
 		}
 
-		// Command response
-		if (ev.type === "response") {
-			// First response = process is ready
-			if (!ap.ready) {
-				ap.ready = true;
-				ap.status = "idle";
-				// Capture context window from get_state response
-				if (ev.success && ev.data?.model?.contextWindow) {
-					ap.contextWindow = ev.data.model.contextWindow;
-				}
-				invalidate();
-				if (ap.readyResolve) { ap.readyResolve(); ap.readyResolve = null; }
+		switch (ev.type) {
+			case "response": return handleResponse(ap, ev);
+			case "message_update": return handleMessageUpdate(ap, ev);
+			case "message_end": return handleMessageEnd(ap, ev);
+			case "tool_execution_start": return handleToolStart(ap, ev);
+			case "tool_execution_end": return handleToolEnd(ap, ev);
+			case "agent_end": return handleAgentEnd(ap, ev);
+			case "extension_ui_request": return autoRespondUI(ap, ev);
+			default: {
+				const fmt = simpleLogEvents[ev.type];
+				if (fmt) log(boxLine(fmt(ev), logWidth));
 			}
-			// Error response while dispatch pending (e.g. prompt failed, model error)
-			// agent_end never fires in this case, so we must resolve here to avoid timeout
-			if (!ev.success && ap.status === "running" && ap.resolveDispatch) {
-				const errMsg = ev.error || `${ev.command} failed`;
-				logErrorBox(ap, "PROMPT ERROR", errMsg);
-				ap.lastWork = `Error: ${errMsg}`;
-				ap.status = "error";
-				invalidate();
-				resolveIfPending(ap, errMsg, 1);
-			}
-			return;
 		}
+	}
 
-		// Streaming text
-		if (ev.type === "message_update") {
-			const delta = ev.assistantMessageEvent;
-			if (delta?.type === "text_delta") {
-				const chunk = delta.delta || "";
-				ap.collectedText += chunk;
-				ap.currentMessageText += chunk;
-				logStreamingText(ap, chunk);
-				// Track last work line - scan only last portion
-				const lastNl = chunk.lastIndexOf("\n");
-				const tail = lastNl >= 0 ? chunk.slice(lastNl + 1) : chunk;
-				if (tail.trim()) ap.lastWork = tail.slice(0, 80);
+	function handleResponse(ap: AgentProc, ev: any) {
+		if (!ap.ready) {
+			ap.ready = true;
+			ap.status = "idle";
+			if (ev.success && ev.data?.model?.contextWindow) {
+				ap.contextWindow = ev.data.model.contextWindow;
 			}
-			return;
-		}
-
-		// Token usage from assistant message_end
-		if (ev.type === "message_end" && ev.message?.role === "assistant") {
-			const u = ev.message.usage;
-			if (u) {
-				// Compute per-dispatch values first, then accumulate
-				const dispatchTokensOut = u.output || 0;
-				ap.cacheRead = u.cacheRead || 0;
-				ap.cacheWrite = u.cacheWrite || 0;
-				ap.cacheSavedTotal += ap.cacheRead;
-				// input excludes cache tokens — use directly for real cost
-				let dispatchTokensUsed = u.input || 0;
-				if (u.totalTokens) {
-					// Fallback: derive input if provider didn't split it
-					const derived = u.totalTokens - dispatchTokensOut - ap.cacheRead - ap.cacheWrite;
-					dispatchTokensUsed = u.input || (derived > 0 ? derived : u.totalTokens - dispatchTokensOut);
-				}
-				ap.tokensOut += dispatchTokensOut;
-				ap.tokensUsed += dispatchTokensUsed;
-			}
-			flushStreamBuf(ap);
-			// Save completed message text, reset for next message
-			if (ap.currentMessageText.trim()) {
-				ap.lastAssistantText = ap.currentMessageText;
-			}
-			ap.currentMessageText = "";
 			invalidate();
-			return;
+			if (ap.readyResolve) { ap.readyResolve(); ap.readyResolve = null; }
 		}
-
-		// Tool tracking
-		if (ev.type === "tool_execution_start") {
-			ap.toolCount++;
-			const args = ev.args;
-			let detail = "";
-			if (args && typeof args === "object") {
-				detail = Object.entries(args)
-					.filter(([, v]) => typeof v === "string")
-					.map(([k, v]) => `${k}=${(v as string).slice(0, 80)}`)
-					.join(" ");
-			}
-			logToolStart(ap, ev.toolName, detail);
+		if (!ev.success && ap.status === "running" && ap.resolveDispatch) {
+			const errMsg = ev.error || `${ev.command} failed`;
+			logErrorBox(ap, "PROMPT ERROR", errMsg);
+			ap.lastWork = `Error: ${errMsg}`;
+			ap.status = "error";
 			invalidate();
-			return;
+			resolveIfPending(ap, errMsg, 1);
 		}
+	}
 
-		if (ev.type === "tool_execution_end") {
-			logToolEnd(ap, ev.toolName, !ev.isError, ev.durationMs);
-			return;
-		}
+	function handleMessageUpdate(ap: AgentProc, ev: any) {
+		const delta = ev.assistantMessageEvent;
+		if (delta?.type !== "text_delta") return;
+		const chunk = delta.delta || "";
+		ap.collectedText += chunk;
+		ap.currentMessageText += chunk;
+		logStreamingText(ap, chunk);
+		const lastNl = chunk.lastIndexOf("\n");
+		const tail = lastNl >= 0 ? chunk.slice(lastNl + 1) : chunk;
+		if (tail.trim()) ap.lastWork = tail.slice(0, 80);
+	}
 
-		// Agent done - resolve the pending dispatch
-		if (ev.type === "agent_end") {
-			clearInterval(ap.timer);
-			flushStreamBuf(ap);
-
-			// Build output with fallback chain:
-			//   1. last completed assistant message (ideal)
-			//   2. current in-flight message text (subagent ended mid-stream)
-			//   3. full collected streaming text (no message_end ever fired)
-			//   4. "(no output)" sentinel (nothing was streamed at all)
-			const output = ap.lastAssistantText
-				|| ap.currentMessageText.trim()
-				|| ap.collectedText.trim()
-				|| "(no output)";
-
-			logDoneBox(ap, Math.round(ap.elapsed / 1000), ap.toolCount);
-			ap.status = "done";
-
-			// Extract last non-empty line from resolved output for widget display
-			let lastLine = "";
-			let scanFrom = output.length - 1;
-			while (scanFrom >= 0) {
-				const nl = output.lastIndexOf("\n", scanFrom);
-				const seg = output.slice(nl + 1, scanFrom + 1).trim();
-				if (seg) { lastLine = seg; break; }
-				scanFrom = nl - 1;
+	function handleMessageEnd(ap: AgentProc, ev: any) {
+		if (ev.message?.role !== "assistant") return;
+		const u = ev.message.usage;
+		if (u) {
+			const dispatchTokensOut = u.output || 0;
+			ap.cacheRead = u.cacheRead || 0;
+			ap.cacheWrite = u.cacheWrite || 0;
+			ap.cacheSavedTotal += ap.cacheRead;
+			let dispatchTokensUsed = u.input || 0;
+			if (u.totalTokens) {
+				const derived = u.totalTokens - dispatchTokensOut - ap.cacheRead - ap.cacheWrite;
+				dispatchTokensUsed = u.input || (derived > 0 ? derived : u.totalTokens - dispatchTokensOut);
 			}
-			ap.lastWork = lastLine;
+			ap.tokensOut += dispatchTokensOut;
+			ap.tokensUsed += dispatchTokensUsed;
+		}
+		flushStreamBuf(ap);
+		if (ap.currentMessageText.trim()) ap.lastAssistantText = ap.currentMessageText;
+		ap.currentMessageText = "";
+		invalidate();
+	}
 
-			// Clear buffers AFTER building output
-			ap.collectedText = "";
-			ap.currentMessageText = "";
-			ap.lastAssistantText = "";
+	function handleToolStart(ap: AgentProc, ev: any) {
+		ap.toolCount++;
+		let detail = "";
+		const args = ev.args;
+		if (args && typeof args === "object") {
+			detail = Object.entries(args)
+				.filter(([, v]) => typeof v === "string")
+				.map(([k, v]) => `${k}=${(v as string).slice(0, 80)}`)
+				.join(" ");
+		}
+		logToolStart(ap, ev.toolName, detail);
+		invalidate();
+	}
 
-			invalidate();
+	function handleToolEnd(ap: AgentProc, ev: any) {
+		logToolEnd(ap, ev.toolName, !ev.isError, ev.durationMs);
+	}
 
-			if (wCtx) {
-				wCtx.ui.notify(
-					tag(ap, `done (${Math.round(ap.elapsed / 1000)}s, ${ap.toolCount} tools)`),
-					"success",
-				);
-			}
+	function handleAgentEnd(ap: AgentProc, _ev: any) {
+		clearInterval(ap.timer);
+		flushStreamBuf(ap);
 
-			resolveIfPending(ap, output, 0);
+		const output = ap.lastAssistantText
+			|| ap.currentMessageText.trim()
+			|| ap.collectedText.trim()
+			|| "(no output)";
 
-			return;
+		logDoneBox(ap, Math.round(ap.elapsed / 1000), ap.toolCount);
+		ap.status = "done";
+		ap.lastWork = extractLastLine(output);
+
+		ap.collectedText = "";
+		ap.currentMessageText = "";
+		ap.lastAssistantText = "";
+
+		invalidate();
+
+		if (wCtx) {
+			wCtx.ui.notify(
+				tag(ap, `done (${Math.round(ap.elapsed / 1000)}s, ${ap.toolCount} tools)`),
+				"success",
+			);
 		}
 
-		// Compaction events (manual)
-		if (ev.type === "compaction_start") {
-			log(ap, boxLine(`COMPACT start (reason: ${ev.reason || "auto"})`, logWidth));
-			return;
-		}
-		if (ev.type === "compaction_end") {
-			if (ev.aborted) {
-				log(ap, boxLine(`COMPACT aborted`, logWidth));
-			} else {
-				log(ap, boxLine(`COMPACT done (${ev.reason || "auto"})`, logWidth));
-			}
-			return;
-		}
+		resolveIfPending(ap, output, 0);
+	}
 
-		// Auto-retry events: log for visibility (dispatch already resolved on agent_end)
-		if (ev.type === "auto_retry_start") {
-			log(ap, boxLine(`AUTO-RETRY attempt ${ev.attempt}/${ev.maxAttempts} (${ev.delayMs}ms)`, logWidth));
-			return;
+	/** Extract last non-empty line from text */
+	function extractLastLine(text: string): string {
+		let scanFrom = text.length - 1;
+		while (scanFrom >= 0) {
+			const nl = text.lastIndexOf("\n", scanFrom);
+			const seg = text.slice(nl + 1, scanFrom + 1).trim();
+			if (seg) return seg;
+			scanFrom = nl - 1;
 		}
-		if (ev.type === "auto_retry_end") {
-			log(ap, boxLine(`AUTO-RETRY ${ev.success ? "succeeded" : "failed"} (attempt ${ev.attempt})`, logWidth));
-			return;
-		}
-
-		// Extension UI requests: auto-respond (headless subagent)
-		if (ev.type === "extension_ui_request") {
-			autoRespondUI(ap, ev);
-			return;
-		}
+		return "";
 	}
 
 	function autoRespondUI(ap: AgentProc, ev: any) {
@@ -911,37 +890,14 @@ export default function (pi: ExtensionAPI) {
 				def,
 				teamModel: m.model,
 				model: m.model || def.model || orchestratorModel || "",
-				proc: null,
-				stdoutBuf: "",
-				status: "dead",
-				task: "",
-				collectedText: "",
-				currentMessageText: "",
-				lastAssistantText: "",
-				contextWindow: 0,
-				tokensUsed: 0,
-				tokensOut: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				cacheSavedTotal: 0,
-				toolCount: 0,
-				elapsed: 0,
-				lastWork: "",
-				runCount: 0,
-				ready: false,
-				readyResolve: null,
-				lastActivity: 0,
-				systemPromptFile: "",
-				resolveDispatch: null,
-				sessionFile: "",
-				streamLineBuf: "",
+				...blankProcState(),
 			});
 		}
 	}
 
 	// ── Dispatch ────────────────────────────────────────────────────
 
-	const MAX_RESPONSE_LENGTH = 5000; // Truncate subagent output to last N characters
+	const MAX_RESPONSE_LENGTH = 10000; // Truncate subagent output to last N characters
 	const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
 
 	async function dispatch(agentName: string, task: string): Promise<{ output: string; code: number; elapsed: number }> {
@@ -960,10 +916,7 @@ export default function (pi: ExtensionAPI) {
 			if (other.proc) killProc(other, true);
 		}
 
-		// Wipe session file BEFORE spawn to guarantee clean slate
-		if (ap.sessionFile && existsSync(ap.sessionFile)) {
-			try { unlinkSync(ap.sessionFile); } catch { }
-		}
+		wipeSessionFile(ap);
 
 		// Also wipe system prompt cache to avoid leaking between agents
 		ap.lastPromptHash = undefined;
@@ -1054,10 +1007,7 @@ export default function (pi: ExtensionAPI) {
 		// The pane will be reused on the next dispatch (same agent = same pane).
 		killProc(ap, true);
 
-		// Wipe session file so next dispatch starts fresh
-		if (ap.sessionFile && existsSync(ap.sessionFile)) {
-			try { unlinkSync(ap.sessionFile); } catch { }
-		}
+		wipeSessionFile(ap);
 
 		ap.status = "dead";
 		invalidate();
@@ -1156,7 +1106,6 @@ export default function (pi: ExtensionAPI) {
 			const bar = "█".repeat(filled) + "░".repeat(barW - filled);
 			const barColor = pct > 90 ? "error" : pct > 70 ? "warning" : "dim";
 
-			const fmtTok = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 			const tokenStr = `In=${fmtTok(ap.tokensUsed)}  Out=${fmtTok(ap.tokensOut)}`;
 			const pctStr = ` Ctx=${pct}%/${fmtTok(ap.contextWindow)}`;
 
@@ -1210,11 +1159,10 @@ export default function (pi: ExtensionAPI) {
 			};
 
 			try {
-				const apRef = procs.get(agent.toLowerCase());
-				const modelTag = apRef ? shortModel(apRef.model) : "?";
+				const tag = this.agentTag(agent);
 
 				onUpdate?.({
-					content: [{ type: "text", text: `[${agent}][${modelTag}] - dispatching...` }],
+					content: [{ type: "text", text: `${tag} - dispatching...` }],
 					details: { agent, task, status: "dispatching" },
 				});
 
@@ -1225,9 +1173,7 @@ export default function (pi: ExtensionAPI) {
 						if (ap && (ap.status === "running" || ap.status === "starting")) {
 							logErrorBox(ap, "ABORTED", "User pressed ESC");
 							killProc(ap, true);
-							if (ap.sessionFile && existsSync(ap.sessionFile)) {
-								try { unlinkSync(ap.sessionFile); } catch { }
-							}
+							wipeSessionFile(ap);
 							ap.status = "dead";
 							invalidate();
 						}
@@ -1240,11 +1186,11 @@ export default function (pi: ExtensionAPI) {
 				let output = r.output;
 				if (output.length > MAX_RESPONSE_LENGTH) {
 					output = output.slice(-MAX_RESPONSE_LENGTH);
-					output = "... [truncated to last 5000 chars]\n" + output;
+					output = "... [truncated to last 10000 chars]\n" + output;
 				}
 
 				const status = r.code === 0 ? "done" : "error";
-				const summary = `[${agent}][${modelTag}] - ${status} in ${Math.round(r.elapsed / 1000)}s`;
+				const summary = `${tag} - ${status} in ${Math.round(r.elapsed / 1000)}s`;
 
 				if (r.code !== 0 && wCtx) {
 					wCtx.ui.notify(summary, "error");
@@ -1263,14 +1209,18 @@ export default function (pi: ExtensionAPI) {
 			}
 		},
 
+		/** Get agent display info: [name][model] tag */
+		agentTag(name: string): string {
+			const apRef = procs.get(name.toLowerCase());
+			return `[${name}][${apRef ? shortModel(apRef.model) : "?"}]`;
+		},
+
 		renderCall(args, theme) {
 			const a = (args as any).agent || "?";
 			const t = (args as any).task || "";
-			const apRef = procs.get(a.toLowerCase());
-			const modelTag = apRef ? shortModel(apRef.model) : "?";
 			return new Text(
 				theme.fg("toolTitle", theme.bold("dispatch_agent ")) +
-				theme.fg("accent", `[${a}][${modelTag}] - `) +
+				theme.fg("accent", `${this.agentTag(a)} - `) +
 				theme.fg("muted", t),
 				0, 0,
 			);
@@ -1280,12 +1230,11 @@ export default function (pi: ExtensionAPI) {
 			const d = result.details as any;
 			if (!d) return new Text(result.content[0]?.text || "", 0, 0);
 
-			const apRef = procs.get((d.agent || "").toLowerCase());
-			const modelTag = apRef ? shortModel(apRef.model) : "?";
+			const tag = this.agentTag(d.agent || "?");
 
 			if (options.isPartial || d.status === "dispatching") {
 				return new Text(
-					theme.fg("accent", `[${d.agent || "?"}][${modelTag}] - working...`),
+					theme.fg("accent", `${tag} - working...`),
 					0, 0,
 				);
 			}
@@ -1293,7 +1242,7 @@ export default function (pi: ExtensionAPI) {
 			const icon = d.status === "done" ? "✓" : "✗";
 			const color = d.status === "done" ? "success" : "error";
 			const elapsed = typeof d.elapsed === "number" ? Math.round(d.elapsed / 1000) : 0;
-			const header = theme.fg(color, `${icon} [${d.agent}][${modelTag}] - ${elapsed}s`);
+			const header = theme.fg(color, `${icon} ${tag} - ${elapsed}s`);
 
 			if (options.expanded && d.fullOutput) {
 				return new Text(header + "\n" + theme.fg("muted", d.fullOutput), 0, 0);
@@ -1425,6 +1374,15 @@ export default function (pi: ExtensionAPI) {
 
 	// ── System Prompt Override ──────────────────────────────────────
 
+	function buildCatalog(): string {
+		return Array.from(procs.values())
+			.map(a => {
+				const alive = a.proc ? "alive" : "dead";
+				return `### ${displayName(a.def.name)}\n**Dispatch as:** \`${a.def.name}\` [${alive}]\n${a.def.description}\n**Tools:** ${a.def.tools}`;
+			})
+			.join("\n\n");
+	}
+
 	pi.on("before_agent_start", async (_event, _ctx) => {
 		if (!enabled) return;
 
@@ -1442,35 +1400,30 @@ export default function (pi: ExtensionAPI) {
 			}
 		}
 
-		const catalog = Array.from(procs.values())
-			.map(a => {
-				const alive = a.proc ? "alive" : "dead";
-				return `### ${displayName(a.def.name)}\n**Dispatch as:** \`${a.def.name}\` [${alive}]\n${a.def.description}\n**Tools:** ${a.def.tools}`;
-			})
-			.join("\n\n");
-
+		// Build catalog of available agents
+		const catalog = buildCatalog();
 		const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
 		const t0 = Date.now();
 		const cwd = process.cwd();
 		return {
-			systemPrompt: `You are a dispatcher. Delegate ALL work via dispatch_agent. No direct file access.
-Team: ${activeTeam} | Members: ${members}
-Each dispatch is fresh — include ALL context. One dispatch at a time. On error: notify user + suggest fix.
-- Only ONE agent can be dispatched at a time
-- When you need raw file then you are allowed to read the file directly using read tool
-
-## Rules
-- NEVER try to write, or execute code directly - you have no such tools
-- ALWAYS use dispatch_agent to get work done
-
-## Note
-- Subagent response is trucated to last 5000 chars
-
-## Agents
-
-${catalog}
+			systemPrompt: `
+You are a dispatcher. All work goes through dispatch_agent — you have no file-write or code-execution tools.
 
 Date: ${new Date(t0).toISOString().split("T")[0]} | CWD: ${cwd}
+Team: ${activeTeam} | Members: ${members}
+
+## Agents
+${catalog}
+
+# RULES (never break — violations cost time and money)
+- Dispatch ONE agent at a time; wait for response before dispatching next
+- Every dispatch is stateless — include ALL required context in each call
+- To read a file, use the read tool directly — do NOT dispatch an agent for it
+- Never write code or execute commands — you have no such tools
+- Skip .venv directory
+- Subagent responses are truncated to last 10,000 chars — extract key info before it scrolls out
+- On error: notify user with what failed and a suggested fix
+
 `,
 		};
 	});
@@ -1513,7 +1466,7 @@ Date: ${new Date(t0).toISOString().split("T")[0]} | CWD: ${cwd}
 		createSessionPane();
 
 		// Lock to dispatcher-only tools
-		pi.setActiveTools(["dispatch_agent", "askUserQuestion","read"]);
+		pi.setActiveTools(["dispatch_agent", "rpiv-ask-user-question", "rpiv-todo", "read"]);
 
 		_ctx.ui.setStatus("agent-team", `Team: ${activeTeam} (${procs.size})`);
 		const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
@@ -1521,7 +1474,6 @@ Date: ${new Date(t0).toISOString().split("T")[0]} | CWD: ${cwd}
 			`Team: ${activeTeam} (${members}) — agents spawn on-demand per task\n\n` +
 			`/agents-team          Select a team\n` +
 			`/agents-list          List agents + process status\n` +
-			`/agents-grid <1-6>    Set grid columns\n` +
 			`/agents-restart       Kill any running subagent processes`,
 			"info",
 		);

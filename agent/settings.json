@@ -1,19 +1,21 @@
 {
-  "lastChangelogVersion": "0.74.1",
+  "lastChangelogVersion": "0.75.5",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
   "defaultProvider": "zai",
   "defaultModel": "glm-5.1",
   "defaultThinkingLevel": "low",
   "packages": [
-    "npm:pi-ask-user-question",
+    "npm:@juicesharp/rpiv-ask-user-question",
+    "npm:@juicesharp/rpiv-todo",
     "npm:pi-updater",
     "npm:@marckrenn/pi-sub-bar"
   ],
   "theme": "cyberpunk",
   "hideThinkingBlock": false,
   "skills": [
-    "-skills/electron-scaffold/SKILL.md"
+    "-skills/electron-scaffold/SKILL.md",
+    "-skills/pyside6/SKILL.md"
   ],
   "enabledModels": [
     "openrouter/qwen/qwen3.6-plus",
@@ -29,7 +31,8 @@
   ],
   "extensions": [
     "-extensions/web-fetch.ts",
-    "+extensions/custom-footer.ts"
+    "+extensions/custom-footer.ts",
+    "+extensions/agent-team.ts"
   ],
   "terminal": {
     "showTerminalProgress": true

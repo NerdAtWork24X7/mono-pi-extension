@@ -1,5 +1,18 @@
 {
   "providers": {
+    "openrouter": {
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "api": "openai-completions",
+      "apiKey": "openrouter",
+      "models": [
+        {
+          "id": "nvidia/nemotron-3-super-120b-a12b:free",
+          "reasoning": true,
+          "contextWindow": 262144,
+          "maxTokens": 16384
+        }
+      ]
+    },
     "kilo": {
       "baseUrl": "https://api.kilo.ai/api/gateway",
       "api": "openai-completions",
@@ -19,6 +32,10 @@
         },
         {
           "id": "google/gemma-4-26b-a4b-it:free",
+          "reasoning": true
+        },
+        {
+          "id": "baidu/cobuddy:free",
           "reasoning": true
         }
       ]
