@@ -129,11 +129,11 @@ function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel"> {
 	};
 }
 
-function clearTimers(ap: AgentProc) {
-	clearInterval(ap.timer);
-	if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
-	if (ap.sigkillTimeout) { clearTimeout(ap.sigkillTimeout); ap.sigkillTimeout = undefined; }
-}
+	function clearTimers(ap: AgentProc) {
+		clearInterval(ap.timer);
+		if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
+		if (ap.sigkillTimeout) { clearTimeout(ap.sigkillTimeout); ap.sigkillTimeout = undefined; }
+	}
 
 /** Reset mutable dispatch fields on an AgentProc (reuses blank state pattern) */
 function resetForDispatch(ap: AgentProc) {
@@ -579,12 +579,21 @@ export default function (pi: ExtensionAPI) {
 		// Build args: --no-extensions to block auto-discovery (including agent-team),
 		// then explicitly load only non-agent-team extensions via -e.
 		// --tools uses the agent's prompt-file tools as the allowlist.
+
+		// Split provider from model if model contains a provider prefix
+		// e.g. "openrouter/baidu/cobuddy:free" → provider="openrouter", model="baidu/cobuddy:free"
+		const slashIdx = model.indexOf("/");
+		const hasProvider = slashIdx > 0;
+		const provider = hasProvider ? model.slice(0, slashIdx) : undefined;
+		const modelName = hasProvider ? model.slice(slashIdx + 1) : model;
+
 		const args = [
 			"--mode", "rpc",
 			"-p",
 			"--no-extensions",
 			...cachedExtPaths.flatMap(p => ["--extension", p]),
-			"--model", model,
+			...(provider ? ["--provider", provider] : []),
+			"--model", modelName,
 			"--tools", ap.def.tools,
 			"--system-prompt", ap.systemPromptFile,
 			"--session", ap.sessionFile,
@@ -836,7 +845,7 @@ export default function (pi: ExtensionAPI) {
 		return "";
 	}
 
-	function autoRespondUI(ap: AgentProc, ev: any) {
+		function autoRespondUI(ap: AgentProc, ev: any) {
 		if (!ap.proc?.stdin.writable) return;
 		const { id, method } = ev;
 
@@ -886,12 +895,12 @@ export default function (pi: ExtensionAPI) {
 		for (const m of members) {
 			const def = byName.get(m.name.toLowerCase());
 			if (!def) continue;
-			procs.set(def.name.toLowerCase(), {
-				def,
-				teamModel: m.model,
-				model: m.model || def.model || orchestratorModel || "",
-				...blankProcState(),
-			});
+		procs.set(def.name.toLowerCase(), {
+			def,
+			teamModel: m.model,
+			model: m.model || def.model || orchestratorModel || "",
+			...blankProcState(),
+		});
 		}
 	}
 
@@ -1372,6 +1381,46 @@ export default function (pi: ExtensionAPI) {
 
 
 
+	// ── Shortcut: Ctrl+Q toggle ─────────────────────────────────────
+
+	pi.registerShortcut("ctrl+q", {
+		description: "Toggle agent team on/off",
+		handler: async (ctx) => {
+			wCtx = ctx;
+			if (enabled) {
+				enabled = false;
+				persist();
+				await killAll();
+				const allNames = pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent");
+				pi.setActiveTools(allNames);
+				invalidate();
+				ctx.ui.notify("✓ Agent team disabled", "info");
+			} else {
+				enabled = true;
+				persist();
+
+				await killAll();
+				procs.clear();
+
+				loadAgents(ctx.cwd);
+				tmuxCwd = ctx.cwd;
+
+				const names = Object.keys(teams);
+				const teamToActivate = (activeTeam && names.includes(activeTeam)) ? activeTeam : (names[0] || "");
+				if (teamToActivate) await activateTeam(teamToActivate);
+
+				openSessionLog();
+				createSessionPane();
+
+				pi.setActiveTools(["dispatch_agent", "askUserQuestion"]);
+				invalidate();
+				const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
+				ctx.ui.setStatus("agent-team", `Team: ${activeTeam} (${procs.size})`);
+				ctx.ui.notify(`✓ Agent team enabled — Team: ${activeTeam} (${members})`, "info");
+			}
+		},
+	});
+
 	// ── System Prompt Override ──────────────────────────────────────
 
 	function buildCatalog(): string {
@@ -1466,15 +1515,14 @@ ${catalog}
 		createSessionPane();
 
 		// Lock to dispatcher-only tools
-		pi.setActiveTools(["dispatch_agent", "rpiv-ask-user-question", "rpiv-todo", "read"]);
+		pi.setActiveTools(["dispatch_agent", "ask_user_question", "todo", "read"]);
 
 		_ctx.ui.setStatus("agent-team", `Team: ${activeTeam} (${procs.size})`);
 		const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
 		_ctx.ui.notify(
 			`Team: ${activeTeam} (${members}) — agents spawn on-demand per task\n\n` +
 			`/agents-team          Select a team\n` +
-			`/agents-list          List agents + process status\n` +
-			`/agents-restart       Kill any running subagent processes`,
+			`/Ctrl+q                Toggle agent mode`,
 			"info",
 		);
 		invalidate();

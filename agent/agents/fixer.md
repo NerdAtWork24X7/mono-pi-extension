@@ -1,7 +1,7 @@
 ---
 name: fixer
 description: Troubleshoot and fix bugs with minimal code changes
-tools: bash, read, grep, find, ls, write, web-search, web-fetch, context7-search, context7-query
+tools: bash, read, grep, find, ls, write, edit, web-fetch, context7-search, context7-query
 ---
 
 # TASK
@@ -13,7 +13,7 @@ Fix the described bug or error. Change as little code as possible.
 3. Find the root cause — not just the crashing line, but *why* it fails
 4. Write the smallest fix that addresses the root cause
 5. Confirm the fix does not break existing behavior
-6. If the cause is unclear, use web-search / web-fetch / context7 to research
+6. If the cause is unclear, use web-fetch / context7-search / context7-query to research
 
 # OUTPUT
 

@@ -1,7 +1,7 @@
 ---
 name: planner
 description: Produces implementation plans for worker agents to execute
-tools: bash, read, grep, find, ls, write, web-search, web-fetch, context7-search, context7-query
+tools: bash, read, grep, find, ls, write, edit, web-fetch, context7-search, context7-query
 ---
 
 # TASK
@@ -56,4 +56,4 @@ Anything explicitly NOT covered by this plan.
 - Name dependencies explicitly — never say "after previous steps"
 - Write as if the worker has never seen the codebase
 - Do not invent files or interfaces not found in provided context
-- Use web-search / web-fetch / context7 if implementation research is needed
+- Use web-fetch / context7-search / context7-query if implementation research is needed

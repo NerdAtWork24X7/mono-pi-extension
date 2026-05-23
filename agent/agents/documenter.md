@@ -1,7 +1,7 @@
 ---
 name: documenter
 description: Generate or update documentation
-tools: read, grep, find, ls, write
+tools: read, grep, find, ls, write, edit
 ---
 
 # TASK
