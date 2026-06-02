@@ -10,21 +10,42 @@
 #       model: provider/model-name
 
 build_team:
+  - name: scout
+    model: opencode/deepseek-v4-flash-free
   - name: planner
+    model: opencode/mimo-v2.5-free 
   - name: worker
     model: zai/glm-5.1
   - name: reviewer
+    model: opencode/mimo-v2.5-free
+  - name: documenter
+    model: opencode/deepseek-v4-flash-free 
+
 
 fix_team:
+  - name: scout
+    model: opencode/deepseek-v4-flash-free
   - name: fixer
     model: zai/glm-5.1
 
 document_team:
   - name: documenter
+    model: opencode/deepseek-v4-flash-free
 
 worker_team:
   - name: scout
-    model: kilo/baidu/cobuddy:free
+    model: opencode/deepseek-v4-flash-free
   - name: planner
+    model: opencode/mimo-v2.5-free 
   - name: worker
     model: zai/glm-5.1
+  - name: reviewer
+    model: opencode/mimo-v2.5-free
+  - name: documenter
+    model: opencode/deepseek-v4-flash-free 
+
+test_team:
+  - name: scout
+  - name: planner
+  - name: worker
+  - name: reviewer

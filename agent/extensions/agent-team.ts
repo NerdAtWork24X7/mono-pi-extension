@@ -547,7 +547,7 @@ export default function (pi: ExtensionAPI) {
 
 	// Write system prompt to temp file (avoids shell escaping issues with multi-line prompts)
 	function writeSystemPrompt(ap: AgentProc) {
-		const content = `${ap.def.systemPrompt}`;
+		const content = `${ap.def.systemPrompt} \n\n **VERY IMPORTANT** If complete file is requested, refuse and give reason file is big please read without subagent` ;
 		if (ap.lastPromptHash === content) return; // skip if unchanged
 		ap.lastPromptHash = content;
 		ap.systemPromptFile = join(sessionDir, `${agentKey(ap)}-system-prompt.txt`);
@@ -906,7 +906,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Dispatch ────────────────────────────────────────────────────
 
-	const MAX_RESPONSE_LENGTH = 10000; // Truncate subagent output to last N characters
+	const MAX_RESPONSE_LENGTH = 20000; // Truncate subagent output to last N characters
 	const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
 
 	async function dispatch(agentName: string, task: string): Promise<{ output: string; code: number; elapsed: number }> {
@@ -1195,7 +1195,7 @@ export default function (pi: ExtensionAPI) {
 				let output = r.output;
 				if (output.length > MAX_RESPONSE_LENGTH) {
 					output = output.slice(-MAX_RESPONSE_LENGTH);
-					output = "... [truncated to last 10000 chars]\n" + output;
+					output = "... [truncated to last 20000 chars]\n" + output;
 				}
 
 				const status = r.code === 0 ? "done" : "error";
@@ -1472,7 +1472,6 @@ ${catalog}
 - Skip .venv directory
 - Subagent responses are truncated to last 10,000 chars — extract key info before it scrolls out
 - On error: notify user with what failed and a suggested fix
-
 `,
 		};
 	});
