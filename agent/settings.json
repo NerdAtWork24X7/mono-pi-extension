@@ -1,10 +1,10 @@
 {
-  "lastChangelogVersion": "0.75.5",
+  "lastChangelogVersion": "0.78.1",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
-  "defaultProvider": "zai",
-  "defaultModel": "glm-5.1",
-  "defaultThinkingLevel": "low",
+  "defaultProvider": "opencode",
+  "defaultModel": "deepseek-v4-flash-free",
+  "defaultThinkingLevel": "off",
   "packages": [
     "npm:@juicesharp/rpiv-ask-user-question",
     "npm:@juicesharp/rpiv-todo",
@@ -18,7 +18,6 @@
     "-skills/pyside6/SKILL.md"
   ],
   "enabledModels": [
-    "openrouter/qwen/qwen3.6-plus",
     "zai/glm-5.1",
     "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
     "xiaomi/mimo-v2.5-pro",
@@ -27,7 +26,9 @@
     "kilo/qwen/qwen3.6-plus",
     "kilo/nvidia/nemotron-3-super-120b-a12b:free",
     "kilo/google/gemma-4-26b-a4b-it:free",
-    "fcm/fcm"
+    "fcm/fcm",
+    "opencode/deepseek-v4-flash-free",
+    "opencode/mimo-v2.5-free"
   ],
   "extensions": [
     "-extensions/web-fetch.ts",

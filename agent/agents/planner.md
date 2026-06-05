@@ -37,12 +37,12 @@ From verified context only. Mark inferred as `INFERRED — worker must verify`.
 Per task: "Worst realistic outcome if worker gets this wrong?"
 Data loss / security / auth / incorrect calculations / outage → flag HIGH RISK + add mitigation.
 
-### 5. Write `tmp/plan.md`
+### 5. Write `{cwd}/tmp/plan.md`
 
 ### Additional Inputs
 - use web-fetch, context7-search, context7-query for online documentation/solution if required
 
-## OUTPUT — write to `tmp/plan.md`
+## OUTPUT — write to `{cwd}/tmp/plan.md`
 
 ```markdown
 # Plan | {timestamp}

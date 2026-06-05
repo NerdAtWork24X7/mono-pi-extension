@@ -19,7 +19,7 @@ You are a documentation agent. You produce `README.md`. Operators and developers
 # INPUT
 ```
 PROJECT: {project_root}   ← path to repo root
-CONTEXT: {context}        ← tmp/context.md from scout (use if available — do not re-read what scout already mapped)
+CONTEXT: {context}        ← `{cwd}/tmp/context.md` from scout (use if available — do not re-read what scout already mapped)
 ```
 
 ---

@@ -153,6 +153,126 @@ function resetForDispatch(ap: AgentProc) {
 	clearTimers(ap);
 }
 
+// ── Terminal Backend Abstraction ───────────────────────────────────────
+
+interface TerminalBackend {
+	detect(): boolean;
+	getTerminalWidth(): number;
+	createLogPane(cwd: string, logFile: string, origPaneId: string): string | null;
+	resizePane(paneId: string, width: number): void;
+	killPane(paneId: string): void;
+	isValidPaneId(id: string): boolean;
+}
+
+class TmuxBackend implements TerminalBackend {
+	detect(): boolean {
+		return !!process.env.TMUX;
+	}
+
+	getTerminalWidth(): number {
+		try {
+			const r = spawnSync("tmux", ["display-message", "-p", "#{client_width}"], { encoding: "utf-8" });
+			const w = parseInt(r.stdout?.trim() || "0", 10);
+			return w > 0 ? w : 0;
+		} catch { return 0; }
+	}
+
+	createLogPane(cwd: string, logFile: string, origPaneId: string): string | null {
+		// Validate origPaneId to prevent shell injection in the tmux shell script
+		if (origPaneId && !/^%\d+$/.test(origPaneId)) origPaneId = "";
+		const escapedCwd = cwd.replace(/'/g, "'\\''");
+		const lf = logFile.replace(/'/g, "'\\''");
+		// Vertical split: pane takes full window width and auto-resizes with terminal.
+		// Do NOT lock the width with `resize-pane -x` — it would prevent auto-resize.
+		const script = [
+			`P=$(tmux split-window -v -d -l 8 -c '${escapedCwd}' -P -F '#{pane_id}')`,
+			`tmux select-pane -t $P -T 'Agent Team Log'`,
+			`tmux send-keys -t $P 'tail -n +1 -f ${lf}' Enter`,
+			`echo $P`,
+			`tmux select-pane -t ${origPaneId}`,
+		].join("\n");
+		try {
+			const r = spawnSync("sh", ["-c", script], { encoding: "utf-8" });
+			return r.stdout?.trim() || null;
+		} catch { return null; }
+	}
+
+	resizePane(paneId: string, width: number): void {
+		try {
+			spawn("tmux", ["resize-pane", "-t", paneId, "-x", String(width)], { stdio: "ignore" });
+		} catch { }
+	}
+
+	killPane(paneId: string): void {
+		spawn("tmux", ["kill-pane", "-t", paneId], { stdio: "ignore" });
+	}
+
+	isValidPaneId(id: string): boolean {
+		return /^%\d+$/.test(id);
+	}
+}
+
+class HerdrBackend implements TerminalBackend {
+	detect(): boolean {
+		return process.env.HERDR_ENV === "1";
+	}
+
+	getTerminalWidth(): number {
+		// 1) Explicit hint wins — herdr hosts can export HERDR_PANE_WIDTH at session start.
+		const hint = parseInt(process.env.HERDR_PANE_WIDTH || "", 10);
+		if (Number.isFinite(hint) && hint > 0) return hint;
+		// 2) If stdio is still attached to the pane, stdout.columns reports its width.
+		if (process.stdout && Number.isFinite(process.stdout.columns) && (process.stdout.columns as number) > 0) {
+			return process.stdout.columns as number;
+		}
+		// 3) Fallback: typical herdr split is ~120 cols; the MIN/MAX clamp in updateLogWidth
+		//    still bounds this to [60, 300] so the value is just a sensible seed.
+		return 120;
+	}
+
+	createLogPane(cwd: string, logFile: string, _origPaneId: string): string | null {
+		const paneId = process.env.HERDR_PANE_ID || "";
+		if (!paneId) return null;
+		try {
+			// Split current pane downward. herdr returns a JSON envelope:
+			// {"id":"cli:pane:split","result":{"pane":{"pane_id":"w<hex>-<n>", ...}}, "type":"pane_info"}
+			const splitResult = spawnSync("herdr", ["pane", "split", paneId, "--direction", "down", "--cwd", cwd, "--no-focus"], { encoding: "utf-8" });
+			if (splitResult.status !== 0) return null;
+			let newId: string | undefined;
+			try {
+				const envelope = JSON.parse(splitResult.stdout || "");
+				newId = envelope?.result?.pane?.pane_id;
+			} catch {
+				return null;
+			}
+			if (!newId || !this.isValidPaneId(newId)) return null;
+			// Rename pane
+			const renameResult = spawnSync("herdr", ["pane", "rename", newId, "Agent Team Log"], { encoding: "utf-8" });
+			if (renameResult.status !== 0) return null;
+			// Run tail command in new pane
+			const runResult = spawnSync("herdr", ["pane", "run", newId, `tail -n +1 -f ${logFile}`], { encoding: "utf-8" });
+			if (runResult.status !== 0) return null;
+			return newId;
+		} catch (e) {
+			console.error("[agent-team/herdr] createLogPane failed:", e instanceof Error ? e.message : e);
+			return null;
+		}
+	}
+
+	resizePane(_paneId: string, _width: number): void {
+		// herdr has no resize-pane command; no-op
+	}
+
+	killPane(paneId: string): void {
+		spawn("herdr", ["pane", "close", paneId], { stdio: "ignore" });
+	}
+
+	isValidPaneId(id: string): boolean {
+		// herdr pane IDs are `w<hex>-<n>` (e.g. w65385dc1da5392-2); case-insensitive on the hex portion.
+		return /^w[0-9a-f]+-\d+$/i.test(id);
+	}
+}
+
 function parseTeamsYaml(raw: string): Record<string, TeamMember[]> {
 	const teams: Record<string, TeamMember[]> = {};
 	let cur = "";
@@ -236,6 +356,19 @@ function scanExtensionPaths(cwd: string): string[] {
 			}
 		} catch { }
 	}
+	// Also load absolute-path extensions from settings.json (e.g. observability)
+	try {
+		const settingsPath = join(getAgentDir(), "settings.json");
+		if (existsSync(settingsPath)) {
+			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
+			for (const ext of (raw.extensions || [])) {
+				if (typeof ext !== "string") continue;
+				if (ext.startsWith("-")) continue; // disabled
+				const resolved = ext.startsWith("/") ? ext : join(getAgentDir(), ext);
+				if (existsSync(resolved) && !paths.includes(resolved)) paths.push(resolved);
+			}
+		}
+	} catch { }
 	return paths.filter(p => !p.includes("agent-team"));
 }
 
@@ -322,9 +455,16 @@ export default function (pi: ExtensionAPI) {
 	let tmuxCwd = "";
 	let cachedExtPaths: string[] = []; // resolved once per session_start
 	let orchestratorModel = ""; // model id from orchestrator's context
-	let sharedPaneId: string | null = null; // single tmux pane for combined session log
+	let sharedPaneId: string | null = null; // single terminal pane for combined session log
 	let sessionLogFile = "";           // single combined log file path
 	let sessionLogStream: WriteStream | null = null; // single combined log stream
+
+	// ── Terminal backend auto-detection ────────────────────────────
+	const _herdrBackend = new HerdrBackend();
+	const _tmuxBackend = new TmuxBackend();
+	const terminal: TerminalBackend = _herdrBackend.detect() ? _herdrBackend
+		: _tmuxBackend.detect() ? _tmuxBackend
+		: _tmuxBackend; // fallback to tmux (will be no-op if tmux not available)
 
 	// Persist current runtime state to disk
 	function persist() {
@@ -341,11 +481,7 @@ export default function (pi: ExtensionAPI) {
 	let logWidth = MIN_logWidth; // updated dynamically
 
 	function getTerminalWidth(): number {
-		try {
-			const r = spawnSync("tmux", ["display-message", "-p", "#{client_width}"], { encoding: "utf-8" });
-			const w = parseInt(r.stdout?.trim() || "0", 10);
-			return w > 0 ? w : 0;
-		} catch { return 0; }
+		return terminal.getTerminalWidth();
 	}
 
 	function updateLogWidth() {
@@ -406,14 +542,23 @@ export default function (pi: ExtensionAPI) {
 	function hrPad(content: string, width: number, left: string, right: string, fill = "─"): string {
 		const inner = width - left.length - right.length;
 		const used = [...content].length; // unicode-aware length
-		const pad = Math.max(1, inner - used);
+		// 0 is valid: an empty closing line and a line that exactly fills `inner` both
+		// want no fill, only the two corners. Using Math.max(1, …) inflated those by 1 cell
+		// and shifted the right border left.
+		const pad = Math.max(0, inner - used);
 		return left + content + fill.repeat(pad) + right;
 	}
 
 	function boxLine(content: string, width: number): string {
 		const inner = width - 4; // "│ " + " │"
-		const truncated = [...content].length > inner ? [...content].slice(0, inner - 1).join("") + "..." : content;
-		return hrPad(` ${truncated} `, width, "│", "│", " ");
+		let body = content;
+		if ([...content].length > inner) {
+			// Reserve room for the marker so the total stays within `inner` cells.
+			const marker = `…[+N]`;
+			const cut = inner - marker.length;
+			body = [...content].slice(0, Math.max(0, cut)).join("") + marker;
+		}
+		return hrPad(` ${body} `, width, "│", "│", " ");
 	}
 
 	// ── Structured log events ──
@@ -459,50 +604,39 @@ export default function (pi: ExtensionAPI) {
 		log(hrPad("", logWidth, "╰", "╯"));
 	}
 
-	// ── Tmux Panes ──────────────────────────────────────────────────
+	// ── Terminal Panes ──────────────────────────────────────────────────
 
 	function resizeSharedPane() {
-		if (!sharedPaneId || !/^%\d+$/.test(sharedPaneId)) return;
-		const tw = getTerminalWidth();
+		if (!sharedPaneId || !terminal.isValidPaneId(sharedPaneId)) return;
+		const tw = terminal.getTerminalWidth();
 		if (tw <= 0) return;
-		try {
-			spawn("tmux", ["resize-pane", "-t", sharedPaneId, "-x", String(tw)], { stdio: "ignore" });
-		} catch { }
+		terminal.resizePane(sharedPaneId, tw);
+	}
+
+	function handleTerminalResize() {
+		updateLogWidth();
+		resizeSharedPane();
+		invalidate();
 	}
 
 	function createSessionPane() {
 		if (!enabled) return;
-		if (!process.env.TMUX || !sessionLogFile) return;
+		if (!terminal.detect()) return;
+		if (!sessionLogFile) return;
 		if (sharedPaneId) return; // pane already exists
 
-		const cwd = (tmuxCwd || process.cwd()).replace(/'/g, "'\\''");
-		const lf = sessionLogFile.replace(/'/g, "'\\''");
-		const origPane = process.env.TMUX_PANE || "";
-		if (origPane && !/^%\d+$/.test(origPane)) return;
-
-		const tw = getTerminalWidth();
-		const widthArg = tw > 0 ? `-x ${tw}` : "";
-		const script = [
-			`P=$(tmux split-window -v -d -l 8 -c '${cwd}' -P -F '#{pane_id}')`,
-			`tmux select-pane -t $P -T 'Agent Team Log'`,
-			widthArg ? `tmux resize-pane -t $P ${widthArg}` : "true",
-			`tmux send-keys -t $P 'tail -n +1 -f ${lf}' Enter`,
-			`echo $P`,
-			`tmux select-pane -t ${origPane}`,
-		].filter(Boolean).join("\n");
-		const ch = spawn("sh", ["-c", script], { stdio: ["pipe", "pipe", "pipe"] });
-		let pid = "";
-		ch.stdout.setEncoding("utf-8");
-		ch.stdout.on("data", (d: string) => { pid += d; });
-		ch.on("close", () => { const id = pid.trim(); if (id) sharedPaneId = id; });
+		const cwd = (tmuxCwd || process.cwd());
+		const origPane = process.env.TMUX_PANE || process.env.HERDR_PANE_ID || "";
+		const id = terminal.createLogPane(cwd, sessionLogFile, origPane);
+		if (id && terminal.isValidPaneId(id)) sharedPaneId = id;
 	}
 
 	function killPanes() {
 		closeSessionLog();
-		if (sharedPaneId && /^%\d+$/.test(sharedPaneId)) {
+		if (sharedPaneId && terminal.isValidPaneId(sharedPaneId)) {
 			const id = sharedPaneId;
 			sharedPaneId = null;
-			spawn("tmux", ["kill-pane", "-t", id], { stdio: "ignore" });
+			terminal.killPane(id);
 		}
 	}
 
@@ -906,7 +1040,7 @@ export default function (pi: ExtensionAPI) {
 
 	// ── Dispatch ────────────────────────────────────────────────────
 
-	const MAX_RESPONSE_LENGTH = 20000; // Truncate subagent output to last N characters
+	const MAX_RESPONSE_LENGTH = 20000; // Subagent tool-result cap. Keep the marker string in dispatch_agent in sync.
 	const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
 
 	async function dispatch(agentName: string, task: string): Promise<{ output: string; code: number; elapsed: number }> {
@@ -1011,7 +1145,7 @@ export default function (pi: ExtensionAPI) {
 			sessionLogStream.write("\n" + "═".repeat(logWidth) + "\n\n");
 		}
 
-		// Task complete — kill the subagent process but KEEP the tmux pane alive
+		// Task complete — kill the subagent process but KEEP the terminal pane alive
 		// so the user can scroll back and see what the agent did.
 		// The pane will be reused on the next dispatch (same agent = same pane).
 		killProc(ap, true);
@@ -1068,6 +1202,8 @@ export default function (pi: ExtensionAPI) {
 				invalidate() { text.invalidate(); },
 			};
 		});
+
+		process.stdout.on("resize", handleTerminalResize);
 	}
 
 	function invalidate() {
@@ -1195,7 +1331,7 @@ export default function (pi: ExtensionAPI) {
 				let output = r.output;
 				if (output.length > MAX_RESPONSE_LENGTH) {
 					output = output.slice(-MAX_RESPONSE_LENGTH);
-					output = "... [truncated to last 20000 chars]\n" + output;
+					output = `... [truncated to last ${MAX_RESPONSE_LENGTH} chars]\n` + output;
 				}
 
 				const status = r.code === 0 ? "done" : "error";
@@ -1472,6 +1608,7 @@ ${catalog}
 - Skip .venv directory
 - Subagent responses are truncated to last 10,000 chars — extract key info before it scrolls out
 - On error: notify user with what failed and a suggested fix
+- After completing the entire Task use documentor agent to update the Changelog.md and Readme.md files with latest changes
 `,
 		};
 	});
@@ -1509,7 +1646,7 @@ ${catalog}
 		const restoreTeam = (savedTeam && names.includes(savedTeam)) ? savedTeam : (names[0] || "");
 		if (restoreTeam) await activateTeam(restoreTeam);
 
-		// Open combined session log + create single tmux pane
+		// Open combined session log + create log pane
 		openSessionLog();
 		createSessionPane();
 
@@ -1530,6 +1667,7 @@ ${catalog}
 	// ── Session Shutdown ────────────────────────────────────────────
 
 	pi.on("session_shutdown", async () => {
+		process.stdout.off("resize", handleTerminalResize);
 		persist();
 		await killAll(true);
 	});

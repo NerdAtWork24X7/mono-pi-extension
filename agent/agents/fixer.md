@@ -16,7 +16,7 @@ You fix bugs surgically. Minimum code change. Only after proving root cause. You
 ## PROTOCOL
 
 ### 1. History
-Read `tmp/Changelog.md` if exists. What was tried before? Recurring failure = deeper root cause.
+Read `{cwd}/tmp/Changelog.md` if exists. What was tried before? Recurring failure = deeper root cause.
 
 ### 2. Reproduce
 `{command that triggers bug}` → record exact error output. You will use this to confirm fix.
