@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.78.1",
+  "lastChangelogVersion": "0.79.0",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
   "defaultProvider": "opencode",
@@ -18,17 +18,19 @@
     "-skills/pyside6/SKILL.md"
   ],
   "enabledModels": [
-    "zai/glm-5.1",
-    "openrouter/nvidia/nemotron-3-super-120b-a12b:free",
-    "xiaomi/mimo-v2.5-pro",
-    "xiaomi/mimo-v2.5",
-    "zai/glm-4.5-air",
-    "kilo/qwen/qwen3.6-plus",
-    "kilo/nvidia/nemotron-3-super-120b-a12b:free",
-    "kilo/google/gemma-4-26b-a4b-it:free",
-    "fcm/fcm",
+    "opencode/big-pickle",
     "opencode/deepseek-v4-flash-free",
-    "opencode/mimo-v2.5-free"
+    "opencode/nemotron-3-ultra-free",
+    "xiaomi/mimo-v2.5",
+    "xiaomi/mimo-v2.5-pro",
+    "kilo/poolside/laguna-m.1:free",
+    "kilo/stepfun/step-3.7-flash:free",
+    "kilo/nvidia/nemotron-3.5-content-safety:free",
+    "kilo/nvidia/nemotron-3-ultra-550b-a55b:free",
+    "kilo/nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "kilo/poolside/laguna-xs.2:free",
+    "kilo/nvidia/nemotron-3-super-120b-a12b:free",
+    "zai/glm-5.1"
   ],
   "extensions": [
     "-extensions/web-fetch.ts",

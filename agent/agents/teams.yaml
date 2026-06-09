@@ -36,9 +36,9 @@ worker_team:
   - name: scout
     model: opencode/deepseek-v4-flash-free
   - name: planner
-    model: opencode/mimo-v2.5-free 
+    model: xiaomi/mimo-v2.5-pro 
   - name: worker
-    model: zai/glm-5.1
+    model: opencode/mimo-v2.5-free 
   - name: reviewer
     model: opencode/mimo-v2.5-free
   - name: documenter

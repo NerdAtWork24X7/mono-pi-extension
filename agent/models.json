@@ -13,33 +13,6 @@
         }
       ]
     },
-    "kilo": {
-      "baseUrl": "https://api.kilo.ai/api/gateway",
-      "api": "openai-completions",
-      "apiKey": "kilo",
-      "compat": {
-        "supportsDeveloperRole": false,
-        "supportsReasoningEffort": false
-      },
-      "models": [
-        {
-          "id": "qwen/qwen3.6-plus",
-          "reasoning": true
-        },
-        {
-          "id": "nvidia/nemotron-3-super-120b-a12b:free",
-          "reasoning": true
-        },
-        {
-          "id": "google/gemma-4-26b-a4b-it:free",
-          "reasoning": true
-        },
-        {
-          "id": "baidu/cobuddy:free",
-          "reasoning": true
-        }
-      ]
-    },
     "xiaomi": {
       "baseUrl": "https://token-plan-ams.xiaomimimo.com/v1",
       "api": "openai-completions",
@@ -47,11 +20,15 @@
       "models": [
         {
           "id": "mimo-v2.5-pro",
-          "reasoning": true
+          "reasoning": true,
+          "contextWindow": 1048576,
+          "maxTokens": 131072
         },
         {
           "id": "mimo-v2.5",
-          "reasoning": true
+          "reasoning": true,
+          "contextWindow": 1048576,
+          "maxTokens": 131072
         }
       ]
     },
