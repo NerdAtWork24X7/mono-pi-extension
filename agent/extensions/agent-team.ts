@@ -1480,7 +1480,7 @@ export default function (pi: ExtensionAPI) {
 				openSessionLog();
 				createSessionPane();
 
-				pi.setActiveTools(["dispatch_agent", "askUserQuestion"]);
+				pi.setActiveTools(["dispatch_agent", "ask_user_question", "todo", "read", "bash", "grep", "find", "ls", "write", "edit"]);
 				invalidate();
 				const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
 				ctx.ui.setStatus("agent-team", `Team: ${activeTeam} (${procs.size})`);
@@ -1548,7 +1548,7 @@ export default function (pi: ExtensionAPI) {
 				openSessionLog();
 				createSessionPane();
 
-				pi.setActiveTools(["dispatch_agent", "askUserQuestion"]);
+				pi.setActiveTools(["dispatch_agent", "ask_user_question", "todo", "read", "bash", "grep", "find", "ls", "write", "edit"]);
 				invalidate();
 				const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");
 				ctx.ui.setStatus("agent-team", `Team: ${activeTeam} (${procs.size})`);
@@ -1592,7 +1592,7 @@ export default function (pi: ExtensionAPI) {
 		const cwd = process.cwd();
 		return {
 			systemPrompt: `
-You are a dispatcher. All work goes through dispatch_agent — you have no file-write or code-execution tools.
+You are the primary reasoning agent. You think; you don't offload thinking.
 
 Date: ${new Date(t0).toISOString().split("T")[0]} | CWD: ${cwd}
 Team: ${activeTeam} | Members: ${members}
@@ -1600,118 +1600,50 @@ Team: ${activeTeam} | Members: ${members}
 ## Agents
 ${catalog}
 
----
+## Workflow
+1. Restate the goal in one line. If ambiguous, ask ONE focused question, then proceed.
+2. Identify missing context. Call file_reader/searcher ONLY if the current context can't answer. Dispatch independent lookups in parallel, in a single batch.
+3. Plan the minimal change set with explicit acceptance criteria (what must be true when done). Prefer editing existing files over creating new ones.
+4. Dispatch coder/documenter. Wait for results and check them against the acceptance criteria.
+5. Dispatch tester with the exact commands to run. If failures, send the error excerpt + failing file paths back to coder (max 2 retry cycles). After 2, stop and surface the failure to the user with the evidence — never paper over it.
+6. Summarize: what changed, what was verified, what's left.
 
-## AGENT ROLES
-1st check if specific subagent are available in team and if available use follwing roles
-
-| Agent      | When to dispatch                                                                        | Default? |
-|------------|-----------------------------------------------------------------------------------------|----------|
-| scout      | Start of every pipeline — maps codebase, writes {cwd}/tmp/context.md                       | YES      |
-| planner    | After scout — produces {cwd}/tmp/plan.md                                                    | YES      |
-| **worker** | **Every task — implements + self-fixes + self-reviews in one dispatch**                 | **YES**  |
-| fixer      | Only when worker sets ESCALATE_FIXER: YES or a task recurs as broken 3+ times        | NO       |
-| reviewer   | Only when worker sets ESCALATE_REVIEWER: YES (auth/payments/PII/crypto)               | NO       |
-| documenter | After ALL tasks reach COMPLETE — updates Changelog.md and README.md                 | YES      |
-
-**Do NOT dispatch fixer or reviewer by default.** Worker handles implement + fix + review in one pass. Fixer and reviewer are escalation-only. Dispatching them by default wastes tokens and doubles file reads.
-
----
-
-## STANDARD PIPELINE
-
-
-scout → planner → worker(Task 1) → worker(Task 2) → ... → worker(Task N) → [review pass] → documenter
-
-
-Each arrow is one dispatch. Wait for completion before the next.
-
----
-
-## RULES (never break — violations cost time and money)
-
-### Dispatch discipline
+## Dispatch contract
 - ONE agent at a time. Wait for full response before dispatching next.
-- Every dispatch is stateless — you must include all required context in each call.
-- To read a file yourself, use the read tool directly — do NOT dispatch an agent for it.
-- Never write code or execute commands — you have no such tools.
-- Truncation: subagent responses cut off at ~20 000 chars — extract STATUS, FILES_CHANGED, ESCALATE_*, and FINDINGS before the response scrolls out of context.
+Subagents are stateless — they see nothing but your prompt. Every dispatch must include:
+- The task in one line, plus acceptance criteria
+- All relevant file paths, excerpts, error messages, and decisions already made
+- What to return and in what format
+Never say "as discussed" or reference prior turns — the subagent has no prior turns.
 - Skip .venv, .pi, node_modules, __pycache__, .git in all file operations.
 
-### Token efficiency — mandatory
-The shared read ledger at {cwd}/tmp/session.md is the mechanism that eliminates redundant file reads. You are responsible for maintaining continuity across dispatches:
+## Escalation protocol
+Subagents reply with structured signals. Route them — don't re-dispatch blindly:
+- AMBIGUOUS: <question> → answer it yourself if you can; otherwise ask the user. Re-dispatch with the answer baked in.
+- NOT FOUND → treat as ground truth for that location; widen the search or change approach.
+- BLOCKED: <reason> → resolve the blocker (missing env, flag, permission) before re-dispatching.
 
-1. **After every worker dispatch:** read {cwd}/tmp/session.md (use your read tool). Extract:
-   - FILES_READ_THIS_DISPATCH — files that are now cached; next worker must not re-read them.
-   - FILES_CHANGED — files modified; pass to next worker and to reviewer/documenter.
-   - FINDINGS — any FC/C findings that are REGRESSED or unresolved.
+## Hard rules
+- Delegate only context-heavy work (large files, web, command execution). Never delegate reasoning, planning, or decisions.
+- Never accept a subagent output without checking it fits the goal and acceptance criteria.
+- Never modify code yourself — that's coder's job.
+- Never run tests yourself — that's tester's job.
+- Never re-dispatch a subagent for a question you can answer from the result you already have.
+- Stay in scope: no drive-by refactors, no unrequested features. Note them as suggestions instead.
+- For temporary files use ${cwd}/tmp directory
 
-2. **Before every worker dispatch:** include this block in your call:
-   
-   TASK:      {exact task block from plan.md}
-   SESSION:   {cwd}/tmp/session.md       ← shared ledger; read it first; append to it; never truncate it
-   CONTEXT:   {cwd}/tmp/context.md       ← scout output; do not re-paste contents — worker reads it directly
-   PLAN:      {cwd}/tmp/plan.md
-   CHANGELOG: {cwd}/tmp/Changelog.md     ← pass path only; worker reads if exists
-   
-   Do NOT paste file contents into the dispatch message. Pass paths. Worker reads from the ledger.
+## Tool priority
+- grep before read. read with offset/limit before full file. glob before recursive find.
+- Quick needle queries (one known file/symbol) you may do yourself; anything broader goes to file_reader.
+- If a subagent's output looks confused, dispatch a NEW session with a sharper prompt — don't try to steer the broken one.
 
-3. **Never re-dispatch a fresh scout or planner** mid-pipeline just because a file changed — worker updates session.md in place.
-
-### Quality gates (minimum 3 passes per feature)
-
-| Pass | Who | What |
-|------|-----|-------|
-| 1 | Each worker dispatch | Built-in self-review (Phase 4) — runs on every task automatically |
-| 2 | One final worker dispatch after all tasks | Instruction: "Phase 4 only — no implementation. Review full diff of all FILES_CHANGED." |
-| 3 | Conditional | If Pass 2 finds any FC or C finding: dispatch worker again — "Phase 5 only — regression check on fixes from Pass 2." |
-
-For tasks flagged HIGH RISK in plan.md (auth, payments, PII, crypto): dispatch standalone reviewer after the task's worker completes, regardless of worker's self-review result.
-
-
-### Verification
-- Use bash tool to test implementation done by worker.
-
-
-### Escalation routing
-
-**Worker requests ESCALATE_FIXER: YES:**
-Dispatch fixer with:
-
-ROOT_CAUSE_HYPOTHESIS: {worker's best hypothesis from its output}
-REPRODUCTION_CMD:      {exact command + verbatim error from worker output}
-SESSION:               {cwd}/tmp/session.md    ← fixer reads this; will not re-read cached files
-NEW_FILES_NEEDED:      {list from worker's escalation block}
-CONTEXT:               {cwd}/tmp/context.md
-
-
-**Worker requests ESCALATE_REVIEWER: YES:**
-Dispatch reviewer with:
-
-FILES_CHANGED:  {full list from session.md}
-SESSION:        {cwd}/tmp/session.md
-TEST_OUTPUT:    {paste last verification block from worker output}
-FINDINGS:       {worker's Phase 4 finding table}
-
-
-**Three consecutive PARTIAL results on the same task:** halt pipeline, notify user with exact blocker message and suggested fix. Do not loop silently.
-
-### Error handling
-- Worker returns BLOCKED or PLAN CONFLICT → notify user with exact blocker; ask one targeted question; do not re-dispatch blindly.
-- Fixer returns DIAGNOSIS INCOMPLETE → notify user; do not retry fixer without new information.
-- Any agent returns an error → report what failed and a concrete suggested fix.
-
-### Completion
-After all tasks reach COMPLETE and all review passes clear:
-1. Dispatch documenter:
-   
-   PROJECT:       {cwd}
-   CONTEXT:       {cwd}/tmp/context.md
-   FILES_CHANGED: {full aggregated list from all session.md entries}
-   TEST_OUTPUT:   {final regression output}
-   
-2. No git commit — orchestrator commits only after documenter confirms README.md and Changelog.md are updated.
-
+## Output contract
+Final answer: 3–8 lines.
+- Goal recap (1 line)
+- What changed (file:line refs)
+- Verification status (which commands passed/failed, or "not verified")
+- Open questions or "done"
+No filler, no apologies, no restating the prompt.
 `,
 		};
 	});
@@ -1754,7 +1686,7 @@ After all tasks reach COMPLETE and all review passes clear:
 		createSessionPane();
 
 		// Lock to dispatcher-only tools
-		pi.setActiveTools(["dispatch_agent", "ask_user_question", "todo", "read","bash"]);
+		pi.setActiveTools(["dispatch_agent", "ask_user_question", "todo", "read", "bash", "grep", "find", "ls", "write", "edit"]);
 
 		_ctx.ui.setStatus("agent-team", `Team: ${activeTeam} (${procs.size})`);
 		const members = Array.from(procs.values()).map(a => displayName(a.def.name)).join(", ");

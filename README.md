@@ -11,7 +11,7 @@ A collection of extensions and agent configurations for the pi-coding-agent syst
 ## Architecture
 
 - **Ephemeral Subagent System**: Each task spawns a fresh `pi --mode rpc` process with no context accumulation between dispatches
-- **Agent Teams**: Configurable teams of specialized agents (scout, planner, worker, reviewer, documenter, fixer)
+- **Agent Teams**: Configurable teams of specialized agents (file_reader, searcher, coder, tester, documenter)
 - **Extension System**: Modular extensions for web fetching, documentation search, UI customization, and agent state management
 - **Tmux Integration**: Each agent runs in dedicated tmux panes with combined session logging
 - **Model Flexibility**: Support for multiple AI providers (OpenRouter, Xiaomi, NVIDIA, Kilo, local models)
@@ -23,12 +23,12 @@ mono-pi-extension/
 ├── agent/
 │   ├── agents/              # Agent definition files
 │   │   ├── teams.yaml       # Team configurations
-│   │   ├── scout.md         # Recon agent for codebase mapping
-│   │   ├── planner.md       # Implementation plan generator
-│   │   ├── worker.md        # Unified implement→fix→review agent
-│   │   ├── reviewer.md      # Adversarial code reviewer
-│   │   ├── documenter.md    # Documentation generator
-│   │   └── fixer.md         # Root-cause diagnosis and repair
+│   │   ├── coder.md         # Applies code changes, returns diffs
+│   │   ├── documenter.md    # README/API/changelog updates
+│   │   ├── file_reader.md   # Large repo/doc scanning, returns paths + minimal excerpts
+│   │   ├── searcher.md      # Web/docs lookups, returns sourced findings
+│   │   ├── tester.md        # Runs commands, returns pass/fail + evidence
+│   │   └── main_agent.md    # Static orchestrator reference (overridden at runtime)
 │   ├── extensions/          # Extension modules
 │   │   ├── agent-team.ts    # Main agent team orchestrator
 │   │   ├── context7.ts      # Documentation search tool
@@ -162,45 +162,37 @@ The agent team extension is designed to run within the pi-coding-agent environme
 
 ### Agent Types
 
-#### Scout Agent
-- **Role**: Fast codebase reconnaissance and context gathering
-- **Tools**: read, grep, find, ls, bash, write, edit, web-fetch, context7-search, context7-query
-- **Output**: Compressed context in `tmp/context.md`
-
-#### Planner Agent
-- **Role**: Creates implementation plans from context and requirements
-- **Tools**: bash, read, grep, find, ls, write, edit, web-fetch, context7-search, context7-query
-- **Output**: Implementation plans in `tmp/plan.md`
-
-#### Worker Agent
-- **Role**: Unified implement → self-fix → self-review agent
-- **Tools**: bash, read, grep, find, ls, write, edit, web-fetch, context7-search, context7-query
-- **Output**: Direct task execution with self-verification
-
-#### Reviewer Agent
-- **Role**: Escalation-only adversarial reviewer
-- **Tools**: bash, read, grep, find, ls, write, edit, web-fetch, context7-search, context7-query
-- **Output**: Review reports with findings and fixes
-
-#### Documenter Agent
-- **Role**: Analyze projects and generate developer-facing README.md
+#### Coder
+- **Role**: Applies code changes, returns diffs
 - **Tools**: bash, read, grep, find, ls, write, edit
-- **Output**: Comprehensive documentation
+- **Description**: Full executor — reads files, applies edits, reports diffs. No planning or review.
 
-#### Fixer Agent
-- **Role**: Escalation-only root-cause diagnosis and surgical repair
-- **Tools**: bash, read, grep, find, ls, write, edit, web-fetch, context7-search, context7-query
-- **Output**: Root cause analysis and minimal fixes
+#### Documenter
+- **Role**: README/API/changelog updates
+- **Tools**: read, grep, find, ls, write, edit
+- **Description**: Matches project voice, verifies signatures from source, updates cross-references.
+
+#### File Reader
+- **Role**: Large repo/doc scanning, returns paths + minimal excerpts
+- **Tools**: read, grep, find, ls, write, edit
+- **Description**: Precision scanner — uses grep/glob, skips generated/vendor files, returns excerpted findings.
+
+#### Searcher
+- **Role**: Web/docs lookups, returns sourced findings
+- **Tools**: read, grep, web-fetch, context7-search, context7-query, write, edit
+- **Description**: Primary-source preference, date-sensitive queries, multi-source verification for load-bearing claims.
+
+#### Tester
+- **Role**: Runs commands, returns pass/fail + evidence
+- **Tools**: bash, read, grep, find, ls, write
+- **Description**: Runs specified commands, captures stdout/stderr/exit code, stops at first hard failure unless run-all.
 
 ### Team Configurations
 
 Default teams in `teams.yaml`:
 
-- **build_team**: scout → planner → worker → reviewer → documenter
-- **fix_team**: scout → fixer
-- **document_team**: documenter
-- **worker_team**: scout → planner → worker → reviewer → documenter
-- **test_team**: scout → planner → worker → reviewer
+- **subagent_team**: file_reader (opencode/deepseek-v4-flash-free), searcher (opencode/deepseek-v4-flash-free), coder (xiaomi/mimo-v2.5-pro), tester (opencode/deepseek-v4-flash-free), documenter (opencode/deepseek-v4-flash-free)
+- **test_subagent_team**: coder, documenter, file_reader, searcher, tester
 
 ### Extensions
 
@@ -231,7 +223,7 @@ Herdr agent state reporting for integration with the Herdr terminal multiplexer.
 
 ```bash
 # From within pi coding agent with agent team enabled
-dispatch_agent(agent="scout", task="Analyze the project structure and identify key files")
+dispatch_agent(agent="file_reader", task="Analyze the project structure and identify key files")
 ```
 
 ### Monitor Agent Activity

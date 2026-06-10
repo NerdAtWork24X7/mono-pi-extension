@@ -9,43 +9,23 @@
 #     - name: agent_name
 #       model: provider/model-name
 
-build_team:
-  - name: scout
-    model: opencode/deepseek-v4-flash-free
-  - name: planner
-    model: opencode/mimo-v2.5-free 
-  - name: worker
-    model: zai/glm-5.1
-  - name: reviewer
-    model: opencode/mimo-v2.5-free
-  - name: documenter
-    model: opencode/deepseek-v4-flash-free 
 
-
-fix_team:
-  - name: scout
+subagent_team:
+  - name: file_reader
     model: opencode/deepseek-v4-flash-free
-  - name: fixer
-    model: zai/glm-5.1
-
-document_team:
-  - name: documenter
+  - name: searcher
     model: opencode/deepseek-v4-flash-free
-
-worker_team:
-  - name: scout
-    model: opencode/deepseek-v4-flash-free
-  - name: planner
+  - name: coder
     model: xiaomi/mimo-v2.5-pro 
-  - name: worker
-    model: opencode/mimo-v2.5-free 
-  - name: reviewer
-    model: opencode/mimo-v2.5-free
+  - name: tester
+    model: opencode/deepseek-v4-flash-free
   - name: documenter
     model: opencode/deepseek-v4-flash-free 
 
-test_team:
-  - name: scout
-  - name: planner
-  - name: worker
-  - name: reviewer
+test_subagent_team:
+  - name: coder
+  - name: documenter
+  - name: file_reader
+  - name: searcher
+  - name: tester
+  

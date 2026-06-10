@@ -5,12 +5,111 @@
 import { Type } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
-async function callContext7(method: string, args: Record<string, any>) {
-	const res = await fetch("https://mcp.context7.com/mcp", {
+function parseSSE(text: string, id: number): any | undefined {
+	const lines = text.split("\n");
+	let dataBuffer = "";
+	for (const line of lines) {
+		if (line.startsWith("data: ")) {
+			dataBuffer += line.substring(6);
+		} else if (line.trim() === "") {
+			if (dataBuffer) {
+				try {
+					const parsed = JSON.parse(dataBuffer);
+					if (parsed.id === id || (parsed.result && !parsed.id)) {
+						return parsed;
+					}
+				} catch {
+					// ignore
+				}
+				dataBuffer = "";
+			}
+		}
+	}
+	if (dataBuffer) {
+		try {
+			const parsed = JSON.parse(dataBuffer);
+			if (parsed.id === id || (parsed.result && !parsed.id)) {
+				return parsed;
+			}
+		} catch {
+			// ignore
+		}
+	}
+	return undefined;
+}
+
+function parseResponse(text: string, id: number): any {
+	try {
+		return JSON.parse(text);
+	} catch {
+		const sse = parseSSE(text, id);
+		if (sse) return sse;
+		throw new Error(`Failed to parse response from Context7 API. Raw response: ${text.substring(0, 200)}...`);
+	}
+}
+
+const MCP_ENDPOINT = "https://mcp.context7.com/mcp";
+const MCP_HEADERS = {
+	"Content-Type": "application/json",
+	"Accept": "application/json, text/event-stream",
+};
+
+async function initMCPSession(): Promise<string> {
+	const res = await fetch(MCP_ENDPOINT, {
+		method: "POST",
+		headers: MCP_HEADERS,
+		body: JSON.stringify({
+			jsonrpc: "2.0",
+			id: 0,
+			method: "initialize",
+			params: {
+				protocolVersion: "2024-11-05",
+				capabilities: {},
+				clientInfo: { name: "pi-agent", version: "1.0" },
+			},
+		}),
+	});
+
+	if (!res.ok) {
+		throw new Error(`MCP initialize failed: HTTP ${res.status}`);
+	}
+
+	const sessionId = res.headers.get("mcp-session-id");
+	if (!sessionId) {
+		throw new Error("MCP server did not return a session ID");
+	}
+
+	// Consume the response body
+	await res.text();
+
+	// Send initialized notification
+	const notifyRes = await fetch(MCP_ENDPOINT, {
 		method: "POST",
 		headers: {
-			"Content-Type": "application/json",
-			"Accept": "application/json, text/event-stream"
+			...MCP_HEADERS,
+			"Mcp-Session-Id": sessionId,
+		},
+		body: JSON.stringify({
+			jsonrpc: "2.0",
+			method: "notifications/initialized",
+		}),
+	});
+
+	if (!notifyRes.ok) {
+		throw new Error(`MCP notification failed: HTTP ${notifyRes.status}`);
+	}
+
+	return sessionId;
+}
+
+async function callContext7(method: string, args: Record<string, any>) {
+	const sessionId = await initMCPSession();
+
+	const res = await fetch(MCP_ENDPOINT, {
+		method: "POST",
+		headers: {
+			...MCP_HEADERS,
+			"Mcp-Session-Id": sessionId,
 		},
 		body: JSON.stringify({
 			jsonrpc: "2.0",
@@ -18,9 +117,9 @@ async function callContext7(method: string, args: Record<string, any>) {
 			method: "tools/call",
 			params: {
 				name: method,
-				arguments: args
-			}
-		})
+				arguments: args,
+			},
+		}),
 	});
 
 	if (!res.ok) {
@@ -28,48 +127,7 @@ async function callContext7(method: string, args: Record<string, any>) {
 	}
 
 	const text = await res.text();
-	let data: any;
-
-	try {
-		data = JSON.parse(text);
-	} catch (e) {
-		// If not valid JSON, try parsing as SSE
-		const lines = text.split("\n");
-		let dataBuffer = "";
-		for (const line of lines) {
-			if (line.startsWith("data: ")) {
-				dataBuffer += line.substring(6);
-			} else if (line.trim() === "") {
-				if (dataBuffer) {
-					try {
-						const parsed = JSON.parse(dataBuffer);
-						if (parsed.id === 1 || (parsed.result && !parsed.id)) {
-							data = parsed;
-							break;
-						}
-					} catch (err) {
-						// ignore
-					}
-					dataBuffer = "";
-				}
-			}
-		}
-		// Final attempt if no empty line at the end
-		if (!data && dataBuffer) {
-			try {
-				const parsed = JSON.parse(dataBuffer);
-				if (parsed.id === 1 || (parsed.result && !parsed.id)) {
-					data = parsed;
-				}
-			} catch (err) {
-				// ignore
-			}
-		}
-	}
-
-	if (!data) {
-		throw new Error(`Failed to parse response from Context7 API. Raw response: ${text.substring(0, 100)}...`);
-	}
+	const data = parseResponse(text, 1);
 
 	if (data.error) {
 		throw new Error(data.error.message);
@@ -86,7 +144,7 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "context7-search",
 		label: "Context7 Search",
-		description: "Search for a library and resolve its Context7 library ID for documentation queries.",
+		description: "Search for a library and resolve its Context7 library ID for Context7 Queries.",
 		parameters: Type.Object({
 			libraryName: Type.String({ description: "The name of the library (e.g. 'react')" }),
 			query: Type.String({ description: "Optional query to help find the library. If not provided, libraryName is used.", default: "" }),
