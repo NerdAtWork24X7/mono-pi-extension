@@ -16,11 +16,15 @@ subagent_team:
   - name: searcher
     model: opencode/deepseek-v4-flash-free
   - name: coder
-    model: xiaomi/mimo-v2.5-pro 
   - name: tester
     model: opencode/deepseek-v4-flash-free
   - name: documenter
     model: opencode/deepseek-v4-flash-free 
+  - name: doc_generator
+    model: opencode/deepseek-v4-flash-free 
+  - name: image_analyzer
+    model: opencode/deepseek-v4-flash-free 
+
 
 test_subagent_team:
   - name: coder
