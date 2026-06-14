@@ -9,6 +9,7 @@
 #     - name: agent_name
 #       model: provider/model-name
 
+memory_model: opencode/mimo-v2.5-free
 
 subagent_team:
   - name: file_reader

@@ -1,287 +1,206 @@
-# Mono Pi Extension
+# Mono Pi Extension - Multi-Agent System
 
-A collection of extensions and agent configurations for the pi-coding-agent system, enabling collaborative agent teams with ephemeral subagent orchestration.
+## Overview
+Primary reasoning agent orchestrates a multi-agent team to perform complex software development tasks with delegation to specialized subagents.
 
-## Requirements
+## How Agent Extension Works
 
-- **Runtime**: Node.js (compatible with pi-coding-agent)
-- **tmux**: Required for agent session management and combined logging
-- **pi-coding-agent**: Base agent system (`npm install -g @mariozechner/pi-coding-agent`)
+The Agent Team extension (`agent/extensions/agent-team/`) is a TypeScript plugin for `pi-coding-agent` that implements a **subagent orchestrator** pattern. Here's how it works:
 
-## Architecture
+### Highlight
+- Use free models for subagents for fetching data
+- Use frontier model for orchestration and coder 
+- This helps to save tons of token on low hanging tasks
 
-- **Ephemeral Subagent System**: Each task spawns a fresh `pi --mode rpc` process with no context accumulation between dispatches
-- **Agent Teams**: Configurable teams of specialized agents (file_reader, searcher, coder, tester, documenter)
-- **Extension System**: Modular extensions for web fetching, documentation search, UI customization, and agent state management
-- **Tmux Integration**: Each agent runs in dedicated tmux panes with combined session logging
-- **Model Flexibility**: Support for multiple AI providers (OpenRouter, Xiaomi, NVIDIA, Kilo, local models)
+### Architecture
 
-## Project structure
+- **index.ts** - Entry point: registers lifecycle hooks (`before_agent_start`, `agent_end`, `session_start`, `session_shutdown`), tool registration, slash commands, and keyboard shortcuts
+- **orchestration.ts** - Process manager: spawns/fresh `pi --mode rpc` processes per task, readiness probing, dispatch lifecycle, RPC event handling, 10-min pong timeout
+- **config.ts** - Agent definition parsing (YAML frontmatter from `.md` files), team YAML loading, skill discovery, extension path scanning, config persistence
+- **core.ts** - Type definitions (`AgentDef`, `AgentProc`, `TeamMember`, `TerminalBackend`), terminal backends (tmux/herdr), session logging, RPC subprocess spawner
+- **memory.ts** - Per-turn background memory summarizer: captures input/output, spawns a summarizer subprocess, maintains `.pi_memory/project_memory.md`
+- **ui.ts** - TUI widget: agent status grid, anim dots, tool counts, token usage display
+- **integrations.ts** - Tool registration (`dispatch_agent`), slash commands (`/agents-team`, `/agents-list`, `/agents-grid`, `/agents-team-toggle`, `/agents-restart`), keyboard shortcut (`Ctrl+q`)
 
-```
-mono-pi-extension/
-├── agent/
-│   ├── agents/              # Agent definition files
-│   │   ├── teams.yaml       # Team configurations
-│   │   ├── coder.md         # Applies code changes, returns diffs
-│   │   ├── documenter.md    # README/API/changelog updates
-│   │   ├── file_reader.md   # Large repo/doc scanning, returns paths + minimal excerpts
-│   │   ├── searcher.md      # Web/docs lookups, returns sourced findings
-│   │   ├── tester.md        # Runs commands, returns pass/fail + evidence
-│   │   └── main_agent.md    # Static orchestrator reference (overridden at runtime)
-│   ├── extensions/          # Extension modules
-│   │   ├── agent-team.ts    # Main agent team orchestrator
-│   │   ├── context7.ts      # Documentation search tool
-│   │   ├── web-fetch.ts     # Web page fetching
-│   │   ├── web-fetch_crawl4ai.ts  # Crawl4AI web fetching
-│   │   ├── kilo.ts          # Kilo AI provider integration
-│   │   ├── custom-footer.ts # Custom UI footer
-│   │   └── herdr-agent-state.ts   # Herdr agent state reporting
-│   ├── models.json          # Model provider configurations
-│   ├── agent-team-config.json     # Active team and grid settings
-│   ├── settings.json        # Global settings and enabled extensions
-│   └── themes/
-│       └── cyberpunk.json   # Cyberpunk theme configuration
-├── .pi/
-│   ├── agent-sessions/      # Runtime session data (auto-created)
-│   └── agent-logs/          # Session logs (auto-created)
-└── README.md
-```
+### Lifecycle
 
-## Install
+1. **Session start** - Load agent definitions (`.md` files from `agent/agents/`, `.pi/agents/`, `.claude/agents/`), parse `teams.yaml`, initialize process registry, create combined session log pane
+2. **Before agent start** - Override system prompt: inject agent catalog (available agents + their descriptions), project memory content (if enabled), AGENTS.md rules, and enabled skills
+3. **Dispatch** - Tool call `dispatch_agent(agent, task)` triggers a fresh `pi --mode rpc` subprocess spawn, readiness probe (get_state), task injection via JSON stdin, streaming RPC event handling (response, message_update, message_end, tool_execution, agent_end), 10-min activity timeout, session log recording
+4. **Agent end** - Cleanup: kill subprocess (SIGTERM + 2s SIGKILL backstop), wipe session files, log done box with elapsed time/tool count. If memory feature enabled: trigger background summarization of the turn
+5. **Session shutdown** - Persist config, await memory idle, kill all subprocesses, close session log, kill terminal pane
 
-```bash
-# Clone the repository
-git clone <repository-url>
-cd mono-pi-extension
+### Team System
 
-# Copy agent directory to your project
-cp -r agent/ /path/to/your/project/.pi/agents/
-```
-
-## Configure
-
-### Team Configuration
-
-Edit `agent/agents/teams.yaml` to define your teams:
+Teams are defined in `agent/agents/teams.yaml`. Each team is a named group of agents with optional model overrides:
 
 ```yaml
-# Simple format
-team_name:
-  - agent_name
+memory_model: opencode/mimo-v2.5-free
 
-# With model override
-team_name:
-  - name: agent_name
-    model: provider/model-name
+subagent_team:
+  - name: file_reader
+    model: opencode/deepseek-v4-flash-free
+  - name: searcher
+    model: opencode/deepseek-v4-flash-free
+  - name: coder
+  - name: tester
+    model: opencode/deepseek-v4-flash-free
+  - name: documenter
+    model: opencode/deepseek-v4-flash-free
+  - name: doc_generator
+    model: opencode/deepseek-v4-flash-free
+  - name: image_analyzer
+    model: opencode/deepseek-v4-flash-free
 ```
 
-### Model Configuration
+- Agents without a `model` key inherit the current orchestrator model
+- Team model overrides (`teamModel`) take highest precedence
+- Teams can be switched at runtime via `/agents-team` command
 
-Edit `agent/models.json` to configure AI providers:
+### Memory Feature (Background Summarization)
 
-```json
-{
-  "providers": {
-    "provider-name": {
-      "baseUrl": "https://api.example.com/v1",
-      "api": "openai-completions",
-      "apiKey": "your-api-key",
-      "models": [
-        {
-          "id": "model-name",
-          "reasoning": true,
-          "contextWindow": 262144,
-          "maxTokens": 16384
-        }
-      ]
-    }
-  }
-}
+When `memory_model` is set in `teams.yaml`, the extension captures every turn's user input + assistant output and spawns a summarizer subprocess that updates `.pi_memory/project_memory.md`. The memory file is reinjected into the orchestrator's system prompt on subsequent turns. Sections maintained: Design Decisions, Facts, User Taste, User Suggestions.
+
+### RPC Subprocess Model
+
+Each subagent runs in its own `pi --mode rpc` process:
+
+```
+pi --mode rpc -p --no-extensions \
+  --extension <ext-path> ... \
+  --provider <provider> \
+  --model <model> \
+  --tools <agent-tools> \
+  --system-prompt <prompt-file> \
+  --session <session-file>
 ```
 
-### Settings
+- Communication is line-delimited JSON over stdin/stdout
+- Events: `response`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_end`, `agent_end`
+- Subprocesses are ephemeral: spawned per task, killed after completion
 
-Edit `agent/settings.json` to configure:
+## Usage Guide
 
-```json
-{
-  "defaultProvider": "opencode",
-  "defaultModel": "deepseek-v4-flash-free",
-  "defaultThinkingLevel": "off",
-  "extensions": [
-    "+extensions/agent-team.ts",
-    "+extensions/custom-footer.ts"
-  ],
-  "enabledModels": [
-    "opencode/deepseek-v4-flash-free",
-    "xiaomi/mimo-v2.5-pro"
-  ]
-}
-```
+### Core Workflow Commands
 
-## Run
+- `task <action> <description>` - Create and manage tasks with status tracking
+- `dispatch_agent(agent, task)` - Send work to specialized subagents
+- `execute <command>` - Run shell commands and test verification
 
-### Development
+### Dispatch Lifecycle
 
-1. Start tmux session:
-```bash
-tmux
-```
+Each `dispatch_agent` call follows a strict lifecycle:
 
-2. Launch pi coding agent:
-```bash
-pi
-```
+1. **Spawn** - A fresh `pi --mode rpc` process is spawned for the target agent
+2. **Ready probe** - `get_state` probe sent 500ms after spawn; agent must respond within 15s
+3. **Task injection** - Task prompt is written as JSON to stdin
+4. **Execution** - Agent works autonomously, streaming text and tool events back via RPC
+5. **Activity timeout** - If no RPC event for 10 minutes, the process is force-killed
+6. **Cleanup** - On completion/error, process is killed (SIGTERM + 2s SIGKILL backstop), session files wiped
 
-3. Enable agent team mode:
-```bash
-/agents-team-toggle on
-```
+**Key properties:**
+- Subagents are **stateless** - each dispatch spawns a fresh process, no context carries over
+- All context must be included in every dispatch prompt
+- Session files (`.pi/agent-sessions/`) are cleaned after each dispatch
+- Combined session log (`.pi/agent-logs/`) tracks all activity chronologically
 
-4. Select a team:
-```bash
-/agents-team
-```
+### Subagent System
 
-### Production
+**Primary Subagents:**
+- **file_reader** - Scan codebases, find files, return minimal excerpts with line numbers
+- **searcher** - Research external docs, fetch web content, verify library usage
+- **coder** - Implement code changes, apply edits, return unified diffs
+- **tester** - Execute commands, run tests, verify results with pass/fail evidence
+- **documenter** - Update documentation, write README files, maintain changelogs
+- **doc_generator** - Create structured documents (`.xlsx`, `.pdf`, `.docx`, `.pptx`, `.html`, `.csv`, `.json`)
+- **image_analyzer** - Analyze, describe, extract text from, and classify images
 
-The agent team extension is designed to run within the pi-coding-agent environment. No separate build process is required.
+### Agent Definition Format
 
-## Usage
-
-### Available Commands
-
-| Command | Description |
-|---------|-------------|
-| `/agents-team` | Select an agent team |
-| `/agents-list` | List agents and their status |
-| `/agents-grid <1-6>` | Set grid display columns |
-| `/agents-team-toggle on\|off\|status` | Enable/disable agent teams |
-| `/agents-restart` | Kill running subagent processes |
-
-### Agent Types
-
-#### Coder
-- **Role**: Applies code changes, returns diffs
-- **Tools**: bash, read, grep, find, ls, write, edit
-- **Description**: Full executor — reads files, applies edits, reports diffs. No planning or review.
-
-#### Documenter
-- **Role**: README/API/changelog updates
-- **Tools**: read, grep, find, ls, write, edit
-- **Description**: Matches project voice, verifies signatures from source, updates cross-references.
-
-#### File Reader
-- **Role**: Large repo/doc scanning, returns paths + minimal excerpts
-- **Tools**: read, grep, find, ls, write, edit
-- **Description**: Precision scanner — uses grep/glob, skips generated/vendor files, returns excerpted findings.
-
-#### Searcher
-- **Role**: Web/docs lookups, returns sourced findings
-- **Tools**: read, grep, web-fetch, context7-search, context7-query, write, edit
-- **Description**: Primary-source preference, date-sensitive queries, multi-source verification for load-bearing claims.
-
-#### Tester
-- **Role**: Runs commands, returns pass/fail + evidence
-- **Tools**: bash, read, grep, find, ls, write
-- **Description**: Runs specified commands, captures stdout/stderr/exit code, stops at first hard failure unless run-all.
-
-### Team Configurations
-
-Default teams in `teams.yaml`:
-
-- **subagent_team**: file_reader (opencode/deepseek-v4-flash-free), searcher (opencode/deepseek-v4-flash-free), coder (xiaomi/mimo-v2.5-pro), tester (opencode/deepseek-v4-flash-free), documenter (opencode/deepseek-v4-flash-free)
-- **test_subagent_team**: coder, documenter, file_reader, searcher, tester
-
-### Extensions
-
-#### agent-team.ts
-Main orchestrator for ephemeral subagent management. Handles team activation, process spawning, and result collection.
-
-#### context7.ts
-Documentation search tool for querying external documentation via Context7 API.
-
-#### web-fetch.ts
-Web page fetching with HTML-to-text conversion. Basic implementation for simple content extraction.
-
-#### web-fetch_crawl4ai.ts
-Advanced web fetching using Crawl4AI for better content extraction with markdown output.
-
-#### kilo.ts
-Kilo AI provider integration for accessing 300+ models via the Kilo Gateway.
-
-#### custom-footer.ts
-Custom UI footer displaying token usage, cost, context window, and other session metrics.
-
-#### herdr-agent-state.ts
-Herdr agent state reporting for integration with the Herdr terminal multiplexer.
-
-## Common Operations
-
-### Dispatch an Agent Task
-
-```bash
-# From within pi coding agent with agent team enabled
-dispatch_agent(agent="file_reader", task="Analyze the project structure and identify key files")
-```
-
-### Monitor Agent Activity
-
-```bash
-# Check agent status
-/agents-list
-
-# Monitor session logs
-tail -f .pi/agent-logs/session-*.log
-```
-
-### Customize Agent Behavior
-
-Edit agent definition files in `agent/agents/`:
+Agents are defined by `.md` files with YAML frontmatter:
 
 ```markdown
 ---
-name: custom-agent
-description: Custom agent description
-tools: read,write,grep,find,ls
-model: provider/model-name
-thinking: off
+name: agent_name
+description: What this agent does
+tools: read,write,edit,grep,find,ls
+model: provider/model-id   # optional - defaults to orchestrator model
+thinking: on/off            # optional
 ---
 
-# WHO YOU ARE
-You are a custom agent with specific capabilities.
-
-# STRICT RULES
-- Your specific rules and constraints
-- Tools you can and cannot use
-- Output format requirements
+Agent system prompt in markdown body...
 ```
 
-## Known Issues / Gotchas
+### Slash Commands
 
-- **tmux Required**: Agent team functionality requires tmux for session management. Without tmux, extensions will fail to create log panes.
-- **Process Cleanup**: Each dispatch spawns a fresh process. If processes aren't properly killed, they may accumulate. Use `/agents-restart` to clean up.
-- **Context Isolation**: No context carries over between dispatches. Include all necessary context in task descriptions.
-- **Model Compatibility**: Not all models support the same features. Check model capabilities in `models.json` before assigning to agents.
+- `/agents-team` - Select and activate a different team
+- `/agents-list` - List agents with process status and run counts
+- `/agents-grid <1-6>` - Set UI grid columns for agent status widgets
+- `/agents-team-toggle on|off|status` - Enable/disable the agent team
+- `/agents-restart` - Kill all running subagent processes
+- `Ctrl+q` - Keyboard shortcut to toggle agent team on/off
 
-## Troubleshooting
+### Example Workflow
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `tmux command not found` | tmux not installed | Install tmux (see Requirements) |
-| Agent process stuck | Process not responding | Run `/agents-restart` to kill stuck processes |
-| Agent team disabled | Agent team mode not enabled | Run `/agents-team-toggle on` |
-| No agents loaded | Agent directory structure incorrect | Verify agent files exist in `agent/agents/` |
-| Model errors | Invalid model configuration | Check `models.json` for correct provider/model IDs |
-| Extension errors | Missing or disabled extensions | Check `settings.json` extensions array |
+1. **Planning:** Use task system to break down requirements
+2. **Research:** Dispatch searcher for external API docs, file_reader for code context
+3. **Implementation:** Dispatch coder with specific edits and acceptance criteria
+4. **Verification:** Dispatch tester with exact commands to validate passing/failing
+5. **Documentation:** Dispatch documenter to update project docs
+6. **Reporting:** Dispatch doc_generator for structured output (`.xlsx`, `.pdf`, `.html`)
 
-## Contributing
+### Error Handling & Escalation Protocol
 
-To extend the agent system:
+Subagents reply with structured signals. Route them appropriately:
 
-1. Create new agent definition files in `agent/agents/`
-2. Configure teams in `agent/agents/teams.yaml`
-3. Add new extensions in `agent/extensions/`
-4. Update `agent/settings.json` to enable new extensions
-5. Test with existing teams before adding to production configurations
+- `AMBIGUOUS: <question>` - Answer it yourself if you can; otherwise ask the user
+- `NOT FOUND` - Treat as ground truth; widen search or change approach
+- `BLOCKED: <reason>` - Resolve the blocker before re-dispatching
+
+**Retry limit:** Max 2 retry cycles for failures. After 2, surface the failure with evidence.
+
+## Key Rules & Best Practices
+
+- ONE agent at a time - wait for full response before dispatching next
+- Subagents are stateless - include all context in each dispatch prompt
+- Always check acceptance criteria before proceeding
+- Skip `.venv`, `.pi`, `node_modules`, `__pycache__`, `.git` directories
+- Use `grep` over `cat` for file searches, limit reads to specific line ranges
+- Never generate file content as inline tokens - use doc_generator for all file outputs
+- Delegate only context-heavy work (large files, web, command execution). Never delegate reasoning, planning, or decisions
+- If a subagent output looks confused, dispatch a new session with a sharper prompt - do not try to steer the broken one
+
+## Getting Started
+
+1. Install project dependencies
+2. Set up virtual environment with `uv`
+3. Use task system to plan your work
+4. Dispatch appropriate subagents based on needs
+5. Verify all changes before finalization
+
+## Project Structure
+
+- `/agent/` - Agent definitions, skills, extensions, and team configuration
+- `/agent/agents/` - Agent `.md` definition files, `teams.yaml` team definitions
+- `/agent/extensions/agent-team/` - Agent team extension implementation (orchestrator)
+- `/agent/extensions/` - Extension modules (web-fetch, tools, herdr, kilo, token router)
+- `/agent/skills/` - Skill definitions (flet, pyside6, electron-scaffold, architecture)
+- `/.pi/` - Project configuration, agent session files, logs
+- `/.pi/agent-sessions/` - Subagent session files (JSON/RPC state)
+- `/.pi/agent-logs/` - Combined session log files (chronological activity)
+- `/.pi_memory/` - Project memory file (per-turn background summarization)
+
+## Quick Reference
+
+- **Problem decomposition** → Dispatch file_reader/searcher for context
+- **Code changes** → Dispatch coder with specific edits and acceptance criteria
+- **Testing** → Dispatch tester with exact commands to verify
+- **Documentation** → Dispatch documenter with update requirements
+- **Report generation** → Dispatch doc_generator with output format
+- **Image analysis** → Dispatch image_analyzer for visual content extraction
+- **Team selection** → `/agents-team` command
+- **Toggle agent mode** → `Ctrl+q` or `/agents-team-toggle`
+
+See `agent/AGENTS.md` for detailed subagent rules and interfaces.
+See `agent/extensions/agent-team/` for the full extension source code (TypeScript).
+See `agent/agents/teams.yaml` for team configuration.

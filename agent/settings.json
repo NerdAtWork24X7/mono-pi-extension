@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.79.0",
+  "lastChangelogVersion": "0.79.3",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
   "defaultProvider": "opencode",
@@ -35,7 +35,7 @@
   "extensions": [
     "-extensions/web-fetch.ts",
     "+extensions/custom-footer.ts",
-    "+extensions/agent-team.ts"
+    "+extensions/agent-team/index.ts"
   ],
   "terminal": {
     "showTerminalProgress": true
