@@ -24,7 +24,7 @@ subagent_team:
   - name: doc_generator
     model: opencode/deepseek-v4-flash-free 
   - name: image_analyzer
-    model: opencode/deepseek-v4-flash-free 
+    model: opencode/mimo-v2.5-free
 
 
 test_subagent_team:
