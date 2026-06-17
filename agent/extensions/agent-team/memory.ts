@@ -39,7 +39,8 @@ Rules (strictly enforced):
 }
 
 
-const SUBPROCESS_TIMEOUT_MS = 60_000;
+/** Max idle time (no stdout line) before the memory subprocess is aborted. */
+const IDLE_TIMEOUT_MS = 60_000;
 
 /** Pull the final assistant text from an agent_end messages array. */
 export function extractLastAssistantText(messages: any[]): string {
@@ -282,12 +283,11 @@ export class MemoryManager {
 			let fileWritten = false;
 			let ready = false;
 			let settled = false;
-			let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
+			let lastLineAt = Date.now();
 
 			const finish = (fn: () => void) => {
 				if (settled) return;
 				settled = true;
-				if (timeoutHandle) { clearTimeout(timeoutHandle); timeoutHandle = null; }
 				if (memoryAp.timer) { clearInterval(memoryAp.timer); memoryAp.timer = undefined; }
 				try { sub.kill(); } catch { }
 				fn();
@@ -298,6 +298,7 @@ export class MemoryManager {
 				args: cliArgs,
 				logger: this.logger,
 				onLine: (line) => {
+					lastLineAt = Date.now();
 					let ev: any;
 					try { ev = JSON.parse(line); } catch { return; }
 
@@ -390,12 +391,11 @@ export class MemoryManager {
 			memoryAp.timer = setInterval(() => {
 				memoryAp.elapsed = Date.now() - t0;
 				this.state.elapsed = memoryAp.elapsed;
+				if (Date.now() - lastLineAt > IDLE_TIMEOUT_MS) {
+					finish(() => reject(new Error(`memory subprocess idle for more than ${IDLE_TIMEOUT_MS}ms`)));
+				}
 				this.invalidate();
 			}, 500);
-
-			timeoutHandle = setTimeout(() => {
-				finish(() => reject(new Error(`memory subprocess timed out after ${SUBPROCESS_TIMEOUT_MS}ms`)));
-			}, SUBPROCESS_TIMEOUT_MS);
 
 			// Readiness probe — mirrors process.ts. Wait 500ms, then ask for state.
 			setTimeout(() => {

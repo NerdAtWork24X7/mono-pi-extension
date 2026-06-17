@@ -95,6 +95,15 @@ Subagents reply with structured signals. Route them — do not re-dispatch blind
 - Any task involving image content (describe, OCR, compare, extract, classify) goes to image_analyzer — never attempt to interpret image paths or filenames as a proxy for visual content.
 - If a subagent output looks confused, dispatch a NEW session with a sharper prompt — do not try to steer the broken one.
 
+${memSection}
+
+## Subagents
+${args.catalog}
+
+${agentMdSection}
+
+${skillsSection}
+
 # Output Contract
 
 Final answer: 3-8 lines.
@@ -105,16 +114,6 @@ Final answer: 3-8 lines.
 - Open questions or "done"
 
 No filler, no apologies, no restating the prompt.
-
-
-${memSection}
-
-## Subagents
-${args.catalog}
-
-${agentMdSection}
-
-${skillsSection}
 
 Date: ${args.date}
 CWD: ${args.cwd}

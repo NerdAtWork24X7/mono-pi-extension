@@ -358,8 +358,10 @@ export class HerdrBackend implements TerminalBackend {
 	}
 
 	isValidPaneId(id: string): boolean {
-		// herdr pane IDs are `w<hex>-<n>` (e.g. w65385dc1da5392-2); case-insensitive on the hex portion.
-		return /^w[0-9a-f]+-\d+$/i.test(id);
+		// herdr pane IDs: as of herdr 0.7.0 the format is `w<hex>:<alnum>`
+		// (e.g. w654222c09d4a21:p8, suffix is hex/case-insensitive); pre-0.7.0
+		// used `w<hex>-<n>` (e.g. w65385dc1da5392-2). Both forms are accepted.
+		return /^w[0-9a-f]+[:-][a-z0-9]+$/i.test(id);
 	}
 }
 
