@@ -31,6 +31,7 @@ import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamI
 import { MemoryManager, extractLastAssistantText } from "./memory";
 import { buildCatalog, buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl } from "./ui";
 import { registerDispatchAgentTool, registerCommands, registerShortcut } from "./integrations";
+import { homedir } from "os";
 
 export class AgentTeam implements AgentTeamContext {
 	pi: ExtensionAPI;
@@ -228,8 +229,9 @@ export class AgentTeam implements AgentTeamContext {
 	// ── Agent Loading ───────────────────────────────────────────────
 
 	async loadAgents(cwd: string): Promise<void> {
-		this.sessionDir = join(cwd, ".pi", "agent-sessions");
-		this.logDir = join(cwd, ".pi", "agent-logs");
+
+		this.sessionDir = join(homedir(), ".pi","agent-team-log","agent-sessions");
+		this.logDir = join(homedir(), ".pi","agent-team-log","agent-logs");
 		this.memoryDir = join(cwd, ".pi_memory");
 		this.memoryFile = "";
 		mkdirSync(this.sessionDir, { recursive: true });

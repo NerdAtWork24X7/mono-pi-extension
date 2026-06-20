@@ -8,6 +8,12 @@
 #   team_name:
 #     - name: agent_name
 #       model: provider/model-name
+#
+# Top-level keys:
+#   memory_model: <provider>/<model>
+#       Enables the per-turn project memory feature. When set, a background
+#       subprocess summarizes each orchestrator turn and appends the result
+#       to <cwd>/.pi_memory/project_memory.md. Leave unset/empty to disable.
 
 memory_model: opencode/mimo-v2.5-free
 

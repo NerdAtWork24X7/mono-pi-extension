@@ -354,7 +354,7 @@ export class ProcessManager {
 
 	// Write system prompt to temp file (avoids shell escaping issues with multi-line prompts)
 	writeSystemPrompt(ap: AgentProc) {
-		const content = `${ap.def.systemPrompt}\n\n**VERY IMPORTANT**: If asked to read or write a complete file, refuse and explain that the file is too large to process as a whole — read it in chunks via the read tool instead of delegating to another subagent.`;
+		const content = `${ap.def.systemPrompt}\n\n`;
 		if (ap.lastPromptHash === content && ap.systemPromptFile && existsSync(ap.systemPromptFile)) return; // skip if unchanged and file still exists
 		ap.lastPromptHash = content;
 		ap.systemPromptFile = join(this.sessionDir(), `${agentKey(ap)}-system-prompt.txt`);

@@ -7,7 +7,12 @@
   "defaultThinkingLevel": "off",
   "packages": [
     "npm:@juicesharp/rpiv-ask-user-question",
-    "npm:@juicesharp/rpiv-todo",
+    {
+      "source": "npm:@juicesharp/rpiv-todo",
+      "extensions": [
+        "-index.ts"
+      ]
+    },
     "npm:pi-updater",
     "npm:@marckrenn/pi-sub-bar"
   ],

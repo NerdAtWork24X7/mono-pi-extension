@@ -12,4 +12,4 @@
 - Use virtual environment + `uv` for Python scripts.
 - On error: check docs, check source, find root cause before retrying.
 - **ZERO TOLERANCE for errors** — verify every claim against source before writing it.
-- Skip .venv directory
+- **IMPORTANT** : Ignore \`.venv\`, \`.pi\`, \`node_modules\`, \`__pycache__\`, \`.git\` in all file operations
