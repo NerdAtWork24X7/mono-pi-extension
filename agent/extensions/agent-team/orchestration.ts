@@ -1,6 +1,7 @@
 // ── Orchestration: process manager + dispatch + RPC handlers ──
 
 import { unlinkSync, writeFileSync, existsSync } from "fs";
+import { homedir } from "os";
 import { join } from "path";
 import type { AgentProc } from "./core";
 import type { SessionLogger } from "./core";
@@ -446,6 +447,13 @@ export class ProcessManager {
 			"--system-prompt", ap.systemPromptFile,
 			"--session", ap.sessionFile,
 		];
+
+		// Record exact spawn command to tmp file (debug aid — not logged to SessionLogger)
+		const AgentCmdDir = join(homedir(), ".pi","agent-team-log","agent-cmd");
+		const cmdParts = [bin, ...args].map(a => /[\s"'\\$\``]/.test(a) ? JSON.stringify(a) : a);
+		const cmdLine = cmdParts.join(" ");
+		const body = `${new Date().toISOString()}\nagent: ${displayName(ap.def.name)}\n\n${cmdLine}\n`;
+		writeFileSync(join(AgentCmdDir, `spawn-cmd-${agentKey(ap)}.txt`), body);
 
 		const sub = spawnRpcSubprocess({
 			bin,

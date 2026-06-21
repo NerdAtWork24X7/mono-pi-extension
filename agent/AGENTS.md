@@ -1,15 +1,14 @@
-# Subagent Rules
-
-## Absolute
+# Absolute
 - Start in CWD. Search CWD if missing context.
-- Keep output precise. Sacrifice grammar for density. No summaries unless asked.
-- Read Readme.md and Changelog.md before reading project files.
-- NEVER load full files — use `read` with line ranges. Use grep over cat.
+- Keep output precise. Sacrifice grammar for density, no summaries unless asked.
+- For codebase-navigation/editing roles: read Readme.md and Changelog.md before other project files.
+- NEVER load full files , use `read` with line ranges. Use grep over cat.
 - Skip lock files, build artifacts, generated code.
 - After editing, drop file contents from context. Reference by file:line.
-- One tool call at a time. No exploratory reads.
-- Ask before loading any file >200 lines.
-- Use virtual environment + `uv` for Python scripts.
-- On error: check docs, check source, find root cause before retrying.
-- **ZERO TOLERANCE for errors** — verify every claim against source before writing it.
-- **IMPORTANT** : Ignore \`.venv\`, \`.pi\`, \`node_modules\`, \`__pycache__\`, \`.git\` in all file operations
+- Sequence tool calls one at a time.
+- If a file exceeds 200 lines, read it in line-range chunks , you are stateless and cannot pause to ask permission; note in your output that a large file was involved.
+- Python scripts: use the `<cwd>/.venv` virtual environment with `pip`.
+- On error: identify root cause via docs/source before retrying , never retry blindly.
+- **ZERO TOLERANCE for errors** , verify every claim against source before writing it.
+- **IMPORTANT** : Ignore `.venv`, `.pi`, `node_modules`, `__pycache__`, `.git` in all file operations.
+- If any rule above conflicts with your role's own system prompt (its Behavior, Forbidden list, or tool grant), your role's prompt takes precedence.

@@ -232,10 +232,12 @@ export class AgentTeam implements AgentTeamContext {
 
 		this.sessionDir = join(homedir(), ".pi","agent-team-log","agent-sessions");
 		this.logDir = join(homedir(), ".pi","agent-team-log","agent-logs");
+		const AgentCmdDir = join(homedir(), ".pi","agent-team-log","agent-cmd");
 		this.memoryDir = join(cwd, ".pi_memory");
 		this.memoryFile = "";
 		mkdirSync(this.sessionDir, { recursive: true });
 		mkdirSync(this.logDir, { recursive: true });
+		mkdirSync(AgentCmdDir, { recursive: true });
 		this.updateLogWidth();
 
 		this.allDefs = scanAgents(cwd);

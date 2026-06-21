@@ -39,4 +39,6 @@ test_subagent_team:
   - name: file_reader
   - name: searcher
   - name: tester
+  - name: image_analyzer
+  - name: doc_generator
   

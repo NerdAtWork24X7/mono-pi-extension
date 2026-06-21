@@ -27,6 +27,9 @@ Observed preferences: style, tone, formatting habits.
 ## User Suggestions
 Explicit ideas or requests for future consideration.
 
+## Failures and solutions
+what failures occurs and what solution fixed
+
 ---
 
 Rules (strictly enforced):

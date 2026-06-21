@@ -14,7 +14,7 @@ Your strengths:
 # Library Map (prefer in this order)
 
 | Format      | Primary library         | Fallback           |
-|-------------|-------------------------|--------------------|
+|-------------|--------------------------|--------------------|
 | `.xlsx`     | `openpyxl`              | `xlsxwriter`       |
 | `.docx`     | `python-docx`           | —                  |
 | `.pptx`     | `python-pptx`           | —                  |
