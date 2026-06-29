@@ -272,10 +272,11 @@ export class TmuxBackend implements TerminalBackend {
 		// pattern as escapedCwd above. This protects against paths containing
 		// shell metacharacters (single quote, $, `, ;, etc.).
 		const lf = `'${logFile.replace(/'/g, "'\\''")}'`;
-		// Vertical split: pane takes full window width and auto-resizes with terminal.
+		// Horizontal split (left/right): log pane on the right.
+		// 50 cols gives enough room for log content without cramping the main pane.
 		// Do NOT lock the width with `resize-pane -x` — it would prevent auto-resize.
 		const script = [
-			`P=$(tmux split-window -v -d -l 8 -c '${escapedCwd}' -P -F '#{pane_id}')`,
+			`P=$(tmux split-window -h -d -l 50 -c '${escapedCwd}' -P -F '#{pane_id}')`,
 			`tmux select-pane -t $P -T 'Agent Team Log'`,
 			`tmux send-keys -t $P "tail -n +1 -f ${lf}" Enter`,
 			`echo $P`,
@@ -287,10 +288,10 @@ export class TmuxBackend implements TerminalBackend {
 		} catch { return null; }
 	}
 
-	resizePane(paneId: string, width: number): void {
-		try {
-			spawn("tmux", ["resize-pane", "-t", paneId, "-x", String(width)], { stdio: "ignore" });
-		} catch { }
+	resizePane(_paneId: string, _width: number): void {
+		// No-op: `-x` locks the pane width and prevents manual resize in tmux.
+		// With -h (left/right) split the log pane stays at its initial 50 cols
+		// and the main pane auto-fills the remaining space on terminal resize.
 	}
 
 	killPane(paneId: string): void {
@@ -326,7 +327,7 @@ export class HerdrBackend implements TerminalBackend {
 		try {
 			// Split current pane downward. herdr returns a JSON envelope:
 			// {"id":"cli:pane:split","result":{"pane":{"pane_id":"w<hex>-<n>", ...}}, "type":"pane_info"}
-			const splitResult = spawnSync("herdr", ["pane", "split", paneId, "--direction", "down", "--cwd", cwd, "--no-focus"], { encoding: "utf-8" });
+			const splitResult = spawnSync("herdr", ["pane", "split", paneId, "--direction", "right", "--cwd", cwd, "--no-focus"], { encoding: "utf-8" });
 			if (splitResult.status !== 0) return null;
 			let newId: string | undefined;
 			try {

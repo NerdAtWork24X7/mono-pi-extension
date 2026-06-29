@@ -1,9 +1,9 @@
 {
-  "lastChangelogVersion": "0.79.9",
+  "lastChangelogVersion": "0.80.2",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
   "defaultProvider": "opencode",
-  "defaultModel": "deepseek-v4-flash-free",
+  "defaultModel": "big-pickle",
   "defaultThinkingLevel": "off",
   "packages": [
     "npm:@juicesharp/rpiv-ask-user-question",
@@ -19,20 +19,17 @@
   "theme": "cyberpunk",
   "hideThinkingBlock": false,
   "skills": [
-    "-skills/electron-scaffold/SKILL.md",
-    "-skills/pyside6/SKILL.md"
+    "-skills/electron-scaffold/SKILL.md"
   ],
   "enabledModels": [
     "opencode/big-pickle",
     "opencode/deepseek-v4-flash-free",
     "opencode/nemotron-3-ultra-free",
-    "xiaomi/mimo-v2.5",
-    "xiaomi/mimo-v2.5-pro",
-    "bai/minimax-m3",
     "tokenrouter/MiniMax-M3",
     "kilo/kilo-auto/free",
     "openrouter/openrouter/free",
-    "openrouter/nex-agi/nex-n2-pro:free"
+    "xiaomi-token-plan-ams/mimo-v2.5-pro",
+    "xiaomi-token-plan-ams/mimo-v2.5"
   ],
   "extensions": [
     "-extensions/web-fetch.ts",

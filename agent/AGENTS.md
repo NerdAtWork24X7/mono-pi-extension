@@ -1,11 +1,12 @@
 # Absolute
 - Start in CWD. Search CWD if missing context.
+- Always check the version of app or packages which you will modify.
 - Keep output precise. Sacrifice grammar for density, no summaries unless asked.
 - For codebase-navigation/editing roles: read Readme.md and Changelog.md before other project files.
 - NEVER load full files , use `read` with line ranges. Use grep over cat.
 - Skip lock files, build artifacts, generated code.
 - After editing, drop file contents from context. Reference by file:line.
-- Sequence tool calls one at a time.
+- Sequence tool calls one at a time and use timeout for tool calls.
 - If a file exceeds 200 lines, read it in line-range chunks , you are stateless and cannot pause to ask permission; note in your output that a large file was involved.
 - Python scripts: use the `<cwd>/.venv` virtual environment with `pip`.
 - On error: identify root cause via docs/source before retrying , never retry blindly.
