@@ -194,8 +194,7 @@ export class MemoryManager {
 					this.state.lastSummaryAt = Date.now();
 					this.state.lastError = "";
 					this.setStatus("done");
-					if (!wroteFile) {
-						this.logger.log(`memory: no update needed for turn #${this.state.runCount}`);
+					if (!wroteFile) {							this.logger.logBoxed(`memory: no update needed for turn #${this.state.runCount}`);
 					}
 				} catch (err: any) {
 					const msg = (err && err.message) ? err.message : String(err);
@@ -361,8 +360,7 @@ export class MemoryManager {
 							if (typeof raw === "string" && raw.length > 0) {
 								const target = resolvePath(raw);
 								if (target === this.memoryFile) {
-									fileWritten = true;
-									this.logger.log(`memory: detected write to ${target}`);
+									fileWritten = true;												this.logger.logBoxed(`memory: detected write to ${target}`);
 								}
 							}
 						}

@@ -2,7 +2,9 @@
 
 import { Text } from "@mariozechner/pi-tui";
 import type { AgentProc, AgentTeamContext } from "./core";
-import { displayName, fmtTok, shortModel } from "./core";
+import { displayName, fmtTok, hrPad, shortModel } from "./core";
+
+const ansiRe = /\x1b\[[0-9;]*m/g;
 
 // ── System prompt builder ──
 
@@ -140,26 +142,34 @@ export function initWidget(ctx: AgentTeamContext) {
 	ctx.wCtx.ui.setWidget("agent-team", (tui: any, theme: any) => {
 		const text = new Text("", 0, 1);
 		ctx.wInvalidate = () => tui.requestRender();
-
 		return {
-			render(width: number): string[] {
-				if (!ctx.enabled) {
-					text.setText(theme.fg("dim", `Agent Team: disabled (team=${ctx.activeTeam || "none"})  /agents-team-toggle on`));
-					return text.render(width);
-				}
-				const hasMemory = !!ctx.memoryManager;
+			render(width: number): string[] {				const hasMemory = !!ctx.memoryManager;
 				const totalCount = ctx.procs.size + (hasMemory ? 1 : 0);
-				if (!totalCount) {
-					text.setText(theme.fg("dim", "No agents. Add .md files to agents/"));
-					return text.render(width);
-				}
 
+			if (!ctx.enabled) {
+				text.setText(theme.fg("dim", "Agent team disabled. /agents-team-toggle on"));
+				return text.render(width);
+			}
+
+			if (!totalCount) {
+				const hint = "No agents. Add subagent to agent.yml files to agents/";
+				const hintVis = [...hint].length;
+				const hintLine =
+					theme.fg("border", "│   ") +
+					theme.fg("dim", hint) +
+					theme.fg("border", " ".repeat(Math.max(0, width - 4 - hintVis - 2)) + " │");
+				const topBorder = theme.fg("border", hrPad("", width, "╭", "╮", "─"));
+				const bottomBorder = theme.fg("border", hrPad("", width, "╰", "╯", "─"));
+				text.setText([topBorder, hintLine, bottomBorder].join("\n"));
+				return text.render(width);
+			}
+
+				const boxPad = 4;
+				const innerW = width - boxPad;
 				const cols = Math.min(ctx.gridCols, totalCount);
-				const gap = 1;
-				const colW = Math.floor((width - gap * (cols - 1)) / cols);
+				const cardGap = 1;
+				const colW = Math.floor((innerW - cardGap * (cols - 1)) / cols);
 
-				// Build a unified list of cards: agent cards first, then the
-				// single memory pseudo-card at the end (when enabled).
 				const cards: string[][] = [];
 				for (const ap of ctx.procs.values()) cards.push(renderCard(ctx, ap, colW, theme));
 				if (hasMemory) cards.push(renderMemoryCard(ctx, colW, theme));
@@ -175,18 +185,33 @@ export function initWidget(ctx: AgentTeamContext) {
 					}
 				}
 
-				text.setText(rows.map(r => r.join(" ".repeat(gap))).join("\n"));
-				return text.render(width);
+			const topBorder = theme.fg("border", hrPad("", width, "╭", "╮", "─"));
+			// ── Header: "Subagent Team" sits inside the box, left-aligned after the border ──
+			const headerText = "Subagent Team";
+			const headerPad = Math.max(0, innerW - [...headerText].length);
+			const headerLine =
+				theme.fg("border", "│ ") +
+				theme.fg("accent", theme.bold(headerText)) +
+				" ".repeat(headerPad) +
+				" " + theme.fg("border", "│");
+			const sepLine = theme.fg("border", hrPad("", width, "├", "┤", "─"));
+			const boxedRows = rows.map(r => {
+					const rowStr = r.join(" ".repeat(cardGap));
+					const rowVis = [...rowStr.replace(ansiRe, "")].length;
+					const padded = rowStr + " ".repeat(Math.max(0, innerW - rowVis));
+					return theme.fg("border", "│") + " " + padded + " " + theme.fg("border", "│");
+				});
+				const bottomBorder = theme.fg("border", hrPad("", width, "╰", "╯", "─"));
+
+			text.setText([topBorder, headerLine, sepLine, ...boxedRows, bottomBorder].join("\n"));
+			return text.render(width);
 			},
 		};
-	});
+	}, { placement: "aboveEditor" });
 
 	process.stdout.off("resize", ctx.resizeHandler);
 	process.stdout.on("resize", ctx.resizeHandler);
 
-	// Set a no-op stub so that invalidate() calls arriving before the
-	// render closure runs (which sets wInvalidate to the real requestRender
-	// callback) don't recurse back into initWidget and re-register the widget.
 	if (!ctx.wInvalidate) ctx.wInvalidate = () => {};
 }
 
@@ -197,9 +222,18 @@ export function invalidate(ctx: AgentTeamContext) {
 	else initWidget(ctx);
 }
 
-export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, theme: any): string[] {
-	const trunc = (s: string, n: number) => [...s].length > n ? [...s].slice(0, n - 1).join("") + "..." : s;
+// ── Card rendering (modern compact — thin accent bar, pill-like stats) ──
 
+const trunc = (s: string, n: number) => [...s].length > n ? [...s].slice(0, n - 1).join("") + "…" : s;
+
+/** Pad a coloured string to exactly `targetW` visible cells with trailing spaces. */
+function padToVis(colored: string, targetW: number): string {
+	const v = [...colored.replace(ansiRe, "")].length;
+	return colored + " ".repeat(Math.max(0, targetW - v));
+}
+
+/** 1–2 line agent card: accent bar + icon + name + time, optional stats row. */
+export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, theme: any): string[] {
 	const statusColor = ap.status === "idle" ? "dim"
 		: ap.status === "starting" ? "warning"
 			: ap.status === "running" ? "accent"
@@ -207,70 +241,72 @@ export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, them
 	const statusIcon = ap.status === "idle" ? "○"
 		: ap.status === "starting" ? "◐"
 			: ap.status === "running" ? "●"
-				: ap.status === "done" ? "✓" : "";
+				: ap.status === "done" ? "✓" : "✗";
 
 	const name = displayName(ap.def.name);
 	const sm = shortModel(ap.model);
-	const modelStr = sm ? ` (${sm})` : "";
-	const timeStr = (ap.status === "running" || ap.status === "starting") ? ` ${Math.round(ap.elapsed / 1000)}s` : "";
-	const plug = ap.status === "running" ? "\u{1F50C}" : ap.status === "dead" ? "\u{1F916}" : "\u{1F50C}";
-	const statusStr = `${plug}${statusIcon}${timeStr}`;
+	const modelStr = sm ? ` ${sm}` : "";
+	const timeStr = ["running", "starting", "done"].includes(ap.status)
+		? `${Math.round(ap.elapsed / 1000)}s` : "";
 
-	const maxLabel = w - statusStr.length - 2;
+	// ── Line 1: ▌ ● Coder claude-3.5              12s ──
+	const prefixLen = 4; // "▌ ● "
+	const maxLabel = Math.max(1, w - prefixLen - [...timeStr].length - 1);
 	const truncatedName = trunc(name, maxLabel - modelStr.length);
-	const label = theme.fg("accent", theme.bold(truncatedName)) + theme.fg("dim", modelStr);
-	const dots = Math.max(1, w - truncatedName.length - modelStr.length - statusStr.length - 2);
+	const visibleL1 = prefixLen + [...truncatedName].length + [...modelStr].length;
+	const spacing = Math.max(1, w - visibleL1 - [...timeStr].length);
 
-	const line1 = label + " " + (ap.status === "running"
-		? animDots(dots, ctx.animFrame, theme)
-		: theme.fg("dim", "·".repeat(dots))) + " " +
-		theme.fg(statusColor, statusStr);
+	const line1 =
+		theme.fg(statusColor, "▌ ") +
+		theme.fg(statusColor, statusIcon + " ") +
+		theme.fg("text", theme.bold(truncatedName)) +
+		theme.fg("dim", modelStr) +
+		" ".repeat(spacing) +
+		theme.fg("dim", timeStr);
 
-	// Token/context usage line
 	const lines = [line1];
+
+	// ── Line 2: ▌   ████░░░░  45% · In 1.2k · Out 400 · 💾 H=500 ──
 	if (ap.contextWindow > 0 && (ap.tokensUsed > 0 || ap.tokensOut > 0)) {
 		const pct = Math.min(100, Math.round((ap.tokensUsed / ap.contextWindow) * 100));
-		const barW = Math.min(12, Math.max(5, Math.floor((w - 20) / 2)));
+		const barW = Math.min(10, Math.max(4, Math.floor((w - 4) / 4)));
 		const filled = Math.round((pct / 100) * barW);
 		const bar = "█".repeat(filled) + "░".repeat(barW - filled);
-		const barColor = pct > 90 ? "error" : pct > 70 ? "warning" : "dim";
+		const barColor = pct > 90 ? "error" : pct > 70 ? "warning" : "accent";
 
-		const tokenStr = `In=${fmtTok(ap.tokensUsed)}  Out=${fmtTok(ap.tokensOut)}`;
-		const pctStr = ` Ctx=${pct}%/${fmtTok(ap.contextWindow)}`;
+		let statStr = `${pct}% · In ${fmtTok(ap.tokensUsed)} · Out ${fmtTok(ap.tokensOut)}`;
+		let cachePill = "";
+		if (ap.cacheRead > 0 || ap.cacheSavedTotal > 0) {
+			const parts: string[] = [];
+			if (ap.cacheRead > 0) parts.push(`H=${fmtTok(ap.cacheRead)}`);
+			if (ap.cacheSavedTotal > 0) parts.push(`Σ=${fmtTok(ap.cacheSavedTotal)}`);
+			cachePill = ` · 💾 ${parts.join(" ")}`;
+		}
 
-		// Cache stats line — show cache hits when present
-		const cacheHit = ap.cacheRead > 0 ? `Hit=${fmtTok(ap.cacheRead)}` : "";
-		const total = ap.cacheSavedTotal > 0 ? `Σ=${fmtTok(ap.cacheSavedTotal)}` : "";
-		const sep = cacheHit && total ? " " : "";
-		const cacheLabel = `Cache: ${cacheHit}${sep}${total}`;
+		// Drop cache pill if it would overflow; fall back to compact if still too wide
+		const bareLen = 4 + barW + 2 + [...statStr].length; // "▌   " + bar + "  " + statStr
+		if (4 + barW + 2 + [...statStr].length + [...cachePill].length > w) cachePill = "";
+		if (4 + barW + 2 + [...statStr].length > w) {
+			// Still overflowing — drop to bar + percentage only
+			statStr = `${pct}%`;
+		}
 
-		const line2 = theme.fg(barColor, bar) + " " +
-			theme.fg("dim", tokenStr) + " " +
-			theme.fg(barColor, pctStr) + " " + theme.fg("success", "  \u{1F4BE} " + cacheLabel);
+		const line2 = padToVis(
+			theme.fg(statusColor, "▌   ") +
+			theme.fg(barColor, bar) + "  " +
+			theme.fg("dim", statStr) +
+			theme.fg("success", cachePill),
+			w,
+		);
+
 		lines.push(line2);
-
-
 	}
 
 	return lines;
 }
 
-function animDots(n: number, frame: number, theme: any): string {
-	const colors = ["accent", "success", "warning"];
-	let r = "";
-	for (let i = 0; i < n; i++) {
-		const pos = ((i - frame) % 6 + 6) % 6;
-		if (pos < 3) {
-			const ci = ((Math.floor((i - pos) / 6)) % colors.length + colors.length) % colors.length;
-			r += theme.fg(colors[ci], "·");
-		} else {
-			r += theme.fg("dim", "·");
-		}
-	}
-	return r;
-}
+// ── Memory card ──
 
-/** Compact "X ago" formatter for the memory card timestamp. */
 function formatAgo(ms: number): string {
 	if (!ms) return "";
 	const s = Math.max(0, Math.floor((Date.now() - ms) / 1000));
@@ -280,9 +316,7 @@ function formatAgo(ms: number): string {
 	return `${Math.floor(s / 86400)}d`;
 }
 
-/** Single pseudo-card representing the project memory feature. */
 export function renderMemoryCard(ctx: AgentTeamContext, w: number, theme: any): string[] {
-	const trunc = (s: string, n: number) => [...s].length > n ? [...s].slice(0, n - 1).join("") + "..." : s;
 	const mm = ctx.memoryManager;
 	if (!mm) return [theme.fg("dim", "·".repeat(w))];
 
@@ -290,47 +324,53 @@ export function renderMemoryCard(ctx: AgentTeamContext, w: number, theme: any): 
 	const status = s.status;
 	const statusColor = status === "idle" ? "dim"
 		: status === "recording" ? "warning"
-		: status === "summarizing" ? "accent"
-		: status === "done" ? "success" : "error";
+			: status === "summarizing" ? "accent"
+				: status === "done" ? "success" : "error";
 	const statusIcon = status === "idle" ? "○"
 		: status === "recording" ? "◐"
-		: status === "summarizing" ? "●"
-		: status === "done" ? "✓" : "✗";
+			: status === "summarizing" ? "●"
+				: status === "done" ? "✓" : "✗";
 
-	const name = "Memory";
 	const sm = ctx.memoryModel ? shortModel(ctx.memoryModel) : "";
-	const modelStr = sm ? ` (${sm})` : "";
-	const timeStr = (status === "summarizing")
-		? ` ${Math.round(s.elapsed / 1000)}s`
-		: (status === "recording" ? "" : (s.lastSummaryAt ? ` ${formatAgo(s.lastSummaryAt)}` : ""));
-	const statusStr = `${statusIcon}${timeStr}`;
+	const modelStr = sm ? ` ${sm}` : "";
 
-	const maxLabel = w - statusStr.length - 2;
-	const truncatedName = trunc(name, maxLabel - modelStr.length);
-	const label = theme.fg("accent", theme.bold(truncatedName)) + theme.fg("dim", modelStr);
-	const dots = Math.max(1, w - truncatedName.length - modelStr.length - statusStr.length - 2);
+	const timeStr = (status === "summarizing") ? `${Math.round(s.elapsed / 1000)}s`
+		: (s.lastSummaryAt ? formatAgo(s.lastSummaryAt) : "");
 
-	const line1 = label + " " + (status === "summarizing"
-		? animDots(dots, ctx.animFrame, theme)
-		: theme.fg("dim", "·".repeat(dots))) + " " +
-		theme.fg(statusColor, statusStr);
+	// Line 1: ▌ ✓ Memory claude-3.5            5m
+	const prefixLen = 4;
+	const maxLabel = Math.max(1, w - prefixLen - [...timeStr].length - 1);
+	const truncatedName = trunc("Memory", maxLabel - modelStr.length);
+	const visibleL1 = prefixLen + [...truncatedName].length + [...modelStr].length;
+	const spacing = Math.max(1, w - visibleL1 - [...timeStr].length);
 
-	const lines = [line1];
+	const line1 =
+		theme.fg(statusColor, "▌ ") +
+		theme.fg(statusColor, statusIcon + " ") +
+		theme.fg("text", theme.bold(truncatedName)) +
+		theme.fg("dim", modelStr) +
+		" ".repeat(spacing) +
+		theme.fg("dim", timeStr);
 
-	// Second line carries context appropriate to the current state.
+	// Line 2: ▌   last: 2025-01-01 12:00 · turn 3
+	let detail = "";
 	if (status === "error" && s.lastError) {
-		const errText = s.lastError.length > w - 2 ? s.lastError.slice(0, w - 5) + "..." : s.lastError;
-		lines.push(theme.fg("error", ` ${errText}`));
+		detail = s.lastError.length > w - 5 ? s.lastError.slice(0, w - 6) + "…" : s.lastError;
 	} else if (status === "done" && s.lastSummaryAt) {
 		const ts = new Date(s.lastSummaryAt).toISOString().replace("T", " ").slice(0, 19);
-		lines.push(theme.fg("dim", ` last: ${ts} · turn ${s.runCount}`));
+		detail = `last: ${ts} · turn ${s.runCount}`;
 	} else if (status === "recording") {
-		lines.push(theme.fg("dim", " recording turn..."));
+		detail = "recording turn…";
 	} else if (status === "summarizing") {
-		lines.push(theme.fg("dim", " summarizing..."));
+		detail = "summarizing…";
 	} else {
-		lines.push(theme.fg("dim", ` turns: ${s.runCount}`));
+		detail = `turns: ${s.runCount}`;
 	}
+	const detailColor = status === "error" ? "error" : "dim";
+	const line2 = padToVis(
+		theme.fg(statusColor, "▌   ") + theme.fg(detailColor, detail),
+		w,
+	);
 
-	return lines;
+	return [line1, line2];
 }

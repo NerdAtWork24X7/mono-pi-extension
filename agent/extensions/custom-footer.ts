@@ -101,13 +101,13 @@ export default function (pi: ExtensionAPI) {
 						planStr = theme.fg("warning", "PLAN");
 					}
 
-					const sep = theme.fg("dim", " | ");
-					const leftParts = [modelStr, tokenStats, elapsed, cwdStr];
-					if (branchStr) leftParts.push(branchStr);
-					if (planStr) leftParts.push(planStr);
-					const left = leftParts.join(sep);
+				const sep = theme.fg("dim", "  ·  ");
+				const leftParts = [modelStr, tokenStats, elapsed, cwdStr];
+				if (branchStr) leftParts.push(branchStr);
+				if (planStr) leftParts.push(planStr);
+				const left = leftParts.join(sep);
 
-					return [truncateToWidth(left, width)];
+				return [truncateToWidth(left, width)];
 				},
 			};
 		});

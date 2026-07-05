@@ -200,8 +200,13 @@ export class AgentTeam implements AgentTeamContext {
 	}
 
 	handleTerminalResize() {
-		this.updateLogWidth();
+		// Order matters: actively resize the tmux pane FIRST so that the pane
+		// width it ends up at is the value `getLogPaneWidth` reads back below
+		// for box-drawing. Reading pane width before resizing would record the
+		// pre-resize value and produce boxes that don't match the just-resized
+		// pane.
 		this.resizeSharedPane();
+		this.updateLogWidth();
 		this.invalidate();
 	}
 
@@ -214,7 +219,14 @@ export class AgentTeam implements AgentTeamContext {
 		const cwd = (this.tmuxCwd || process.cwd());
 		const origPane = process.env.TMUX_PANE || process.env.HERDR_PANE_ID || "";
 		const id = this.terminal.createLogPane(cwd, this.sessionLogFile, origPane);
-		if (id && this.terminal.isValidPaneId(id)) this.sharedPaneId = id;
+		if (id && this.terminal.isValidPaneId(id)) {
+			this.sharedPaneId = id;
+			// Tell the logger where the pane lives so updateWidth() can query
+			// `#{pane_width}` for the actual width (rather than deriving from
+			// the host — which double-applies the 0.35 ratio in herdr).
+			this.logger.setPaneId(id);
+			this.updateLogWidth();
+		}
 	}
 
 	killPanes() {
@@ -412,12 +424,33 @@ export default function (pi: ExtensionAPI) {
 
 		_ctx.ui.setStatus("agent-team", `Team: ${team.activeTeam} (${team.procs.size})`);
 		const members = Array.from(team.procs.values()).map(a => displayName(a.def.name)).join(", ");
-		_ctx.ui.notify(
-			`Team: ${team.activeTeam} (${members}) — agents spawn on-demand per task\n\n` +
+		// Rainbow VS banner — each line gets its own 256-color wrap.
+		// notify() has no color param, so we embed raw SGR codes here. The
+		// outer showStatus wrap applies `theme.fg("dim", …)` which only
+		// toggles intensity (SGR 2); foreground colors survive.
+		const RST = "\x1b[0m";
+		const rb = (s: string, i: number) =>
+			`\x1b[38;5;${[196, 208, 226, 46, 51, 21, 201][i % 7]}m${s}${RST}`;
+		const banner =
+			rb(`VVVVVVVV           VVVVVVVV   SSSSSSSSSSSSSSS `, 0) + "\n" +
+			rb(`V::::::V           V::::::V SS:::::::::::::::S`, 1) + "\n" +
+			rb(`V::::::V           V::::::VS:::::SSSSSS::::::S`, 2) + "\n" +
+			rb(`V::::::V           V::::::VS:::::S     SSSSSSS`, 3) + "\n" +
+			rb(` V:::::V           V:::::V S:::::S            `, 4) + "\n" +
+			rb(`  V:::::V         V:::::V  S:::::S            `, 5) + "\n" +
+			rb(`   V:::::V       V:::::V    S::::SSSS         `, 6) + "\n" +
+			rb(`    V:::::V     V:::::V      SS::::::SSSSS    `, 7) + "\n" +
+			rb(`     V:::::V   V:::::V         SSS::::::::SS  `, 8) + "\n" +
+			rb(`      V:::::V V:::::V             SSSSSS::::S `, 9) + "\n" +
+			rb(`       V:::::V:::::V                    S:::::S`, 10) + "\n" +
+			rb(`        V:::::::::V                    S:::::S`, 11) + "\n" +
+			rb(`         V:::::::V         SSSSSSS     S:::::S`, 12) + "\n" +
+			rb(`          V:::::V          S::::::SSSSSS:::::S`, 13) + "\n" +
+			rb(`           V:::V           S:::::::::::::::SS `, 14) + "\n" +
+			rb(`            VVV             SSSSSSSSSSSSSSS   `, 15) + "\n" +
 			`/agents-team          Select a team\n` +
-			`/Ctrl+q                Toggle agent mode`,
-			"info",
-		);
+			`/Ctrl+q                Toggle agent mode`;
+		_ctx.ui.notify(banner);
 		team.invalidate();
 	});
 

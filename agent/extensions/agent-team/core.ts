@@ -70,7 +70,14 @@ export interface TeamConfig {
 
 export interface TerminalBackend {
 	detect(): boolean;
+	/** Full host / client / orchestrator-pane width in columns. Used to size
+	 *  the log pane at creation (tmux only; herdr ignores). Returns 0 if the
+	 *  underlying value isn't available. */
 	getTerminalWidth(): number;
+	/** ACTUAL width of the log pane in columns. Distinct from `getTerminalWidth`:
+	 *  for tmux we query `#{pane_width}` so manual pane dragging is respected;
+	 *  for herdr we trust the env hint or stdout.columns. Returns 0 if unknown. */
+	getLogPaneWidth(paneId: string | null): number;
 	createLogPane(cwd: string, logFile: string, origPaneId: string): string | null;
 	resizePane(paneId: string, width: number): void;
 	killPane(paneId: string): void;
@@ -196,16 +203,79 @@ export function resetForDispatch(ap: AgentProc) {
 	if (ap.readyTimeout) { clearTimeout(ap.readyTimeout); ap.readyTimeout = undefined; }
 }
 
+// ── Log pane sizing ──
+
+/** Fraction of terminal/host width allocated to the NEW log pane (tmux split-window).
+ *  Applied ONLY when sizing the pane itself, never when deriving box width — the
+ *  box width is a clamp of the *actual* log pane width so it tracks whatever
+ *  size the pane ends up at (including manual tmux dragging or herdr's split). */
+export const LOG_SPLIT_RATIO = 0.35;
+export const LOG_PANE_MIN = 50;
+export const LOG_PANE_MAX = 200;
+
+/** Per-input-line byte cap for logBoxed(). The cap exists *only* to defend the
+ *  unicode-aware `[...content].length` spread inside `boxLine` against OOM on
+ *  runaway subprocess output. It does NOT limit the visible output — `boxLine`
+ *  truncates to logWidth regardless of input size. Matches the stdout
+ *  `MAX_LINE_BUF = 1 << 20` plumbing in `spawnRpcSubprocess`. */
+export const LOG_LINE_INPUT_CAP = 1 << 20;
+
+/** Width to use when SIZING the tmux log pane (at create + on user resize).
+ *  Formula: 35% of host width, clamped to a sane reading range. Only used by
+ *  TmuxBackend; HerdrBackend has no pane-width control. */
+export function initialPaneWidth(hostWidth: number): number {
+	return hostWidth > 0
+		? Math.min(Math.max(Math.floor(hostWidth * LOG_SPLIT_RATIO), LOG_PANE_MIN), LOG_PANE_MAX)
+		: LOG_PANE_MIN;
+}
+
+/** Width to use when DRAWING the box character borders for log lines.
+ *  Clamp the ACTUAL log pane width — NO 0.35 ratio. The previous bug applied
+ *  that ratio twice (once to size the pane, once to derive the box width),
+ *  which collapsed small pane widths (e.g. herdr `HERDR_PANE_WIDTH=100`)
+ *  down to LOG_PANE_MIN and broke alignment with the on-screen pane. */
+export function boxWidth(paneWidth: number): number {
+	return paneWidth > 0
+		? Math.min(Math.max(paneWidth, LOG_PANE_MIN), LOG_PANE_MAX)
+		: LOG_PANE_MIN;
+}
+
 // ── Box drawing helpers ──
 
 export function hrPad(content: string, width: number, left: string, right: string, fill = "─"): string {
 	const inner = width - left.length - right.length;
-	const used = [...content].length; // unicode-aware length
-	// 0 is valid: an empty closing line and a line that exactly fills `inner` both
-	// want no fill, only the two corners. Using Math.max(1, …) inflated those by 1 cell
-	// and shifted the right border left.
-	const pad = Math.max(0, inner - used);
-	return left + content + fill.repeat(pad) + right;
+	// ASCII fast path: pure-ASCII strings have grapheme count === char count,
+	// so we skip the `[...content]` spread allocation for the common case
+	// (mirrors `boxLine` below).
+	const asciiFast = content.length === 0 || !/[\u0080-\uFFFF]/.test(content);
+	const used = asciiFast ? content.length : [...content].length;
+	let body = content;
+	let pad: number;
+	if (used > inner) {
+		// Content overflows the box. Truncate with marker so the bordered row
+		// stays exactly `width` cells — otherwise a long agent/model label
+		// (e.g. "Full Stack Web Developer · claude-3.5-sonnet") pushes the
+		// right border past `width` and breaks tmux auto-wrap alignment.
+		const marker = `…[+N]`;
+		const cut = inner - marker.length;
+		if (cut > 0) {
+			body = asciiFast
+				? content.slice(0, cut) + marker
+				: [...content].slice(0, cut).join("") + marker;
+			pad = 0;
+		} else {
+			// Inner is too small even for the marker (very narrow widgets).
+			// Emit a bare horizontal line so the row is exactly `width` cells.
+			body = "";
+			pad = Math.max(0, inner);
+		}
+	} else {
+		// 0 is valid: an empty closing line and a line that exactly fills `inner` both
+		// want no fill, only the two corners. Using Math.max(1, …) inflated those by 1 cell
+		// and shifted the right border left.
+		pad = Math.max(0, inner - used);
+	}
+	return left + body + fill.repeat(pad) + right;
 }
 
 export function boxLine(content: string, width: number): string {
@@ -264,6 +334,22 @@ export class TmuxBackend implements TerminalBackend {
 		} catch { return 0; }
 	}
 
+	getLogPaneWidth(paneId: string | null): number {
+		// Query tmux for the actual current width of the log pane. This is the
+		// source of truth for box-drawing and reflects manual dragging + tmux's
+		// own rebalance on SIGWINCH — both of which we now respect instead of
+		// overriding with our own formula.
+		if (paneId && /^%\d+$/.test(paneId)) {
+			try {
+				const r = spawnSync("tmux", ["display-message", "-p", "-t", paneId, "#{pane_width}"], { encoding: "utf-8" });
+				const w = parseInt(r.stdout?.trim() || "0", 10);
+				if (w > 0) return w;
+			} catch { /* fall through to estimate */ }
+		}
+		// Pre-creation: no log pane exists yet, so derive from the host width.
+		return initialPaneWidth(this.getTerminalWidth());
+	}
+
 	createLogPane(cwd: string, logFile: string, origPaneId: string): string | null {
 		// Validate origPaneId to prevent shell injection in the tmux shell script
 		if (origPaneId && !/^%\d+$/.test(origPaneId)) origPaneId = "";
@@ -273,10 +359,10 @@ export class TmuxBackend implements TerminalBackend {
 		// shell metacharacters (single quote, $, `, ;, etc.).
 		const lf = `'${logFile.replace(/'/g, "'\\''")}'`;
 		// Horizontal split (left/right): log pane on the right.
-		// 50 cols gives enough room for log content without cramping the main pane.
-		// Do NOT lock the width with `resize-pane -x` — it would prevent auto-resize.
+		// Width is proportional to terminal width so boxed log lines fit the pane.
+		const paneW = initialPaneWidth(this.getTerminalWidth());
 		const script = [
-			`P=$(tmux split-window -h -d -l 50 -c '${escapedCwd}' -P -F '#{pane_id}')`,
+			`P=$(tmux split-window -h -d -l ${paneW} -c '${escapedCwd}' -P -F '#{pane_id}')`,
 			`tmux select-pane -t $P -T 'Agent Team Log'`,
 			`tmux send-keys -t $P "tail -n +1 -f ${lf}" Enter`,
 			`echo $P`,
@@ -288,10 +374,18 @@ export class TmuxBackend implements TerminalBackend {
 		} catch { return null; }
 	}
 
-	resizePane(_paneId: string, _width: number): void {
-		// No-op: `-x` locks the pane width and prevents manual resize in tmux.
-		// With -h (left/right) split the log pane stays at its initial 50 cols
-		// and the main pane auto-fills the remaining space on terminal resize.
+	resizePane(paneId: string, _width: number): void {
+		// Re-size the log pane to track the host width on terminal resize. After
+		// this call returns, the actual pane width can be read back via
+		// `getLogPaneWidth` (queries `#{pane_width}`), so subsequent log lines
+		// are box-drawn at exactly that width. Note: `-x` locks the pane at a
+		// fixed column count and overrides any manual drag the user did — we
+		// accept that trade-off because the alternative (silent tmux auto-
+		// rebalance) is version-dependent.
+		const paneW = initialPaneWidth(this.getTerminalWidth());
+		try {
+			spawnSync("tmux", ["resize-pane", "-t", paneId, "-x", String(paneW)], { encoding: "utf-8" });
+		} catch { }
 	}
 
 	killPane(paneId: string): void {
@@ -309,15 +403,24 @@ export class HerdrBackend implements TerminalBackend {
 	}
 
 	getTerminalWidth(): number {
-		// 1) Explicit hint wins — herdr hosts can export HERDR_PANE_WIDTH at session start.
+		// herdr has no "host width" — the orchestrator runs in the only its own
+		// pane. We mirror `getLogPaneWidth`'s logic here so the two methods
+		// return the same value (the log pane's actual width).
+		return this.getLogPaneWidth(null);
+	}
+
+	getLogPaneWidth(_paneId: string | null): number {
+		// herdr has no resize-pane and exposes no pane-width query, so the
+		// best signal we have is the env hint set by the herdr host plus the
+		// live `stdout.columns` on the orchestrator (which gets a SIGWINCH
+		// on terminal resize and matches the log pane in a 50/50 split).
+		// Env var wins because it carries the actual log pane width set by
+		// herdr (which may NOT match stdout.columns if herdr splits 30/70).
 		const hint = parseInt(process.env.HERDR_PANE_WIDTH || "", 10);
 		if (Number.isFinite(hint) && hint > 0) return hint;
-		// 2) If stdio is still attached to the pane, stdout.columns reports its width.
 		if (process.stdout && Number.isFinite(process.stdout.columns) && (process.stdout.columns as number) > 0) {
 			return process.stdout.columns as number;
 		}
-		// 3) Fallback: typical herdr split is ~120 cols; the MIN/MAX clamp in updateLogWidth
-		//    still bounds this to [60, 300] so the value is just a sensible seed.
 		return 120;
 	}
 
@@ -375,10 +478,9 @@ export class SessionLogger {
 	private logDir: string;
 	private logFile = "";
 	private stream: WriteStream | null = null;
-	private logWidth = 60;
+	private logWidth = LOG_PANE_MIN;
 	private terminal: TerminalBackend;
-	private MIN_logWidth = 60;
-	private MAX_logWidth = 300;
+	private paneId: string | null = null;
 
 	constructor(terminal: TerminalBackend, logDir: string) {
 		this.terminal = terminal;
@@ -388,6 +490,11 @@ export class SessionLogger {
 	setLogDir(dir: string) { this.logDir = dir; }
 	getLogFile(): string { return this.logFile; }
 	getStream(): WriteStream | null { return this.stream; }
+
+	/** Called after `createLogPane` so subsequent updateWidth() calls can query
+	 *  the actual tmux log-pane width (`#{pane_width}`) instead of guessing
+	 *  from the host width. */
+	setPaneId(id: string | null) { this.paneId = id; }
 
 	open(): void {
 		if (this.stream) return; // already open
@@ -402,8 +509,10 @@ export class SessionLogger {
 	}
 
 	updateWidth(): void {
-		const tw = this.terminal.getTerminalWidth();
-		this.logWidth = tw > 0 ? Math.min(Math.max(tw, this.MIN_logWidth), this.MAX_logWidth) : this.MIN_logWidth;
+		// Source-of-truth = actual log pane width (queried per backend), NOT a
+		// formula over the host. Box width is just a clamp, no 0.35 ratio.
+		const paneW = this.terminal.getLogPaneWidth(this.paneId);
+		this.logWidth = boxWidth(paneW);
 	}
 
 	getWidth(): number { return this.logWidth; }
@@ -416,6 +525,26 @@ export class SessionLogger {
 
 	logRaw(msg: string) {
 		if (this.stream) this.stream.write(msg);
+	}
+
+	/** Write a user-facing log message, wrapping each line in a box border and
+	 *  truncating to the log pane width so long content cannot overflow the box.
+	 *  Use this for plain text content (memory events, subprocess stderr, etc.).
+	 *  For raw access — box-drawing characters, headers, multi-line box dumps
+	 *  assembled by the caller — use log() instead. Multiline input is split on
+	 *  `\n` and every line (including blank ones) gets its own bordered row. */
+	logBoxed(msg: string) {
+		if (!this.stream) return;
+		// Strip one optional trailing newline so logical "lines" stay a single row.
+		const trimmed = msg.endsWith("\n") ? msg.slice(0, -1) : msg;
+		for (const ln of trimmed.split("\n")) {
+			// Cap input length to defend `boxLine`'s `[...content].length` spread
+			// against pathological input (a runaway subprocess writing an infinite
+			// single line without `\n`). `boxLine` then re-truncates to logWidth
+			// for the visible output, so the cap is intentionally invisible.
+			const safe = ln.length > LOG_LINE_INPUT_CAP ? ln.slice(0, LOG_LINE_INPUT_CAP) : ln;
+			this.stream.write(boxLine(safe, this.logWidth) + "\n");
+		}
 	}
 
 	logStreamingText(ap: AgentProc, chunk: string) {
@@ -560,7 +689,7 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
 
 	proc.stderr!.setEncoding("utf-8");
 	proc.stderr!.on("data", (d: string) => {
-		for (const line of d.split("\n")) if (line.trim()) opts.logger.log(line);
+		for (const line of d.split("\n")) if (line.trim()) opts.logger.logBoxed(line);
 	});
 
 	proc.on("error", (err) => {
