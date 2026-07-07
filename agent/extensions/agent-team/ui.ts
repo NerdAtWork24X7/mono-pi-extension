@@ -99,6 +99,7 @@ Subagents reply with structured signals — route them, don't blindly re-dispatc
 - Temp files go in \`${args.cwd}/tmp\`.
 - **IMPORTANT** : Ignore \`.venv\`, \`.pi\`, \`node_modules\`, \`__pycache__\`, \`.git\` in all file operations and subagent operations
 - Follow YAGNI principles, and prefer one-liner solutions
+- **IMPORTANT** : Check if the issue is really fix before marking as done
 
 # Tool Priority
 

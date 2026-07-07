@@ -1,3 +1,4 @@
 ﻿agent/auth.json
 agent/.update-check
 .pi/*
+.pi_memory/project_memory.md
