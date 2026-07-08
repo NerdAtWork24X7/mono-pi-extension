@@ -13,19 +13,13 @@
         }
       ]
     },
-    "xiaomi": {
-      "baseUrl": "https://token-plan-ams.xiaomimimo.com/v1",
+    "cloudflare-workers-ai": {
+      "baseUrl": "https://api.cloudflare.com/client/v4/accounts/951b2691e4f44eab5e10d6a810c6cc53/ai/v1",
       "api": "openai-completions",
-      "apiKey": "xiaomi",
+      "apiKey": "cloudflare-workers-ai",
       "models": [
         {
-          "id": "mimo-v2.5-pro",
-          "reasoning": true,
-          "contextWindow": 1048576,
-          "maxTokens": 131072
-        },
-        {
-          "id": "mimo-v2.5",
+          "id": "@cf/zai-org/glm-5.2",
           "reasoning": true,
           "contextWindow": 1048576,
           "maxTokens": 131072

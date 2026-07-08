@@ -26,7 +26,7 @@ The Agent Team extension (`agent/extensions/agent-team/`) is a TypeScript plugin
 
 1. **Session start** - Load agent definitions (`.md` files from `agent/agents/`, `.pi/agents/`, `.claude/agents/`), parse `teams.yaml`, initialize process registry, create combined session log pane
 2. **Before agent start** - Override system prompt: inject agent catalog (available agents + their descriptions), project memory content (if enabled), AGENTS.md rules, and enabled skills
-3. **Dispatch** - Tool call `dispatch_agent(agent, task)` triggers a fresh `pi --mode rpc` subprocess spawn, readiness probe (get_state), task injection via JSON stdin, streaming RPC event handling (response, message_update, message_end, tool_execution, agent_end), 10-min activity timeout, session log recording
+3. **Dispatch** - Tool call `dispatch_agent(agent, task)` triggers a fresh `pi --mode rpc` subprocess spawn, readiness probe (get_state), task injection via JSON stdin, streaming RPC event handling (response, message_update, message_end, tool_execution, agent_end), 10-min activity timeout, session log recording — or `dispatch_agent(agent, tasks: [...])` to fan out the same agent across many tasks in isolated subprocesses.
 4. **Agent end** - Cleanup: kill subprocess (SIGTERM + 2s SIGKILL backstop), wipe session files, log done box with elapsed time/tool count. If memory feature enabled: trigger background summarization of the turn
 5. **Session shutdown** - Persist config, await memory idle, kill all subprocesses, close session log, kill terminal pane
 
@@ -84,7 +84,7 @@ pi --mode rpc -p --no-extensions \
 ### Core Workflow Commands
 
 - `task <action> <description>` - Create and manage tasks with status tracking
-- `dispatch_agent(agent, task)` - Send work to specialized subagents
+- `dispatch_agent(agent, task)` / `dispatch_agent(agent, tasks: [...])` - Send work to a specialized subagent; pass `tasks` (array of strings) to spawn the same agent once per task (isolated clones, parallel for read-only agents, serialized for writable ones)
 - `execute <command>` - Run shell commands and test verification
 
 ### Dispatch Lifecycle
@@ -103,6 +103,14 @@ Each `dispatch_agent` call follows a strict lifecycle:
 - All context must be included in every dispatch prompt
 - Session files (`.pi/agent-sessions/`) are cleaned after each dispatch
 - Combined session log (`.pi/agent-logs/`) tracks all activity chronologically
+
+### Multi-Task Dispatch (same agent)
+
+- Pass `tasks` (array of strings) instead of `task` to spawn the same agent once per item; each runs in its own isolated `pi --mode rpc` clone
+- **Read-only agents** (e.g. `file_reader`, `searcher`) run in **parallel**, capped by `maxParallel` in agent config or `/agents-parallel` — falls back to sequential when the global switch is off
+- **`/agents-parallel` is a GLOBAL switch**: `off` also forces the orchestrator to serialize its own parallel read-only host tool calls (`read`/`grep`/`find`/`ls`) within a turn, not just subagent dispatch. Writes/edits are always serialized regardless.
+- **Writable agents** (e.g. `coder`, `documenter`, `doc_generator`) are **always serialized** (one at a time) so file writes never collide
+- **ESC/abort** kills all spawned clones; results are aggregated and returned in a single response
 
 ### Subagent System
 

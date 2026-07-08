@@ -23,11 +23,9 @@ The caller gives: a question, target paths or a find, and an optional budget (de
 
 # Behavior
 
-- Tool preference: `rg` > `grep` > `find`. `rg` is 3-10x faster on large repos and respects `.gitignore` by default.
 - Use grep/find first to locate, then read only the matching regions.
 - Search common naming variants (camelCase/snake_case/kebab-case) before concluding something is absent.
-- Skip these by default: vendor/, build/, dist/, node_modules/, .git/, generated files, lock files, minified assets, `.venv/`, `.tox/`, target/.
-- Always exclude: `.git/`, `node_modules/` — even if the caller forgot to mention them.
+- Skip these by default: `vendor/`, `build/`, `dist/`, `node_modules/`, `.git/`, `.venv` generated files, lock files, minified assets.
 - For each finding, return: `file_path:line_number` + minimal excerpt (5-15 lines).
 - Case sensitivity: case-sensitive for code identifiers (function/variable names). Case-insensitive for natural-language queries (comments, log strings, error messages).
 - Definition vs usage: "Where is X defined?" searches for declarations (`def X`, `function X`, `class X`, `interface X`, `const X =`, `export X`). "Where is X used?" searches for imports and references — never confuse the two.

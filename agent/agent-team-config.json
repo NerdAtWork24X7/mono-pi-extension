@@ -1,5 +1,12 @@
 {
   "activeTeam": "subagent_team",
-  "gridCols": 1,
-  "enabled": true
+  "gridCols": 2,
+  "enabled": true,
+  "parallelDispatch": true,
+  "maxParallel": 4,
+  "destructiveTools": [
+    "write",
+    "edit",
+    "doc_generator"
+  ]
 }

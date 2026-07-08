@@ -86,6 +86,7 @@ export class MemoryManager {
 	private cachedExtPaths: () => string[];
 	private def: AgentDef;
 	private handleEvent: (ap: AgentProc, line: string) => void;
+	private logAgent: AgentProc | null = null; // active memory subagent (for the in-TUI log grid)
 
 	private state: MemoryState = { status: "idle", runCount: 0, lastSummaryAt: 0, lastError: "", elapsed: 0 };
 	private pendingInput = "";
@@ -125,6 +126,7 @@ export class MemoryManager {
 	get lastSummaryAt(): number { return this.state.lastSummaryAt; }
 	get lastError(): string { return this.state.lastError; }
 	get snapshot(): MemoryState { return { ...this.state }; }
+	get memoryLogAgent(): AgentProc | null { return this.logAgent; }
 
 	// ── Lifecycle hooks (called from index.ts) ──
 
@@ -194,7 +196,7 @@ export class MemoryManager {
 					this.state.lastSummaryAt = Date.now();
 					this.state.lastError = "";
 					this.setStatus("done");
-					if (!wroteFile) {							this.logger.logBoxed(`memory: no update needed for turn #${this.state.runCount}`);
+					if (!wroteFile) {							this.logger.logBoxed(`memory: no update needed for turn #${this.state.runCount}`, this.logAgent ?? undefined);
 					}
 				} catch (err: any) {
 					const msg = (err && err.message) ? err.message : String(err);
@@ -255,6 +257,7 @@ export class MemoryManager {
 			procRef: null,
 			status: "starting",
 		};
+		this.logAgent = memoryAp;
 
 		const cliArgs = [
 			"--mode", "rpc",
@@ -360,7 +363,7 @@ export class MemoryManager {
 							if (typeof raw === "string" && raw.length > 0) {
 								const target = resolvePath(raw);
 								if (target === this.memoryFile) {
-									fileWritten = true;												this.logger.logBoxed(`memory: detected write to ${target}`);
+									fileWritten = true;												this.logger.logBoxed(`memory: detected write to ${target}`, memoryAp);
 								}
 							}
 						}

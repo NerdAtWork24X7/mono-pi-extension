@@ -21,16 +21,16 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
-import { mkdirSync, type WriteStream } from "fs";
+import { mkdirSync } from "fs";
 import { join } from "path";
 
-import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, TerminalBackend } from "./core";
-import { displayName, shortModel, TmuxBackend, HerdrBackend, SessionLogger } from "./core";
+import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, TerminalBackend, BatchDispatchResult } from "./core";
+import { displayName, shortModel, TmuxBackend, HerdrBackend, SessionLogger, RwLock } from "./core";
 import { loadPersistedConfig, savePersistedConfig, scanAgents, scanExtensionPaths, loadTeamsYaml, discoverEnabledSkills, loadAgentMd } from "./config";
-import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, makeHandleEvent } from "./orchestration";
+import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchMany as dispatchManyImpl, dispatchAgentMany as dispatchAgentManyImpl, makeHandleEvent } from "./orchestration";
 import { MemoryManager, extractLastAssistantText } from "./memory";
 import { buildCatalog, buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl } from "./ui";
-import { registerDispatchAgentTool, registerCommands, registerShortcut } from "./integrations";
+import { registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
 import { homedir } from "os";
 
 export class AgentTeam implements AgentTeamContext {
@@ -47,6 +47,12 @@ export class AgentTeam implements AgentTeamContext {
 	sessionDir = "";
 	logDir = "";
 	enabled = true;
+	parallelDispatch = true;
+	maxParallel = 5;
+	destructiveTools: string[] = ["write", "edit", "doc_generator"];
+	dispatchLock: RwLock = new RwLock();
+	batchClones = new Set<AgentProc>();
+	private agentMutexes = new Map<string, Promise<unknown>>();
 
 	tmuxCwd = "";
 	cachedExtPaths: string[] = []; // resolved once per session_start
@@ -55,9 +61,6 @@ export class AgentTeam implements AgentTeamContext {
 	// and so `this` is the team (not the WriteStream emitter) on invocation.
 	resizeHandler = () => this.handleTerminalResize();
 	orchestratorModel = ""; // model id from orchestrator's context
-	sharedPaneId: string | null = null; // single terminal pane for combined session log
-	sessionLogFile = "";           // single combined log file path
-	sessionLogStream: WriteStream | null = null; // single combined log stream
 
 	// Memory feature (only used when memoryModel is set in teams.yaml)
 	memoryModel = "";
@@ -78,6 +81,9 @@ export class AgentTeam implements AgentTeamContext {
 		this.saved = loadPersistedConfig();
 		this.gridCols = this.saved.gridCols ?? 1;
 		this.enabled = this.saved.enabled ?? true;
+		this.parallelDispatch = this.saved.parallelDispatch ?? true;
+		this.maxParallel = this.saved.maxParallel ?? 5;
+		this.destructiveTools = this.saved.destructiveTools ?? ["write", "edit", "doc_generator"];
 
 		// Auto-detect terminal backend at construction time
 		this.terminal = this.herdrBackend.detect() ? this.herdrBackend
@@ -134,6 +140,21 @@ export class AgentTeam implements AgentTeamContext {
 		return dispatchImpl(this, agentName, task);
 	}
 
+	async dispatchMany(tasks: Array<{ agent: string; task: string }>): Promise<BatchDispatchResult> {
+		return dispatchManyImpl(this, tasks);
+	}
+	async dispatchAgentMany(agentName: string, tasks: string[]): Promise<BatchDispatchResult> {
+		return dispatchAgentManyImpl(this, agentName, tasks);
+	}
+
+	/** Serialize dispatches to the same agent so its shared AgentProc state never collides. */
+	serializeAgent(name: string, fn: () => Promise<any>): Promise<any> {
+		const prev = this.agentMutexes.get(name) ?? Promise.resolve();
+		const next = prev.then(fn, fn);
+		this.agentMutexes.set(name, next.then(() => {}, () => {}));
+		return next;
+	}
+
 	async activateTeam(name: string) {
 		return activateTeamImpl(this, name);
 	}
@@ -165,7 +186,17 @@ export class AgentTeam implements AgentTeamContext {
 			activeTeam: this.activeTeam,
 			gridCols: this.gridCols,
 			enabled: this.enabled,
+			parallelDispatch: this.parallelDispatch,
+			maxParallel: this.maxParallel,
+			destructiveTools: this.destructiveTools,
 		});
+	}
+
+	/** Active tool allowlist. Includes dispatch_agents when parallel dispatch is on. */
+	activeToolList(): string[] {
+		const base = ["dispatch_agent", "ask_user_question", "todo", "read", "bash", "grep", "find", "ls", "write", "edit"];
+		if (this.parallelDispatch) base.unshift("dispatch_agents");
+		return base;
 	}
 
 	// ── Logging methods (bound to logger) ──
@@ -175,68 +206,19 @@ export class AgentTeam implements AgentTeamContext {
 	}
 
 	updateLogWidth() {
+		// Retained for compatibility; the widget now controls render width, so
+		// there is no side pane to resize. The logger still tracks a width.
 		this.logger.updateWidth();
 	}
 
-	openSessionLog() {
-		this.logger.setLogDir(this.logDir);
-		this.logger.open();
-		this.sessionLogFile = this.logger.getLogFile();
-		this.sessionLogStream = this.logger.getStream();
-	}
-
-	closeSessionLog() {
-		this.logger.close();
-		this.sessionLogStream = null;
-	}
-
-	// ── Terminal Panes ──────────────────────────────────────────────────
-
-	resizeSharedPane() {
-		if (!this.sharedPaneId || !this.terminal.isValidPaneId(this.sharedPaneId)) return;
-		const tw = this.terminal.getTerminalWidth();
-		if (tw <= 0) return;
-		this.terminal.resizePane(this.sharedPaneId, tw);
-	}
-
 	handleTerminalResize() {
-		// Order matters: actively resize the tmux pane FIRST so that the pane
-		// width it ends up at is the value `getLogPaneWidth` reads back below
-		// for box-drawing. Reading pane width before resizing would record the
-		// pre-resize value and produce boxes that don't match the just-resized
-		// pane.
-		this.resizeSharedPane();
 		this.updateLogWidth();
 		this.invalidate();
 	}
 
-	createSessionPane() {
-		if (!this.enabled) return;
-		if (!this.terminal.detect()) return;
-		if (!this.sessionLogFile) return;
-		if (this.sharedPaneId) return; // pane already exists
-
-		const cwd = (this.tmuxCwd || process.cwd());
-		const origPane = process.env.TMUX_PANE || process.env.HERDR_PANE_ID || "";
-		const id = this.terminal.createLogPane(cwd, this.sessionLogFile, origPane);
-		if (id && this.terminal.isValidPaneId(id)) {
-			this.sharedPaneId = id;
-			// Tell the logger where the pane lives so updateWidth() can query
-			// `#{pane_width}` for the actual width (rather than deriving from
-			// the host — which double-applies the 0.35 ratio in herdr).
-			this.logger.setPaneId(id);
-			this.updateLogWidth();
-		}
-	}
-
-	killPanes() {
-		this.closeSessionLog();
-		if (this.sharedPaneId && this.terminal.isValidPaneId(this.sharedPaneId)) {
-			const id = this.sharedPaneId;
-			this.sharedPaneId = null;
-			this.terminal.killPane(id);
-		}
-	}
+	/** No-op: the "Agent Team Log" side pane was replaced by the in-TUI log
+	 *  grid (see ui.ts). Kept so killAll(killPanesToo) doesn't change. */
+	killPanes() { }
 
 	// ── Agent Loading ───────────────────────────────────────────────
 
@@ -309,10 +291,7 @@ export class AgentTeam implements AgentTeamContext {
 			await this.activateTeam(teamToActivate);
 		}
 
-		this.openSessionLog();
-		this.createSessionPane();
-
-		this.pi.setActiveTools(["dispatch_agent", "ask_user_question", "todo", "read", "bash", "grep", "find", "ls", "write", "edit"]);
+		this.pi.setActiveTools(this.activeToolList());
 		this.invalidate();
 		const members = Array.from(this.procs.values()).map(a => displayName(a.def.name)).join(", ");
 		this.wCtx = ctx;
@@ -369,6 +348,7 @@ export default function (pi: ExtensionAPI) {
 			memory: team.memoryManager ? { file: team.memoryFile } : null,
 			agentMd: loadAgentMd(cwd),
 			skills: discoverEnabledSkills(),
+			parallel: team.parallelDispatch,
 		});
 	});
 
@@ -415,12 +395,8 @@ export default function (pi: ExtensionAPI) {
 		const restoreTeam = (savedTeam && names.includes(savedTeam)) ? savedTeam : (names[0] || "");
 		if (restoreTeam) await team.activateTeam(restoreTeam);
 
-		// Open combined session log + create log pane
-		team.openSessionLog();
-		team.createSessionPane();
-
 		// Lock to dispatcher-only tools
-		pi.setActiveTools(["dispatch_agent", "ask_user_question", "todo", "read", "bash", "grep", "find", "ls", "write", "edit"]);
+		pi.setActiveTools(team.activeToolList());
 
 		_ctx.ui.setStatus("agent-team", `Team: ${team.activeTeam} (${team.procs.size})`);
 		const members = Array.from(team.procs.values()).map(a => displayName(a.def.name)).join(", ");
@@ -465,6 +441,7 @@ export default function (pi: ExtensionAPI) {
 
 	// Register tool, commands, shortcut
 	registerDispatchAgentTool(pi, team);
+	registerDispatchAgentsTool(pi, team);
 	registerCommands(pi, team);
 	registerShortcut(pi, team);
 }

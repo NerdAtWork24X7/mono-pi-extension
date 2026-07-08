@@ -1,7 +1,6 @@
 // ── Types ──
 
 import type { ChildProcess } from "child_process";
-import type { WriteStream } from "fs";
 
 export interface AgentDef {
 	name: string;
@@ -47,6 +46,8 @@ export interface AgentProc {
 	systemPromptFile: string;
 	lastPromptHash?: string;
 	streamLineBuf: string;   // partial line buffer for streaming text box-wrapping
+	logLines: string[];        // per-agent in-memory log ring buffer (rendered in the TUI widget, scaled per agent)
+	runId?: string;         // unique per concurrent run; suffixed into session/prompt files to avoid collisions
 }
 
 export interface TeamMember {
@@ -66,6 +67,12 @@ export interface TeamConfig {
 	activeTeam: string;
 	gridCols: number;
 	enabled: boolean;
+	/** Master toggle for parallel batched subagent dispatch (dispatch_agents). */
+	parallelDispatch?: boolean;
+	/** Max concurrent read-only subagent processes spawned by one dispatch_agents call. */
+	maxParallel?: number;
+	/** Tools that mark an agent as "writable" (serialized, never parallel). */
+	destructiveTools?: string[];
 }
 
 export interface TerminalBackend {
@@ -102,6 +109,9 @@ export interface AgentTeamContext {
 	saved: Partial<TeamConfig>;
 	wCtx: any;
 	enabled: boolean;
+	parallelDispatch: boolean;
+	maxParallel: number;
+	batchClones: Set<AgentProc>;
 	animFrame: number;
 	wInvalidate: (() => void) | null;
 	gridCols: number;
@@ -125,6 +135,18 @@ export interface AgentTeamContext {
 	killPanes: () => void;
 	enableAgentTeam: (ctx: any) => Promise<void>;
 	disableAgentTeam: (ctx: any) => Promise<void>;
+	/** Current active tool allowlist (includes dispatch_agents when parallel is on). */
+	activeToolList: () => string[];
+	/** True when an agent's tool allowlist includes any destructive (file-mutating) tool. */
+	destructiveTools: string[];
+	/** Async read/write lock: read-only dispatches run concurrently; writable dispatches are exclusive. */
+	dispatchLock: RwLock;
+	/** Serialize dispatches to the SAME agent so its shared AgentProc state never collides. */
+	serializeAgent: (name: string, fn: () => Promise<any>) => Promise<any>;
+	/** Batched parallel dispatch of read-only subagents. */
+	dispatchMany: (tasks: Array<{ agent: string; task: string }>) => Promise<BatchDispatchResult>;
+	/** Run the SAME agent across many tasks (one isolated clone per task). */
+	dispatchAgentMany: (agentName: string, tasks: string[]) => Promise<BatchDispatchResult>;
 }
 
 // ── Utilities ──
@@ -173,6 +195,7 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
 		lastActivity: 0, resetPongTimeout: undefined, resolveDispatch: null,
 		sessionFile: "", systemPromptFile: "", lastPromptHash: undefined,
 		streamLineBuf: "",
+		logLines: [],
 	};
 }
 
@@ -201,6 +224,92 @@ export function resetForDispatch(ap: AgentProc) {
 	ap.lastWork = "";
 	clearTimers(ap);
 	if (ap.readyTimeout) { clearTimeout(ap.readyTimeout); ap.readyTimeout = undefined; }
+}
+
+// ── Parallel dispatch primitives ──
+
+/** Per-task result from a batched (dispatch_agents) call. */
+export interface BatchTaskResult {
+	agent: string;
+	task: string;
+	output: string;
+	code: number;
+	elapsed: number;
+	error: string | null;
+}
+
+/** Aggregate result of a batched (dispatch_agents) call. */
+export interface BatchDispatchResult {
+	ok: boolean;
+	error?: string;
+	results: BatchTaskResult[];
+}
+
+/** Classify an agent as writable (can mutate files → serialized) vs read-only
+ *  (parallel) by inspecting its tool allowlist against `destructiveTools`. */
+export function isWritable(def: AgentDef, destructiveTools: string[]): boolean {
+	const set = new Set(destructiveTools.map(s => s.trim().toLowerCase()).filter(Boolean));
+	return def.tools
+		.split(",")
+		.map(s => s.trim().toLowerCase())
+		.filter(Boolean)
+		.some(t => set.has(t));
+}
+
+/** Async reader/writer lock.
+ *  - `read(fn)`  → multiple readers run concurrently.
+ *  - `write(fn)` → exclusive: waits for in-flight readers/writers, blocks new ones.
+ *  Used so read-only subagent dispatches parallelize while any write/edit dispatch
+ *  is fully serialized (never runs alongside another dispatch). */
+export class RwLock {
+	private writing = false;
+	private readers = 0;
+	private queue: Array<{ exclusive: boolean; run: () => void }> = [];
+
+	private pump() {
+		if (this.writing) return;
+		if (this.queue.length === 0) return;
+		const head = this.queue[0];
+		if (head.exclusive) {
+			if (this.readers > 0) return; // wait for readers to drain
+			this.queue.shift();
+			this.writing = true;
+			head.run();
+		} else {
+			// Admit a batch of consecutive readers.
+			while (this.queue.length && !this.queue[0].exclusive) {
+				const r = this.queue.shift()!;
+				this.readers++;
+				r.run();
+			}
+		}
+	}
+
+	read<T>(fn: () => Promise<T>): Promise<T> {
+		return new Promise<T>((resolve, reject) => {
+			const run = () => {
+				fn().then(resolve, reject).finally(() => {
+					this.readers--;
+					this.pump();
+				});
+			};
+			this.queue.push({ exclusive: false, run });
+			this.pump();
+		});
+	}
+
+	write<T>(fn: () => Promise<T>): Promise<T> {
+		return new Promise<T>((resolve, reject) => {
+			const run = () => {
+				fn().then(resolve, reject).finally(() => {
+					this.writing = false;
+					this.pump();
+				});
+			};
+			this.queue.push({ exclusive: true, run });
+			this.pump();
+		});
+	}
 }
 
 // ── Log pane sizing ──
@@ -470,48 +579,41 @@ export class HerdrBackend implements TerminalBackend {
 }
 
 // ── Logging ──
+// In-memory, per-agent ring buffers. The TUI widget renders these directly
+// (see ui.ts), replacing the old tmux/herdr "Agent Team Log" side pane. No file
+// stream or external pane is involved; lines are stored RAW (no border) and the
+// widget boxes them at the actual widget width.
 
-import { createWriteStream } from "fs";
-import { join } from "path";
+export const LOG_RING_MAX = 300;
 
 export class SessionLogger {
 	private logDir: string;
-	private logFile = "";
-	private stream: WriteStream | null = null;
 	private logWidth = LOG_PANE_MIN;
 	private terminal: TerminalBackend;
-	private paneId: string | null = null;
+	private generalLines: string[] = []; // ap-less logs (no owning agent)
 
 	constructor(terminal: TerminalBackend, logDir: string) {
 		this.terminal = terminal;
 		this.logDir = logDir;
 	}
 
-	setLogDir(dir: string) { this.logDir = dir; }
-	getLogFile(): string { return this.logFile; }
-	getStream(): WriteStream | null { return this.stream; }
-
-	/** Called after `createLogPane` so subsequent updateWidth() calls can query
-	 *  the actual tmux log-pane width (`#{pane_width}`) instead of guessing
-	 *  from the host width. */
-	setPaneId(id: string | null) { this.paneId = id; }
-
-	open(): void {
-		if (this.stream) return; // already open
-		const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-		this.logFile = join(this.logDir, `session-${ts}.log`);
-		this.stream = createWriteStream(this.logFile, { flags: "a" });
-		this.stream.on("error", (err) => console.error(`Session log write error:`, err.message));
+	/** Append a line to the owning agent's ring buffer, or to the general
+	 *  buffer when no agent is supplied. The widget boxes these at the actual
+	 *  widget width, so lines are stored RAW (no border) here. */
+	private push(ap: AgentProc | null, s: string) {
+		if (ap) {
+			const buf = ap.logLines;
+			buf.push(s);
+			if (buf.length > LOG_RING_MAX) buf.splice(0, buf.length - LOG_RING_MAX);
+		} else {
+			this.generalLines.push(s);
+			if (this.generalLines.length > LOG_RING_MAX) this.generalLines.splice(0, this.generalLines.length - LOG_RING_MAX);
+		}
 	}
 
-	close(): void {
-		if (this.stream) { try { this.stream.end(); } catch { } this.stream = null; }
-	}
-
+	/** No-op: the widget controls render width now. Kept so callers don't change. */
 	updateWidth(): void {
-		// Source-of-truth = actual log pane width (queried per backend), NOT a
-		// formula over the host. Box width is just a clamp, no 0.35 ratio.
-		const paneW = this.terminal.getLogPaneWidth(this.paneId);
+		const paneW = this.terminal.getLogPaneWidth(null);
 		this.logWidth = boxWidth(paneW);
 	}
 
@@ -519,48 +621,35 @@ export class SessionLogger {
 
 	// ── Low-level write helpers ──
 
-	log(msg: string) {
-		if (this.stream) this.stream.write(msg + "\n");
+	log(msg: string, ap: AgentProc | null = null) {
+		this.push(ap, msg);
 	}
 
 	logRaw(msg: string) {
-		if (this.stream) this.stream.write(msg);
+		this.push(null, msg);
 	}
 
-	/** Write a user-facing log message, wrapping each line in a box border and
-	 *  truncating to the log pane width so long content cannot overflow the box.
-	 *  Use this for plain text content (memory events, subprocess stderr, etc.).
-	 *  For raw access — box-drawing characters, headers, multi-line box dumps
-	 *  assembled by the caller — use log() instead. Multiline input is split on
-	 *  `\n` and every line (including blank ones) gets its own bordered row. */
-	logBoxed(msg: string) {
-		if (!this.stream) return;
-		// Strip one optional trailing newline so logical "lines" stay a single row.
+	/** Store each line RAW (no outer box): the widget wraps it in the per-agent
+	 *  panel border at the actual widget width, so box-drawing here would
+	 *  mismatch. Used for subprocess stderr and memory notes. */
+	logBoxed(msg: string, ap: AgentProc | null = null) {
 		const trimmed = msg.endsWith("\n") ? msg.slice(0, -1) : msg;
-		for (const ln of trimmed.split("\n")) {
-			// Cap input length to defend `boxLine`'s `[...content].length` spread
-			// against pathological input (a runaway subprocess writing an infinite
-			// single line without `\n`). `boxLine` then re-truncates to logWidth
-			// for the visible output, so the cap is intentionally invisible.
-			const safe = ln.length > LOG_LINE_INPUT_CAP ? ln.slice(0, LOG_LINE_INPUT_CAP) : ln;
-			this.stream.write(boxLine(safe, this.logWidth) + "\n");
-		}
+		for (const ln of trimmed.split("\n")) this.push(ap, ln);
 	}
 
 	logStreamingText(ap: AgentProc, chunk: string) {
-		if (!this.stream) return;
 		ap.streamLineBuf += chunk;
 		let idx: number;
 		while ((idx = ap.streamLineBuf.indexOf("\n")) >= 0) {
 			const line = ap.streamLineBuf.slice(0, idx);
 			ap.streamLineBuf = ap.streamLineBuf.slice(idx + 1);
-			this.stream.write(boxLine(line, this.logWidth) + "\n");
+			this.push(ap, line);
 		}
 	}
 
 	flushStreamBuf(ap: AgentProc) {
-		if (!this.stream || !ap.streamLineBuf) return;
-		this.stream.write(boxLine(ap.streamLineBuf, this.logWidth) + "\n");
+		if (!ap.streamLineBuf) return;
+		this.push(ap, ap.streamLineBuf);
 		ap.streamLineBuf = "";
 	}
 
@@ -569,47 +658,47 @@ export class SessionLogger {
 		return `${displayName(ap.def.name)} · ${shortModel(ap.model)}`;
 	}
 
-	// ── Structured log events ──
+	// ── Structured log events (raw lines; widget boxes them) ──
 
 	logTaskBox(ap: AgentProc, taskNum: number, task: string) {
-		this.log("");
-		this.log(`Date: ${new Date().toISOString()}`);
-		this.log(hrPad(` Task #${taskNum} · ${this.agentLabel(ap)} `, this.logWidth, "╭", "╮"));
-		const inner = this.logWidth - 4;
+		this.push(ap, `▶ Task #${taskNum} · ${this.agentLabel(ap)}`);
+		const inner = 80;
 		for (const para of task.split("\n")) {
 			const words = para.split(" ");
 			let line = "";
 			for (const w of words) {
 				if (line && [...line].length + 1 + [...w].length > inner) {
-					this.log(boxLine(line, this.logWidth));
+					this.push(ap, "  " + line);
 					line = w;
 				} else {
 					line = line ? line + " " + w : w;
 				}
 			}
-			if (line) this.log(boxLine(line, this.logWidth));
+			if (line) this.push(ap, "  " + line);
 		}
 	}
 
 	logToolStart(ap: AgentProc, tool: string, detail: string) {
-		this.log(boxLine(`┌ ${tool}${detail ? " " + detail : ""}`, this.logWidth));
+		this.push(ap, `┌ ${tool}${detail ? " " + detail : ""}`);
 	}
 
 	logToolEnd(ap: AgentProc, tool: string, ok: boolean, durMs?: number) {
-		this.log(boxLine(`└ ${ok ? "✓" : "✗"} ${tool}${durMs ? ` (${Math.round(durMs)}ms)` : ""}`, this.logWidth));
+		this.push(ap, `└ ${ok ? "✓" : "✗"} ${tool}${durMs ? ` (${Math.round(durMs)}ms)` : ""}`);
 	}
 
 	logDoneBox(ap: AgentProc, elapsedSec: number, tools: number) {
-		this.log("")
-		this.log(hrPad(` DONE  ${elapsedSec}s · ${tools} tools `, this.logWidth, "╰", "╯"));
+		this.push(ap, `✓ DONE ${elapsedSec}s · ${tools} tools`);
 	}
 
 	logErrorBox(ap: AgentProc, heading: string, detail: string) {
-		this.log(hrPad(` ✗ ${this.agentLabel(ap)} `, this.logWidth, "╭", "╮"));
-		this.log(boxLine(heading, this.logWidth));
-		if (detail) this.log(boxLine(detail, this.logWidth));
-		this.log(hrPad("", this.logWidth, "╰", "╯"));
+		this.push(ap, `✗ ${this.agentLabel(ap)}`);
+		this.push(ap, `  ${heading}`);
+		if (detail) this.push(ap, `  ${detail}`);
 	}
+
+	/** No-op: per-agent buffers already isolate concurrent runs, so there is no
+	 *  shared stream to flush into. Kept so callers don't change. */
+	flushAgent(_ap: AgentProc, _width?: number) { }
 }
 
 // ── RPC subprocess spawner ──
@@ -621,6 +710,8 @@ export interface RpcSubprocessOpts {
 	args: string[];
 	env?: NodeJS.ProcessEnv;
 	logger: SessionLogger;
+	/** Owning agent, used to route buffered log output for parallel clones. */
+	owner?: AgentProc | null;
 	/** Called for each complete, non-empty JSONL line emitted on stdout. */
 	onLine: (line: string) => void;
 	/** Called when the child emits 'error'. Fires at most once. */
@@ -689,7 +780,7 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
 
 	proc.stderr!.setEncoding("utf-8");
 	proc.stderr!.on("data", (d: string) => {
-		for (const line of d.split("\n")) if (line.trim()) opts.logger.logBoxed(line);
+		for (const line of d.split("\n")) if (line.trim()) opts.logger.logBoxed(line, opts.owner ?? null);
 	});
 
 	proc.on("error", (err) => {

@@ -15,67 +15,106 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 		description: "Dispatch a task to a specialist agent. A fresh process is spawned per task — no context carries over between dispatches. Include all necessary context in the task description.",
 		parameters: Type.Object({
 			agent: Type.String({ description: "Agent name (case-insensitive)" }),
-			task: Type.String({ description: "Task description for the agent" }),
+			task: Type.String({ description: "Task description for the agent. Use this OR `tasks`." }),
+			tasks: Type.Optional(Type.Array(Type.String(), { description: "Multiple task descriptions for the SAME agent — spawns one isolated subagent per task (parallel for read-only agents, serialized for writable ones). Use instead of `task`." })),
 		}),
 
 		async execute(_id, params, signal, onUpdate, _ctx) {
-			const { agent, task } = params as { agent: string; task: string };
+			const { agent, task, tasks } = params as { agent: string; task?: string; tasks?: string[] };
 			if (!team.enabled) return {
 				content: [{ type: "text", text: "Agent team is disabled. /agents-team-toggle on" }],
 			};
+
+			const multi = Array.isArray(tasks) && tasks.length > 0;
+			const single = typeof task === "string" && task.trim().length > 0;
+			if (!multi && !single) {
+				return {
+					content: [{ type: "text", text: "dispatch_agent requires either `task` (string) or non-empty `tasks` (array of strings for the same agent)." }],
+				};
+			}
 
 			try {
 				const tag = this.agentTag(agent);
 
 				onUpdate?.({
-					content: [{ type: "text", text: `${tag} - dispatching...` }],
-					details: { agent, task, status: "dispatching" },
+					content: [{ type: "text", text: `${tag} - ${multi ? `dispatching ${tasks!.length} task(s)...` : "dispatching..."}` }],
+					details: { agent, task, tasks, status: "dispatching", multi },
 				});
 
-				// Listen for ESC / abort signal — kill running subagent
+				// Listen for ESC / abort signal — kill running subagent(s).
+				// Captures the shared team-member proc AND any in-flight clones
+				// for this agent so a multi-task fan-out is fully abortable.
 				if (signal) {
-					// Capture the ap at registration time. If the user dispatches
-					// the same agent twice in a row, a second listener is added
-					// for a NEW ap; the first listener must NOT see that one.
 					const capturedAp = team.procs.get(agent.toLowerCase());
-					if (capturedAp) {
-						signal.addEventListener("abort", () => {
-							if (capturedAp.status === "running" || capturedAp.status === "starting") {
-								team.logger.logErrorBox(capturedAp, "ABORTED", "User pressed ESC");
-								team.killProc(capturedAp, true);
-								team.wipeSessionFile(capturedAp);
-								capturedAp.status = "dead";
+					signal.addEventListener("abort", () => {
+						const targets: any[] = [];
+						if (capturedAp) targets.push(capturedAp);
+						for (const c of team.batchClones) {
+							if (c.def.name.toLowerCase() === agent.toLowerCase()) targets.push(c);
+						}
+						for (const t of targets) {
+							if (t.status === "running" || t.status === "starting") {
+								team.logger.logErrorBox(t, "ABORTED", "User pressed ESC");
+								team.killProc(t, true);
+								team.wipeSessionFile(t);
+								t.status = "dead";
 								team.invalidate();
 							}
-						});
+						}
+					});
+				}
+
+				// Normalize to an aggregated batch result so single + multi
+				// paths share one formatting/truncation path below.
+				let aggregate: { ok: boolean; error?: string; results: Array<{ agent: string; task: string; output: string; code: number; elapsed: number; error: string | null }> };
+				if (multi) {
+					const r = await team.dispatchAgentMany(agent, tasks as string[]);
+					if (!r.ok) {
+						if (team.wCtx) team.wCtx.ui.notify(`${tag} rejected`, "error");
+						return {
+							content: [{ type: "text", text: `dispatch_agent rejected: ${r.error}` }],
+							details: { agent, tasks, status: "error", error: r.error },
+						};
 					}
+					aggregate = r;
+				} else {
+					const r = await team.dispatch(agent, task as string);
+					aggregate = { ok: true, results: [{ agent, task: task as string, output: r.output, code: r.code, elapsed: r.elapsed, error: null }] };
 				}
 
-				const r = await team.dispatch(agent, task);
-
-				// Guard rail: truncate response to last MAX_RESPONSE_LENGTH chars
-				let output = r.output;
-				if (output.length > MAX_RESPONSE_LENGTH) {
-					output = output.slice(-MAX_RESPONSE_LENGTH);
-					output = `... [truncated to last ${MAX_RESPONSE_LENGTH} chars]\n` + output;
+				const parts: string[] = [];
+				let anyFail = false;
+				for (const res of aggregate.results) {
+					if (res.code !== 0) anyFail = true;
+					let out = res.output;
+					if (out.length > MAX_RESPONSE_LENGTH) out = out.slice(-MAX_RESPONSE_LENGTH);
+					const status = res.code === 0 ? "done" : "error";
+					parts.push(multi
+						? `### ${res.task}\n→ ${status} (${Math.round(res.elapsed / 1000)}s)\n\n${out}`
+						: out);
 				}
 
-				const status = r.code === 0 ? "done" : "error";
-				const summary = `${tag} - ${status} in ${Math.round(r.elapsed / 1000)}s`;
+				const finalOutput = multi ? parts.join("\n\n---\n\n") : (() => {
+					let o = aggregate.results[0].output;
+					if (o.length > MAX_RESPONSE_LENGTH) o = `... [truncated to last ${MAX_RESPONSE_LENGTH} chars]\n` + o.slice(-MAX_RESPONSE_LENGTH);
+					return o;
+				})();
 
-				if (r.code !== 0 && team.wCtx) {
-					team.wCtx.ui.notify(summary, "error");
-				}
+				const totalElapsed = aggregate.results.reduce((s, r) => s + r.elapsed, 0);
+				const status = anyFail ? "error" : "done";
+				const summary = `${tag} - ${status} in ${Math.round(totalElapsed / 1000)}s`;
+
+				if (anyFail && team.wCtx) team.wCtx.ui.notify(summary, "error");
 
 				return {
-					content: [{ type: "text", text: output }],
-					details: { agent, task, status, elapsed: r.elapsed, exitCode: r.code, fullOutput: output },
+					content: [{ type: "text", text: finalOutput }],
+					details: { agent, task: single ? task : undefined, tasks: multi ? tasks : undefined, status, elapsed: totalElapsed, exitCode: anyFail ? 1 : 0, multi, fullOutput: finalOutput, results: multi ? aggregate.results : undefined },
 				};
 			} catch (err: any) {
 				if (team.wCtx) team.wCtx.ui.notify(`[${agent}] Error: ${err?.message || err}`, "error");
 				return {
 					content: [{ type: "text", text: `Error dispatching ${agent}: ${err?.message || err}. The orchestrator should inform the user.` }],
-					details: { agent, task, status: "error", elapsed: 0, exitCode: 1, fullOutput: "" },
+					details: { agent, task, tasks, status: "error", elapsed: 0, exitCode: 1, fullOutput: "" },
 				};
 			}
 		},
@@ -89,10 +128,13 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 		renderCall(args, theme) {
 			const a = (args as any).agent || "?";
 			const t = (args as any).task || "";
+			const tasksArr = (args as any).tasks;
+			const multiLabel = Array.isArray(tasksArr) && tasksArr.length > 1 ? ` (${tasksArr.length} tasks)` : "";
+			const text = t || (Array.isArray(tasksArr) ? `${tasksArr.length} task(s)` : "");
 			return new Text(
 				theme.fg("toolTitle", theme.bold("dispatch_agent ")) +
-				theme.fg("accent", `${this.agentTag(a)} - `) +
-				theme.fg("muted", t),
+				theme.fg("accent", `${this.agentTag(a)}${multiLabel} - `) +
+				theme.fg("muted", text),
 				0, 0,
 			);
 		},
@@ -110,6 +152,18 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 				);
 			}
 
+			if (d.multi && d.results) {
+				const n = d.results.length;
+				const fails = d.results.filter((r: any) => r.code !== 0).length;
+				const ok = d.status === "done" && fails === 0;
+				const elapsed = typeof d.elapsed === "number" ? Math.round(d.elapsed / 1000) : 0;
+				const header = theme.fg(ok ? "success" : "error", `${ok ? "✓" : "✗"} ${tag} - ${n} task(s)${fails ? `, ${fails} failed` : ""} (${elapsed}s)`);
+				if (options.expanded && d.fullOutput) {
+					return new Text(header + "\n" + theme.fg("muted", d.fullOutput), 0, 0);
+				}
+				return new Text(header, 0, 0);
+			}
+
 			const icon = d.status === "done" ? "✓" : "✗";
 			const color = d.status === "done" ? "success" : "error";
 			const elapsed = typeof d.elapsed === "number" ? Math.round(d.elapsed / 1000) : 0;
@@ -120,6 +174,118 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 			}
 
 			return new Text(header, 0, 0);
+		},
+	});
+}
+
+export function registerDispatchAgentsTool(pi: ExtensionAPI, team: AgentTeamContext) {
+	pi.registerTool({
+		name: "dispatch_agents",
+		label: "Dispatch Agents (parallel, read-only)",
+		description:
+			"Dispatch multiple READ-ONLY subagents in parallel and return their combined results. " +
+			"Every agent in `tasks` must be read-only (its tool allowlist must NOT contain write/edit/doc_generator) — " +
+			"writable agents (coder, documenter, doc_generator, searcher, tester, image_analyzer, etc.) must be dispatched " +
+			"one-at-a-time via dispatch_agent and are never run in parallel. Batch independent read-only lookups " +
+			"(e.g. file_reader) here instead of calling dispatch_agent repeatedly.",
+		parameters: Type.Object({
+			tasks: Type.Array(
+				Type.Object({
+					agent: Type.String({ description: "Agent name (case-insensitive)" }),
+					task: Type.String({ description: "Task description for the agent" }),
+				}),
+				{ description: "Independent read-only lookups to run concurrently." },
+			),
+		}),
+
+		async execute(_id, params, signal, onUpdate, _ctx) {
+			const { tasks } = params as { tasks: Array<{ agent: string; task: string }> };
+			if (!team.enabled) {
+				return { content: [{ type: "text", text: "Agent team is disabled. /agents-team-toggle on" }] };
+			}
+			if (!team.parallelDispatch) {
+				return {
+					content: [{
+					type: "text",
+					text: "Parallel dispatch is disabled. Enable with /agents-parallel on, or use dispatch_agent for each agent.",
+				}],
+				};
+			}
+			if (!Array.isArray(tasks) || tasks.length === 0) {
+				return {
+					content: [{ type: "text", text: "dispatch_agents requires a non-empty `tasks` array of {agent, task}." }],
+				};
+			}
+
+			onUpdate?.({
+				content: [{ type: "text", text: `dispatch_agents - dispatching ${tasks.length} read-only task(s) in parallel...` }],
+				details: { count: tasks.length, status: "dispatching" },
+			});
+
+			if (signal) {
+				signal.addEventListener("abort", () => {
+					for (const ap of team.batchClones) {
+						if (ap.status === "running" || ap.status === "starting") {
+							team.killProc(ap, true);
+							team.wipeSessionFile(ap);
+							ap.status = "dead";
+							team.invalidate();
+						}
+					}
+				});
+			}
+
+			const r = await team.dispatchMany(tasks);
+
+			if (!r.ok) {
+				if (team.wCtx) team.wCtx.ui.notify(`dispatch_agents rejected`, "error");
+				return {
+					content: [{ type: "text", text: `dispatch_agents rejected: ${r.error}` }],
+					details: { status: "error", error: r.error },
+				};
+			}
+
+			const parts: string[] = [];
+			let anyFail = false;
+			for (const res of r.results) {
+				if (res.code !== 0) anyFail = true;
+				let out = res.output;
+				if (out.length > MAX_RESPONSE_LENGTH) out = out.slice(-MAX_RESPONSE_LENGTH);
+				const status = res.code === 0 ? "done" : "error";
+				parts.push(`### ${res.agent}\n${res.task}\n→ ${status} (${Math.round(res.elapsed / 1000)}s)\n\n${out}`);
+			}
+			const combined = parts.join("\n\n---\n\n");
+
+			return {
+				content: [{ type: "text", text: combined }],
+				details: { status: anyFail ? "error" : "done", results: r.results, fullOutput: combined },
+			};
+		},
+
+		renderCall(args, theme) {
+			const list = (args as any).tasks || [];
+			const names = list.map((t: any) => t.agent).join(", ");
+			return new Text(
+				theme.fg("toolTitle", theme.bold("dispatch_agents ")) +
+				theme.fg("accent", `(${list.length}) `) +
+				theme.fg("muted", names),
+				0, 0,
+			);
+		},
+
+		renderResult(result, options, theme) {
+			const d = result.details as any;
+			if (!d) return new Text(result.content[0]?.text || "", 0, 0);
+			if (options.isPartial || d.status === "dispatching") {
+				return new Text(theme.fg("accent", `dispatch_agents - working...`), 0, 0);
+			}
+			const n = d.results?.length ?? 0;
+			const fails = d.results?.filter((r: any) => r.code !== 0).length ?? 0;
+			const ok = d.status === "done" && fails === 0;
+			return new Text(
+				theme.fg(ok ? "success" : "error", `${ok ? "✓" : "✗"} dispatch_agents - ${n} task(s)${fails ? `, ${fails} failed` : ""}`),
+				0, 0,
+			);
 		},
 	});
 }
@@ -202,18 +368,44 @@ export function registerCommands(pi: ExtensionAPI, team: AgentTeamContext) {
 		},
 	});
 
-	pi.registerCommand("agents-restart", {
-		description: "Kill any running subagent processes",
-		handler: async (_args, ctx) => {
+	pi.registerCommand("agents-parallel", {
+		description: "Toggle GLOBAL parallelism (subagent dispatch + host tool calls): /agents-parallel [on|off|status] [max N]",
+		handler: async (args, ctx) => {
 			team.wCtx = ctx;
-			if (!team.enabled) { ctx.ui.notify("Agent team is disabled. Use /agents-team-toggle on", "warning"); return; }
-			ctx.ui.notify("Killing all running subagent processes...", "info");
-			await team.killAll();
-			ctx.ui.notify("All subagent processes killed", "success");
-			team.invalidate();
+			const tokens = (args?.trim().split(/\s+/).filter(Boolean) ?? []).map(t => t.toLowerCase());
+			let changed = false;
+			let note = "";
+			for (let i = 0; i < tokens.length; i++) {
+				const t = tokens[i];
+				if (t === "on") { team.parallelDispatch = true; changed = true; }
+				else if (t === "off") { team.parallelDispatch = false; changed = true; }
+				else if (t === "status") { /* report only */ }
+				else if (t === "max") {
+					const n = parseInt(tokens[++i] ?? "", 10);
+					if (Number.isFinite(n) && n >= 1 && n <= 20) { team.maxParallel = n; changed = true; }
+					else note += "Invalid max (1-20). ";
+				} else if (t.startsWith("max=")) {
+					const n = parseInt(t.slice(4), 10);
+					if (Number.isFinite(n) && n >= 1 && n <= 20) { team.maxParallel = n; changed = true; }
+					else note += "Invalid max (1-20). ";
+				} else {
+					note += `Unknown arg "${t}". `;
+				}
+			}
+			if (changed) {
+				team.persist();
+				pi.setActiveTools(team.activeToolList());
+				team.invalidate();
+			}
+			const mode = team.parallelDispatch ? "ON" : "OFF";
+			ctx.ui.notify(
+				`${note}Parallelism: ${mode} — covers subagent dispatch AND host tool calls (read/grep/find/ls); writes always serialized.${changed ? ` Max ${team.maxParallel} concurrent read-only subagents.` : ""}`,
+				changed ? "success" : "info",
+			);
 		},
 	});
 }
+
 
 export function registerShortcut(pi: ExtensionAPI, team: AgentTeamContext) {
 	pi.registerShortcut("ctrl+q", {

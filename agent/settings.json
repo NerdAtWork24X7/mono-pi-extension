@@ -2,9 +2,9 @@
   "lastChangelogVersion": "0.80.2",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
-  "defaultProvider": "opencode",
-  "defaultModel": "big-pickle",
-  "defaultThinkingLevel": "off",
+  "defaultProvider": "kilo",
+  "defaultModel": "tencent/hy3:free",
+  "defaultThinkingLevel": "high",
   "packages": [
     "npm:@juicesharp/rpiv-ask-user-question",
     {
@@ -29,12 +29,14 @@
     "kilo/kilo-auto/free",
     "openrouter/openrouter/free",
     "xiaomi-token-plan-ams/mimo-v2.5-pro",
-    "xiaomi-token-plan-ams/mimo-v2.5"
+    "xiaomi-token-plan-ams/mimo-v2.5",
+    "kilo/tencent/hy3:free"
   ],
   "extensions": [
-    "-extensions/web-fetch.ts",
     "+extensions/custom-footer.ts",
     "+extensions/agent-team/index.ts"
+    "+extensions/web-fetch_crawl4ai.ts",
+    "-extensions/web-fetch.ts"
   ],
   "terminal": {
     "showTerminalProgress": true

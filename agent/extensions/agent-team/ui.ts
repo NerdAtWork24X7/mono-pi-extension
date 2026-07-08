@@ -6,6 +6,23 @@ import { displayName, fmtTok, hrPad, shortModel } from "./core";
 
 const ansiRe = /\x1b\[[0-9;]*m/g;
 
+/** An agent is "working" when it is actively doing something. Idle / done /
+ *  error / dead agents are hidden from the widget so only live subagents show. */
+export function isWorking(ap: AgentProc): boolean {
+	return ap.status === "running" || ap.status === "starting";
+}
+
+/** Strip everything that corrupts the monospace log grid: ANSI escape codes,
+ *  carriage returns, and other control characters. Tabs become two spaces. */
+const ctrlRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+function sanitizeLine(s: string): string {
+	let t = s.replace(ansiRe, "");   // drop colour/style escapes
+	t = t.replace(/\r/g, "");        // drop CR (progress bars, \r\n)
+	t = t.replace(/\t/g, "  ");      // tabs -> 2 spaces
+	t = t.replace(ctrlRe, "");       // drop remaining control chars
+	return t.trimEnd();
+}
+
 // ── System prompt builder ──
 
 export function buildCatalog(ctx: AgentTeamContext): string {
@@ -24,7 +41,15 @@ export function buildSystemPrompt(args: {
 	memory?: { file: string } | null;
 	agentMd?: string | null;
 	skills?: Array<{ name: string; description: string }>;
+	parallel?: boolean;
 }): { systemPrompt: string } {
+	// When parallelism is disabled, instruct the orchestrator to serialize
+	// BOTH subagent dispatches and its own parallel host tool calls.
+	const parallelRules = args.parallel === false
+		? `- **Serialize all work (parallelism OFF)**: do NOT batch read-only subagent lookups — dispatch each via \`dispatch_agent\` one at a time, and fire read-only host tool calls (read/grep/find/ls) one per turn. Writes/edits are already always serialized.`
+		: `- **Parallel read-only dispatch**: independent read-only subagent lookups (agents whose tools exclude write/edit/doc_generator — e.g. \`file_reader\`) MUST be batched into ONE \`dispatch_agents\` call so they run concurrently. Do not call \`dispatch_agent\` for them one-by-one when they are independent.
+- **Read-only host tools**: you may fire multiple read-only tool calls (read/grep/find/ls) within a single turn; only serialize writes/edits.`;
+
 	const memSection = args.memory?.file
 		? `\n# Memory\n\nA background process appends key context, decisions, and open questions to \`${args.memory.file}\` after each turn. Read it at the start of a task to recall prior project state and follow-ups.\n`
 		: "";
@@ -63,9 +88,9 @@ Stop at the first rung that holds:
 # Workflow
 
 1. **Restate the goal** in one line. If ambiguous, ask ONE focused question, then proceed.
-2. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer; batch independent lookups into one round.
+2. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer; batch independent read-only lookups into a single \`dispatch_agents\` call to run them in parallel.
 3. **Plan the minimal change set** with explicit acceptance criteria (what must be true when done). Prefer editing existing files over creating new ones
-4. **Dispatch the right subagent** , Wait for the result; check it against acceptance criteria before proceeding.
+4. **Dispatch the right subagent.** Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). Writable agents (coder, documenter, doc_generator, …): use \`dispatch_agent\` one at a time. Check every result against acceptance criteria before proceeding.
 5. **Dispatch \`documenter\`** if the change touches public surface (CLI flags, env vars, exported functions, config keys, breaking changes) — even if the user didn't explicitly ask. Skip otherwise.
 6. **Dispatch \`tester\`** with the exact commands to run. On failure, send the error excerpt + failing file paths back to \`coder\` (max 2 retry cycles). After 2, stop and surface the failure to the user with evidence — never paper over it.
 7. **Summarize**: what changed, what was verified, what's left.
@@ -89,7 +114,8 @@ Subagents reply with structured signals — route them, don't blindly re-dispatc
 
 # Hard Rules
 
-- **Dispatch ONE agent at a time** — wait for the full response before dispatching the next.
+${parallelRules}
+- **Writes/edits are NEVER parallel**: any agent that can write or edit files (coder, documenter, doc_generator, searcher, tester, image_analyzer, …) goes through \`dispatch_agent\` and is always serialized — never include a writable agent in \`dispatch_agents\`, and never start a second write/edit while one is still in flight.
 - Delegate only context-heavy work (large files, web, command execution) — never delegate reasoning, planning, or decisions.
 - Never accept a subagent's output without checking it fits the goal and acceptance criteria.
 - Never edit code or run tests yourself use subagent.
@@ -144,8 +170,10 @@ export function initWidget(ctx: AgentTeamContext) {
 		const text = new Text("", 0, 1);
 		ctx.wInvalidate = () => tui.requestRender();
 		return {
-			render(width: number): string[] {				const hasMemory = !!ctx.memoryManager;
-				const totalCount = ctx.procs.size + (hasMemory ? 1 : 0);
+			render(width: number): string[] {
+				const hasMemory = !!ctx.memoryManager;
+				const activeClones = [...ctx.batchClones].filter(isWorking);
+				const totalCount = ctx.procs.size + activeClones.length + (hasMemory ? 1 : 0);
 
 			if (!ctx.enabled) {
 				text.setText(theme.fg("dim", "Agent team disabled. /agents-team-toggle on"));
@@ -173,6 +201,10 @@ export function initWidget(ctx: AgentTeamContext) {
 
 				const cards: string[][] = [];
 				for (const ap of ctx.procs.values()) cards.push(renderCard(ctx, ap, colW, theme));
+				for (const ap of activeClones) {
+					const label = displayName(ap.def.name) + (ap.runId ? " *" : "");
+					cards.push(renderCard(ctx, ap, colW, theme, label));
+				}
 				if (hasMemory) cards.push(renderMemoryCard(ctx, colW, theme));
 
 				const rows: string[][] = [];
@@ -204,7 +236,14 @@ export function initWidget(ctx: AgentTeamContext) {
 				});
 				const bottomBorder = theme.fg("border", hrPad("", width, "╰", "╯", "─"));
 
-			text.setText([topBorder, headerLine, sepLine, ...boxedRows, bottomBorder].join("\n"));
+			// ── Per-agent TUI log grid (scales with swapped agents) ──
+			const logRows = renderLogGrid(ctx, innerW, theme);
+
+			const parts = [topBorder, headerLine, sepLine, ...boxedRows];
+			if (logRows.length) parts.push(theme.fg("border", hrPad("", width, "├", "┤", "─")), ...logRows);
+			parts.push(bottomBorder);
+
+			text.setText(parts.join("\n"));
 			return text.render(width);
 			},
 		};
@@ -214,6 +253,67 @@ export function initWidget(ctx: AgentTeamContext) {
 	process.stdout.on("resize", ctx.resizeHandler);
 
 	if (!ctx.wInvalidate) ctx.wInvalidate = () => {};
+}
+
+const LOG_PANEL_LINES = 6; // max log lines shown per agent panel
+
+/** Build the per-agent log grid rendered beneath the status cards. Each column
+ *  is one agent (team member + active parallel clone + memory), its lines pulled
+ *  from that agent's in-memory ring buffer. The grid scales: more swapped agents
+ *  → more columns, laid out across `gridCols`. */
+export function renderLogGrid(ctx: AgentTeamContext, innerW: number, theme: any): string[] {
+	const slots: Array<{ label: string; lines: string[]; accent: boolean }> = [];
+	for (const ap of ctx.procs.values()) {
+		if (!isWorking(ap)) continue;
+		slots.push({ label: displayName(ap.def.name), lines: ap.logLines || [], accent: true });
+	}
+	for (const ap of ctx.batchClones) {
+		if (!isWorking(ap)) continue;
+		const label = displayName(ap.def.name) + (ap.runId ? " *" : "");
+		slots.push({ label, lines: ap.logLines || [], accent: false });
+	}
+	if (ctx.memoryManager && ctx.memoryManager.memoryLogAgent
+		&& ["recording", "summarizing"].includes(ctx.memoryManager.snapshot.status)) {
+		slots.push({ label: "Memory", lines: ctx.memoryManager.memoryLogAgent.logLines || [], accent: false });
+	}
+	if (!slots.length) return [];
+
+	const gap = " │ "; // 3 chars between columns
+	const cols = Math.max(1, Math.min(ctx.gridCols, slots.length));
+	const colW = Math.max(6, Math.floor((innerW - (cols - 1) * gap.length) / cols));
+	const maxLines = Math.max(1, ...slots.map(s => s.lines.length));
+	const L = Math.min(maxLines, LOG_PANEL_LINES);
+
+	const wrap = (s: string) => {
+		const cells = [...sanitizeLine(s)];
+		if (cells.length > colW - 1) return cells.slice(0, colW - 1).join("") + "…";
+		return cells.join("") + " ".repeat(Math.max(0, colW - cells.length));
+	};
+	const rowStr = (cells: string[]) =>
+		theme.fg("border", "│") + " " + cells.join(gap) + " " + theme.fg("border", "│");
+
+	// Render `cols` agent columns as one self-contained block (label row + L
+	// log rows). Slots are chunked so a wide set of agents wraps into
+	// stacked blocks instead of one over-wide row that the terminal wraps and
+	// mixes. Matches the status-card grid's row-of-cols layout.
+	function renderBlock(block: Array<{ label: string; lines: string[]; accent: boolean }>): string[] {
+		const rows: string[] = [];
+		rows.push(rowStr(block.map(s => theme.fg(s.accent ? "accent" : "text", theme.bold(wrap(s.label))))));
+		for (let r = 0; r < L; r++) {
+			rows.push(rowStr(block.map(s => {
+				const idx = s.lines.length - L + r;
+				const ln = idx >= 0 ? s.lines[idx] : "";
+				return theme.fg("text", wrap(ln));
+			})));
+		}
+		return rows;
+	}
+
+	const out: string[] = [];
+	for (let i = 0; i < slots.length; i += cols) {
+		out.push(...renderBlock(slots.slice(i, i + cols)));
+	}
+	return out;
 }
 
 export function invalidate(ctx: AgentTeamContext) {
@@ -234,7 +334,7 @@ function padToVis(colored: string, targetW: number): string {
 }
 
 /** 1–2 line agent card: accent bar + icon + name + time, optional stats row. */
-export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, theme: any): string[] {
+export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, theme: any, labelOverride?: string): string[] {
 	const statusColor = ap.status === "idle" ? "dim"
 		: ap.status === "starting" ? "warning"
 			: ap.status === "running" ? "accent"
@@ -244,7 +344,7 @@ export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, them
 			: ap.status === "running" ? "●"
 				: ap.status === "done" ? "✓" : "✗";
 
-	const name = displayName(ap.def.name);
+	const name = labelOverride ?? displayName(ap.def.name);
 	const sm = shortModel(ap.model);
 	const modelStr = sm ? ` ${sm}` : "";
 	const timeStr = ["running", "starting", "done"].includes(ap.status)

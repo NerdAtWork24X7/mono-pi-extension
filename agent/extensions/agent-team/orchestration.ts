@@ -6,7 +6,7 @@ import { join } from "path";
 import type { AgentProc } from "./core";
 import type { SessionLogger } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
-import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, boxLine, extractLastLine } from "./core";
+import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext } from "./core";
 
 const SIGKILL_BACKSTOP_MS = 2_000;
@@ -44,7 +44,7 @@ export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) 
 		case "extension_ui_request": return autoRespondUI(ap, ev);
 		default: {
 			const fmt = simpleLogEvents[ev.type];
-			if (fmt) ctx.logger.log(boxLine(fmt(ev), ctx.logger.getWidth()));
+			if (fmt) ctx.logger.log(fmt(ev), ap);
 		}
 	}
 }
@@ -92,6 +92,7 @@ export function handleMessageUpdate(ctx: AgentTeamContext, ap: AgentProc, ev: an
 	const lastNl = chunk.lastIndexOf("\n");
 	const tail = lastNl >= 0 ? chunk.slice(lastNl + 1) : chunk;
 	if (tail.trim()) ap.lastWork = tail.slice(0, 80);
+	ctx.invalidate();
 }
 
 export function handleMessageEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
@@ -193,20 +194,29 @@ export async function dispatch(
 	const ap = ctx.procs.get(agentName.toLowerCase());
 	if (!ap) {
 		const available = Array.from(ctx.procs.values()).map(a => displayName(a.def.name)).join(", ");
-		return Promise.resolve({
-			output: `Agent "${agentName}" not found. Available: ${available}`,
-			code: 1, elapsed: 0,
-		});
+		return { output: `Agent "${agentName}" not found. Available: ${available}`, code: 1, elapsed: 0 };
 	}
+	// Read-only agents run concurrently under the read lock; writable agents
+	// (any allowlist containing a destructive tool) take the exclusive write
+	// lock so writes/edits are NEVER parallel. serializeAgent guards the shared
+	// AgentProc so two concurrent dispatches to the SAME agent can't clobber
+	// each other's mutable run state.
+	const writable = isWritable(ap.def, ctx.destructiveTools);
+	return ctx.serializeAgent(agentName.toLowerCase(), () =>
+		writable
+			? ctx.dispatchLock.write(() => runAgent(ctx, ap, task))
+			: ctx.dispatchLock.read(() => runAgent(ctx, ap, task)),
+	);
+}
 
-	// Kill any leftover process from the most recent dispatch. Tracking
-	// a single ap is enough because the design is "one dispatch at a time"
-	// and avoids iterating every team member on every dispatch.
-	if (ctx.lastDispatchedAp && ctx.lastDispatchedAp !== ap) {
-		ctx.killProc(ctx.lastDispatchedAp, true);
-	}
-	ctx.lastDispatchedAp = ap;
-
+/** Run a single subagent to completion. Safe to call concurrently for distinct
+ *  AgentProc instances (ephemeral clones or different team members). Callers
+ *  are responsible for locking (see `dispatch` / `dispatchMany`). */
+export async function runAgent(
+	ctx: AgentTeamContext,
+	ap: AgentProc,
+	task: string,
+): Promise<{ output: string; code: number; elapsed: number }> {
 	ctx.wipeSessionFile(ap);
 
 	// Spawn fresh process for this task
@@ -288,10 +298,10 @@ export async function dispatch(
 		};
 	});
 
-	// Write separator to combined session log
-	if (ctx.logger.getStream()) {
-		ctx.logger.getStream()!.write("\n" + "═".repeat(ctx.logger.getWidth()) + "\n\n");
-	}
+	// Write separator to combined session log (and flush any buffered
+	// parallel-clone output as one contiguous block so concurrent agents in
+	// dispatch_agents don't interleave line-by-line in the shared pane).
+	ctx.logger.flushAgent(ap);
 
 	// Task complete — kill the subagent process but KEEP the terminal pane alive
 	// so the user can scroll back and see what the agent did.
@@ -304,6 +314,128 @@ export async function dispatch(
 	ctx.invalidate();
 
 	return result;
+}
+
+/** Build an ephemeral AgentProc clone for a concurrent/parallel run. Clones do
+ *  NOT touch the shared team-member AgentProc (which drives the widget), and
+ *  carry a unique `runId` so their session/prompt files never collide. */
+function makeClone(ctx: AgentTeamContext, def: AgentDef, model: string, teamModel: string | undefined, runId: string): AgentProc {
+	return {
+		def,
+		teamModel,
+		model,
+		runId,
+		...blankProcState(),
+	};
+}
+
+/** Run many read-only agents concurrently (capped at `maxParallel`), each in
+ *  its own subprocess. Returns aggregated per-task results. */
+export async function dispatchMany(
+	ctx: AgentTeamContext,
+	tasks: Array<{ agent: string; task: string }>,
+): Promise<BatchDispatchResult> {
+	// Validate: every task must resolve to a known, READ-ONLY agent. Writable
+	// agents are rejected wholesale — they must go through dispatch_agent and
+	// are always serialized, never parallel.
+	const resolved: Array<{ name: string; def: AgentDef; model: string; teamModel: string | undefined; task: string }> = [];
+	for (const t of tasks) {
+		const ap = ctx.procs.get(t.agent.toLowerCase());
+		if (!ap) {
+			const available = Array.from(ctx.procs.values()).map(a => displayName(a.def.name)).join(", ");
+			return { ok: false, error: `Agent "${t.agent}" not found. Available: ${available}`, results: [] };
+		}
+		if (isWritable(ap.def, ctx.destructiveTools)) {
+			return {
+				ok: false,
+				error: `Agent "${t.agent}" can write/edit files and must be dispatched via dispatch_agent (single, serialized) — never inside dispatch_agents. Move it out of the batch.`,
+				results: [],
+			};
+		}
+		resolved.push({ name: t.agent, def: ap.def, model: ap.model, teamModel: ap.teamModel, task: t.task });
+	}
+
+	const results: BatchTaskResult[] = new Array(resolved.length);
+	let cursor = 0;
+	const runOne = async (idx: number) => {
+		const it = resolved[idx];
+		const ap = makeClone(ctx, it.def, it.model, it.teamModel, `${it.name}-${idx}-${Date.now()}`);
+		ctx.batchClones.add(ap);
+		try {
+			const r = await runAgent(ctx, ap, it.task);
+			results[idx] = { agent: it.name, task: it.task, output: r.output, code: r.code, elapsed: r.elapsed, error: null };
+		} catch (e: any) {
+			results[idx] = { agent: it.name, task: it.task, output: String(e?.message || e), code: 1, elapsed: 0, error: String(e?.message || e) };
+		} finally {
+			// Safety net: if runAgent threw before its own flushAgent, drain the
+			// buffer now. Per-agent buffers are isolated, so this is a no-op.
+			ctx.logger.flushAgent(ap);
+			ctx.batchClones.delete(ap);
+		}
+	};
+	const worker = async () => {
+		let i: number;
+		while ((i = cursor++) < resolved.length) await runOne(i);
+	};
+	const max = Math.max(1, Math.min(ctx.maxParallel || 5, resolved.length));
+	// All read-only → run under the shared read lock so they stay exclusive
+	// against any in-flight writable (write-locked) dispatch.
+	return ctx.dispatchLock.read(async () => {
+		await Promise.all(Array.from({ length: max }, worker));
+		return { ok: true, results };
+	});
+}
+
+/** Run the SAME agent across many tasks, each in its own isolated clone
+ *  subprocess (never the shared team-member AgentProc). Read-only agents run
+ *  concurrently (capped at maxParallel, or 1 when parallel dispatch is off);
+ *  writable agents (edit/write) are always serialized under the write lock. */
+export async function dispatchAgentMany(
+	ctx: AgentTeamContext,
+	agentName: string,
+	tasks: string[],
+): Promise<BatchDispatchResult> {
+	const ap = ctx.procs.get(agentName.toLowerCase());
+	if (!ap) {
+		const available = Array.from(ctx.procs.values()).map(a => displayName(a.def.name)).join(", ");
+		return { ok: false, error: `Agent "${agentName}" not found. Available: ${available}`, results: [] };
+	}
+	const writable = isWritable(ap.def, ctx.destructiveTools);
+	const runOne = async (idx: number, t: string): Promise<BatchTaskResult> => {
+		const clone = makeClone(ctx, ap.def, ap.model, ap.teamModel, `${agentName}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+		ctx.batchClones.add(clone);
+		try {
+			const r = await runAgent(ctx, clone, t);
+			return { agent: agentName, task: t, output: r.output, code: r.code, elapsed: r.elapsed, error: null };
+		} catch (e: any) {
+			return { agent: agentName, task: t, output: String(e?.message || e), code: 1, elapsed: 0, error: String(e?.message || e) };
+		} finally {
+			ctx.logger.flushAgent(clone);
+			ctx.batchClones.delete(clone);
+		}
+	};
+
+	if (writable) {
+		// Exclusive write lock; one clone at a time so file mutations never run concurrently.
+		return ctx.dispatchLock.write(async () => {
+			const results: BatchTaskResult[] = [];
+			for (let i = 0; i < tasks.length; i++) results.push(await runOne(i, tasks[i]));
+			return { ok: true, results };
+		});
+	}
+
+	// Read-only: concurrent, capped at maxParallel (or 1 when parallel off).
+	const results: BatchTaskResult[] = new Array(tasks.length);
+	let cursor = 0;
+	const worker = async () => {
+		let i: number;
+		while ((i = cursor++) < tasks.length) results[i] = await runOne(i, tasks[i]);
+	};
+	const max = ctx.parallelDispatch ? Math.max(1, Math.min(ctx.maxParallel || 5, tasks.length)) : 1;
+	return ctx.dispatchLock.read(async () => {
+		await Promise.all(Array.from({ length: max }, worker));
+		return { ok: true, results };
+	});
 }
 
 export async function activateTeam(ctx: AgentTeamContext, name: string) {
@@ -358,7 +490,8 @@ export class ProcessManager {
 		const content = `${ap.def.systemPrompt}\n\n`;
 		if (ap.lastPromptHash === content && ap.systemPromptFile && existsSync(ap.systemPromptFile)) return; // skip if unchanged and file still exists
 		ap.lastPromptHash = content;
-		ap.systemPromptFile = join(this.sessionDir(), `${agentKey(ap)}-system-prompt.txt`);
+		const key = agentKey(ap) + (ap.runId ? `-${ap.runId}` : "");
+		ap.systemPromptFile = join(this.sessionDir(), `${key}-system-prompt.txt`);
 		writeFileSync(ap.systemPromptFile, content);
 	}
 
@@ -415,7 +548,7 @@ export class ProcessManager {
 		resetForDispatch(ap);
 
 		ap.status = "starting";
-		ap.sessionFile = join(this.sessionDir(), `${agentKey(ap)}.json`);
+		ap.sessionFile = join(this.sessionDir(), `${agentKey(ap)}${ap.runId ? `-${ap.runId}` : ""}.json`);
 
 		// Write system prompt to temp file to avoid CLI escaping issues
 		this.writeSystemPrompt(ap);
@@ -453,12 +586,13 @@ export class ProcessManager {
 		const cmdParts = [bin, ...args].map(a => /[\s"'\\$\``]/.test(a) ? JSON.stringify(a) : a);
 		const cmdLine = cmdParts.join(" ");
 		const body = `${new Date().toISOString()}\nagent: ${displayName(ap.def.name)}\n\n${cmdLine}\n`;
-		writeFileSync(join(AgentCmdDir, `spawn-cmd-${agentKey(ap)}.txt`), body);
+		writeFileSync(join(AgentCmdDir, `spawn-cmd-${agentKey(ap)}${ap.runId ? `-${ap.runId}` : ""}.txt`), body);
 
 		const sub = spawnRpcSubprocess({
 			bin,
 			args,
 			logger: ctx.logger,
+			owner: ap,
 			onLine: (line) => {
 				if (ap.proc !== sub.proc) return; // stale process guard
 				ctx.handleEvent(ap, line);
