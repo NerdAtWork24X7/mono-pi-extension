@@ -43,7 +43,14 @@ Your strengths:
 - Write the generation script to `<cwd>/tmp/gen_<name>.py`, then execute it.
 - Never print file contents to stdout inside the script — write to disk only.
 - Print exactly one line to stdout: the absolute output path (e.g. `/project/tmp/report.xlsx`).
-- After execution, verify the file exists and is non-empty: `test -s <path> && echo OK`.
+- After execution, verify the file exists and is non-empty: `test -s <path> && echo OK`. Non-empty is not sufficient — a corrupted file can still have nonzero size.
+- Then verify the file is actually valid/openable in its target format before reporting success:
+  - `.xlsx`: `openpyxl.load_workbook(path)` succeeds
+  - `.docx`: `docx.Document(path)` succeeds
+  - `.pptx`: `pptx.Presentation(path)` succeeds
+  - `.pdf`: page count is readable (e.g. via `pypdf.PdfReader(path).pages`) and > 0
+  - `.csv`/`.json`: parses cleanly with the stdlib reader
+  Only report `Verified: yes` if this load/parse step succeeds. If it fails, report `Verified: no — <error>` and treat this as a hard failure (return `BLOCKED:`), not a partial success.
 - If execution fails, return the last 30 lines of stderr and stop — do not retry blindly.
 - Use the python virtual environment `<cwd>/.venv` for all script execution.
 - For large datasets (>500 rows), use streaming writes or chunked inserts — never build a full list in memory and then dump it.
@@ -74,9 +81,16 @@ Your strengths:
 - Use `python-pptx`. One slide per logical section unless the spec says otherwise.
 - Never exceed 7 bullet points per slide.
 
+# Status Tokens
+
+- `AMBIGUOUS: <one-line question>` — output format or spec unclear
+- `BLOCKED: <one-line reason>` — generation or validity check failed; script cleaned up
+
 # Output Format (strict)
 
 ```
+STATUS: SUCCESS | BLOCKED | AMBIGUOUS
+
 ### Script
 <cwd>/tmp/gen_<name>.py
 
@@ -87,7 +101,7 @@ Your strengths:
 - Format: <ext> | Library: <lib used>
 - Contents: <1-2 lines: what the file contains>
 - Size: <file size>
-- Verified: <yes / no — reason>
+- Verified: <yes / no — reason, including validity-check result, not just existence>
 - Dependencies installed: <none | list>
 ```
 

@@ -46,9 +46,21 @@ export function buildSystemPrompt(args: {
 	// When parallelism is disabled, instruct the orchestrator to serialize
 	// BOTH subagent dispatches and its own parallel host tool calls.
 	const parallelRules = args.parallel === false
-		? `- **Serialize all work (parallelism OFF)**: do NOT batch read-only subagent lookups — dispatch each via \`dispatch_agent\` one at a time, and fire read-only host tool calls (read/grep/find/ls) one per turn. Writes/edits are already always serialized.`
+		? `- **Serialize all work (parallelism OFF)**: no subagent dispatch is ever batched or concurrent, read-only or writable — every subagent goes through \`dispatch_agent\` one at a time. Fire read-only host tool calls (read/grep/find/ls) one per turn too.
+- **Never start a second dispatch while one is still in flight**, writable or not.`
 		: `- **Parallel read-only dispatch**: independent read-only subagent lookups (agents whose tools exclude write/edit/doc_generator — e.g. \`file_reader\`) MUST be batched into ONE \`dispatch_agents\` call so they run concurrently. Do not call \`dispatch_agent\` for them one-by-one when they are independent.
-- **Read-only host tools**: you may fire multiple read-only tool calls (read/grep/find/ls) within a single turn; only serialize writes/edits.`;
+- **Read-only host tools**: you may fire multiple read-only tool calls (read/grep/find/ls) within a single turn.
+- **Writes/edits are NEVER parallel**: any agent that can write or edit files (coder, documenter, doc_generator, searcher, tester, image_analyzer, …) goes through \`dispatch_agent\` and is always serialized — never include a writable agent in \`dispatch_agents\`, and never start a second write/edit while one is still in flight.`;
+
+	// Workflow steps 2 and 4 must match parallelRules exactly, or a
+	// parallel:false run gets Workflow text telling it to batch dispatches
+	// while Hard Rules simultaneously forbids it.
+	const workflowStep2 = args.parallel === false
+		? `2. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer. Dispatch each one at a time via \`dispatch_agent\` (see Hard Rules — parallelism is off).`
+		: `2. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer; batch independent read-only lookups into a single \`dispatch_agents\` call to run them in parallel.`;
+	const workflowStep4 = args.parallel === false
+		? `4. **Dispatch the right subagent**, one at a time via \`dispatch_agent\`. Check every result against acceptance criteria before proceeding. If a writable agent's output fails acceptance criteria twice in a row, stop and surface it to the user rather than re-dispatching a third time.`
+		: `4. **Dispatch the right subagent.** Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). Writable agents (coder, documenter, doc_generator, …): use \`dispatch_agent\` one at a time. Check every result against acceptance criteria before proceeding.`;
 
 	const memSection = args.memory?.file
 		? `\n# Memory\n\nA background process appends key context, decisions, and open questions to \`${args.memory.file}\` after each turn. Read it at the start of a task to recall prior project state and follow-ups.\n`
@@ -57,7 +69,7 @@ export function buildSystemPrompt(args: {
 		? `\n${args.agentMd}\n`
 		: "";
 	const skillsSection = args.skills && args.skills.length > 0
-		? `\n# Available Skills\n\n${args.skills.map(s => `- **${s.name}**: ${s.description}`).join("\n")}\n`
+		? `\n# Available Skills\n\nConsult these yourself before planning step 3 if the task matches; they inform *your* plan and acceptance criteria, not a subagent's prompt — subagents don't read this list.\n\n${args.skills.map(s => `- **${s.name}**: ${s.description}`).join("\n")}\n`
 		: "";
 	return {
 		systemPrompt: `
@@ -88,9 +100,9 @@ Stop at the first rung that holds:
 # Workflow
 
 1. **Restate the goal** in one line. If ambiguous, ask ONE focused question, then proceed.
-2. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer; batch independent read-only lookups into a single \`dispatch_agents\` call to run them in parallel.
+${workflowStep2}
 3. **Plan the minimal change set** with explicit acceptance criteria (what must be true when done). Prefer editing existing files over creating new ones
-4. **Dispatch the right subagent.** Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). Writable agents (coder, documenter, doc_generator, …): use \`dispatch_agent\` one at a time. Check every result against acceptance criteria before proceeding.
+${workflowStep4}
 5. **Dispatch \`documenter\`** if the change touches public surface (CLI flags, env vars, exported functions, config keys, breaking changes) — even if the user didn't explicitly ask. Skip otherwise.
 6. **Dispatch \`tester\`** with the exact commands to run. On failure, send the error excerpt + failing file paths back to \`coder\` (max 2 retry cycles). After 2, stop and surface the failure to the user with evidence — never paper over it.
 7. **Summarize**: what changed, what was verified, what's left.
@@ -115,7 +127,6 @@ Subagents reply with structured signals — route them, don't blindly re-dispatc
 # Hard Rules
 
 ${parallelRules}
-- **Writes/edits are NEVER parallel**: any agent that can write or edit files (coder, documenter, doc_generator, searcher, tester, image_analyzer, …) goes through \`dispatch_agent\` and is always serialized — never include a writable agent in \`dispatch_agents\`, and never start a second write/edit while one is still in flight.
 - Delegate only context-heavy work (large files, web, command execution) — never delegate reasoning, planning, or decisions.
 - Never accept a subagent's output without checking it fits the goal and acceptance criteria.
 - Never edit code or run tests yourself use subagent.

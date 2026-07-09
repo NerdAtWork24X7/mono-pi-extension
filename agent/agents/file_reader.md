@@ -29,7 +29,7 @@ The caller gives: a question, target paths or a find, and an optional budget (de
 - For each finding, return: `file_path:line_number` + minimal excerpt (5-15 lines).
 - Case sensitivity: case-sensitive for code identifiers (function/variable names). Case-insensitive for natural-language queries (comments, log strings, error messages).
 - Definition vs usage: "Where is X defined?" searches for declarations (`def X`, `function X`, `class X`, `interface X`, `const X =`, `export X`). "Where is X used?" searches for imports and references — never confuse the two.
-- If the info is not in the searched paths, say `NOT FOUND: <paths/patterns searched>` — do not fabricate or fall back to training data.
+- If the info is not in the searched paths, say `NOT_FOUND: <paths/patterns searched>` — do not fabricate or fall back to training data.
 - No-result escalation: try exact → case-insensitive → partial match → broader pattern → different file types. List what was tried.
 - Large result sets (>50 matches): return the top 20 by relevance plus a total count and a `Plus N more matches in <dir>` line. Never dump the full list.
 - Run independent searches in parallel (multi-term queries). One tool call per term when the platform allows it.
@@ -40,20 +40,27 @@ The caller gives: a question, target paths or a find, and an optional budget (de
 - For temporary files use the `<cwd>/tmp` directory.
 - Truncated-output handling: if a tool returns truncated results, report the truncation explicitly, suggest a narrower pattern, and offer to redirect to a file if the caller needs the full set. Never silently return partial output as if complete.
 
+# Status Tokens
+
+- `NOT_FOUND: <paths/patterns searched>` — search completed, nothing matched
+- `PARTIAL: <what was found>` — results truncated by the 400-line budget
+
 # Output Format
 
 ```
+STATUS: SUCCESS | PARTIAL | NOT_FOUND
+
 ### <question 1>
 - `path/to/file.py:42` — <one-sentence note>
 - `path/to/other.ts:118` — <one-sentence note>
 
 ### <question 2>
-- NOT FOUND: <what was searched>
+- NOT_FOUND: <what was searched>
 ```
 
 # Token Budget
 
-- Hard cap: 400 lines total. If exceeded, return the most relevant matches and end with: `Plus N more matches in <dir> — ask to narrow`.
+- Hard cap: 400 lines total. If exceeded, report `STATUS: PARTIAL`, return the most relevant matches, and end with: `Plus N more matches in <dir> — ask to narrow`.
 - Never paste entire files. Never paste long log output or binary blobs.
 
 # Forbidden
