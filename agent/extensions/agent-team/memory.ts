@@ -45,6 +45,18 @@ Rules (strictly enforced):
 /** Max idle time (no stdout line) before the memory subprocess is aborted. */
 const IDLE_TIMEOUT_MS = 60_000;
 
+/** After the memory file is detected written, give the LLM a short grace
+ *  period to finalize, then treat the run as complete. Without this the
+ *  subprocess can write the file yet keep streaming (never emitting
+ *  `agent_end`), leaving MemoryState stuck at "summarizing" and the in-TUI
+ *  memory log pinned on screen after the work is actually done. */
+const SETTLE_MS = 5_000;
+
+/** Hard wall-clock cap on a single memory run. Backstops a subprocess that
+ *  stays active (keeps emitting lines, so the idle timeout never fires) yet
+ *  never terminates — otherwise the log could remain visible indefinitely. */
+const MEMORY_HARD_TIMEOUT_MS = 90_000;
+
 /** Pull the final assistant text from an agent_end messages array. */
 export function extractLastAssistantText(messages: any[]): string {
 	if (!Array.isArray(messages)) return "";
@@ -289,11 +301,15 @@ export class MemoryManager {
 			let ready = false;
 			let settled = false;
 			let lastLineAt = Date.now();
+			let settleTimer: ReturnType<typeof setTimeout> | undefined;
+			let hardTimer: ReturnType<typeof setTimeout> | undefined;
 
 			const finish = (fn: () => void) => {
 				if (settled) return;
 				settled = true;
 				if (memoryAp.timer) { clearInterval(memoryAp.timer); memoryAp.timer = undefined; }
+				if (settleTimer) { clearTimeout(settleTimer); settleTimer = undefined; }
+				if (hardTimer) { clearTimeout(hardTimer); hardTimer = undefined; }
 				try { sub.kill(); } catch { }
 				fn();
 			};
@@ -363,7 +379,16 @@ export class MemoryManager {
 							if (typeof raw === "string" && raw.length > 0) {
 								const target = resolvePath(raw);
 								if (target === this.memoryFile) {
-									fileWritten = true;												this.logger.logBoxed(`memory: detected write to ${target}`, memoryAp);
+									fileWritten = true;
+								// The LLM's only job is to update this file; once it has,
+								// the meaningful work is done. Let it finalize briefly,
+								// then complete the run so the log grid hides.
+								if (!settleTimer) {
+									settleTimer = setTimeout(() => {
+										finish(() => resolve({ wroteFile: fileWritten || mtimeAdvanced() }));
+									}, SETTLE_MS);
+								}
+								this.logger.logBoxed(`memory: detected write to ${target}`, memoryAp);
 								}
 							}
 						}
@@ -386,6 +411,12 @@ export class MemoryManager {
 			memoryAp.proc = sub.proc;
 			memoryAp.procRef = sub;
 			this.currentSub = sub;
+
+			// Hard wall-clock cap: guarantees the run terminates even if the
+			// subprocess stays active without ever emitting agent_end.
+			hardTimer = setTimeout(() => {
+				finish(() => resolve({ wroteFile: fileWritten || mtimeAdvanced() }));
+			}, MEMORY_HARD_TIMEOUT_MS);
 
 			// Animation + elapsed timer — drives the widget's animDots (via
 			// invalidate → animFrame bump) and keeps memoryAp.elapsed current
