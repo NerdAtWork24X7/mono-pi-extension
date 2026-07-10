@@ -10,6 +10,11 @@ export interface ParsedTeams {
 }
 
 export function parseTeamsYaml(raw: string): ParsedTeams {
+	// Normalize Windows line endings (CRLF) and stray CR so the line-based
+	// regexes below match. parseAgentFile does the same; without this, a
+	// CRLF file makes the `team:` header fail to match (trailing \r) and
+	// member names/models capture a trailing \r.
+	raw = raw.replace(/\r\n?/g, "\n");
 	const teams: Record<string, TeamMember[]> = {};
 	let memoryModel: string | undefined;
 	let cur = "";
