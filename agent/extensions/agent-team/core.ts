@@ -206,7 +206,7 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
 export function hasPiScopeExtension(extPaths: string[]): boolean {
 	return extPaths.some((p) => {
 		const normalized = p.replace(/\\/g, "/");
-		const base = normalized.split("/").pop()?.replace(/\.(ts|js)$/i, "") ?? "";
+		const base = normalized.split("/").pop()?.replace(/\.((ts|js))$/i, "") ?? "";
 		return base === "pi-scope" || /(^|\/)pi-scope\//.test(normalized);
 	});
 }
