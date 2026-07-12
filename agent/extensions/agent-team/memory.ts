@@ -2,7 +2,7 @@ import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "f
 import { join, resolve as resolvePath } from "path";
 import type { SessionLogger } from "./core";
 import type { AgentDef, AgentProc, MemoryState } from "./core";
-import { blankProcState } from "./core";
+import { blankProcState, hasPiScopeExtension } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
 
 /** Tight system prompt for the memory updater subprocess. The LLM is the
@@ -271,11 +271,12 @@ export class MemoryManager {
 		};
 		this.logAgent = memoryAp;
 
+		const extPaths = this.cachedExtPaths();
 		const cliArgs = [
 			"--mode", "rpc",
 			"-p",
 			"--no-extensions",
-			...this.cachedExtPaths().flatMap(p => ["--extension", p]),
+			...extPaths.flatMap(p => ["--extension", p]),
 			...(provider ? ["--provider", provider] : []),
 			"--no-skills",
 			"--no-context-files",
@@ -283,6 +284,8 @@ export class MemoryManager {
 			"--tools", memoryAp.def.tools,
 			"--system-prompt", memoryAp.systemPromptFile,
 			"--session", memoryAp.sessionFile,
+			"--name", memoryAp.def.name,
+			...(hasPiScopeExtension(extPaths) ? ["--o-name", memoryAp.def.name] : []),
 		];
 
 		const bin = process.platform === "win32" ? "pi.cmd" : "pi";

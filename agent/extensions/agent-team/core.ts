@@ -199,6 +199,18 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
 	};
 }
 
+/** Returns true if the Pi Scope observability extension is present in the
+ *  list of extension entry-point paths. Used to decide whether it is safe
+ *  to pass Pi-Scope-specific CLI flags (e.g. --o-name) to spawned pi
+ *  subprocesses. */
+export function hasPiScopeExtension(extPaths: string[]): boolean {
+	return extPaths.some((p) => {
+		const normalized = p.replace(/\\/g, "/");
+		const base = normalized.split("/").pop()?.replace(/\.(ts|js)$/i, "") ?? "";
+		return base === "pi-scope" || /(^|\/)pi-scope\//.test(normalized);
+	});
+}
+
 export function clearTimers(ap: AgentProc) {
 	clearInterval(ap.timer);
 	if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
@@ -758,6 +770,15 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
 	// truncated line and reset — the consumer can then decide what to do.
 	const MAX_LINE_BUF = 1 << 20; // 1 MiB
 	let stdoutBuf = "";
+	// Emit one complete (or, at EOF, final partial) line. The completion
+	// event (agent_end / final response) is often the LAST thing on stdout
+	// and may not be newline-terminated; flushing only on "\n" silently
+	// drops it, so we also drain the remainder on 'end'/'close'.
+	const emitLine = (line: string) => {
+		if (line.endsWith("\r")) line = line.slice(0, -1);
+		if (!line.trim()) return;
+		opts.onLine(line);
+	};
 	proc.stdout!.on("data", (chunk: string) => {
 		stdoutBuf += chunk;
 		while (true) {
@@ -770,12 +791,15 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
 				}
 				break;
 			}
-			let line = stdoutBuf.slice(0, nl);
+			const line = stdoutBuf.slice(0, nl);
 			stdoutBuf = stdoutBuf.slice(nl + 1);
-			if (line.endsWith("\r")) line = line.slice(0, -1);
-			if (!line.trim()) continue;
-			opts.onLine(line);
+			emitLine(line);
 		}
+	});
+	// Drain trailing partial line when the stream ends (no trailing \n).
+	proc.stdout!.on("end", () => {
+		if (stdoutBuf.length > 0) emitLine(stdoutBuf);
+		stdoutBuf = "";
 	});
 
 	proc.stderr!.setEncoding("utf-8");
@@ -788,6 +812,10 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
 	});
 
 	proc.on("close", (code, signal) => {
+		// Backstop: deliver any final buffered line (e.g. agent_end) even if
+		// 'end' didn't fire before 'close'.
+		if (stdoutBuf.length > 0) emitLine(stdoutBuf);
+		stdoutBuf = "";
 		fireClose(code, signal);
 	});
 

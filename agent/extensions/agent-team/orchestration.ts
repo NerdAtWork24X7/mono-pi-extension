@@ -6,7 +6,7 @@ import { join } from "path";
 import type { AgentProc } from "./core";
 import type { SessionLogger } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
-import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
+import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, hasPiScopeExtension, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext } from "./core";
 
 const SIGKILL_BACKSTOP_MS = 2_000;
@@ -72,6 +72,18 @@ export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
 		ctx.invalidate();
 		if (ap.readyResolve) { ap.readyResolve(ev.success === true); ap.readyResolve = null; }
 	}
+	// Capture a successful response's result text as a fallback completion
+	// payload. Some hosts return the final answer only in the `response`
+	// event (not via message streaming). Resolution still happens on
+	// agent_end (fix 1) or process close (fix 2); this only enriches the
+	// captured text those paths return.
+	if (ev.success && ap.status === "running") {
+		const resultText =
+			typeof ev.data === "string" ? ev.data
+				: (ev.data?.result?.text ?? ev.data?.text ?? ev.data?.content ?? "");
+		if (resultText && !ap.lastAssistantText) ap.lastAssistantText = String(resultText);
+	}
+
 	if (!ev.success && ap.status === "running" && ap.resolveDispatch) {
 		const errMsg = ev.error || `${ev.command} failed`;
 		ctx.logger.logErrorBox(ap, "PROMPT ERROR", errMsg);
@@ -569,16 +581,20 @@ export class ProcessManager {
 		const provider = hasProvider ? model.slice(0, slashIdx) : undefined;
 		const modelName = hasProvider ? model.slice(slashIdx + 1) : model;
 
+		const extPaths = this.cachedExtPaths();
 		const args = [
 			"--mode", "rpc",
 			"-p",
 			"--no-extensions",
-			...this.cachedExtPaths().flatMap(p => ["--extension", p]),
+			...extPaths.flatMap(p => ["--extension", p]),
 			...(provider ? ["--provider", provider] : []),
 			"--model", modelName,
 			"--tools", ap.def.tools,
 			"--system-prompt", ap.systemPromptFile,
 			"--session", ap.sessionFile,
+			"--name", ap.def.name,
+			...(hasPiScopeExtension(extPaths) ? ["--o-name", ap.def.name] : []),
+
 		];
 
 		// Record exact spawn command to tmp file (debug aid — not logged to SessionLogger)
@@ -609,7 +625,8 @@ export class ProcessManager {
 			onClose: (code) => {
 				if (ap.proc !== sub.proc) return; // stale process guard
 				ctx.logger.logErrorBox(ap, `PROCESS EXIT code=${code}`, "");
-				this.resolveIfPending(ap, `Process exited unexpectedly with code ${code}`, 1);
+				const captured = ap.lastAssistantText || ap.currentMessageText.trim() || ap.collectedText.trim();
+				this.resolveIfPending(ap, captured || `Process exited with code ${code}`, code === 0 ? 0 : 1);
 				ap.proc = null;
 				ap.procRef = null;
 				ap.status = "dead";
