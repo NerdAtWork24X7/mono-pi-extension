@@ -75,22 +75,6 @@ export interface TeamConfig {
 	destructiveTools?: string[];
 }
 
-export interface TerminalBackend {
-	detect(): boolean;
-	/** Full host / client / orchestrator-pane width in columns. Used to size
-	 *  the log pane at creation (tmux only; herdr ignores). Returns 0 if the
-	 *  underlying value isn't available. */
-	getTerminalWidth(): number;
-	/** ACTUAL width of the log pane in columns. Distinct from `getTerminalWidth`:
-	 *  for tmux we query `#{pane_width}` so manual pane dragging is respected;
-	 *  for herdr we trust the env hint or stdout.columns. Returns 0 if unknown. */
-	getLogPaneWidth(paneId: string | null): number;
-	createLogPane(cwd: string, logFile: string, origPaneId: string): string | null;
-	resizePane(paneId: string, width: number): void;
-	killPane(paneId: string): void;
-	isValidPaneId(id: string): boolean;
-}
-
 /** Contract that the AgentTeam class satisfies structurally. All orchestration,
  *  ui, and integrations code receives a value typed as AgentTeamContext rather
  *  than importing AgentTeam directly. This breaks the historical import-type
@@ -99,10 +83,18 @@ export interface TerminalBackend {
 export interface AgentTeamContext {
 	// State
 	procs: Map<string, AgentProc>;
-	lastDispatchedAp: AgentProc | null;
 	orchestratorModel: string;
 	cachedExtPaths: string[];
 	sessionDir: string;
+	/** Cached agent catalog string for the system prompt. Invalidated when
+	 *  the active team (and therefore ctx.procs) changes. */
+	catalogCache: string;
+	/** True when the cached catalog needs to be rebuilt. */
+	catalogDirty: boolean;
+	/** Cached skills list for the system prompt. Computed once per session. */
+	skillsCache: Array<{ name: string; description: string }>;
+	/** Cached AGENTS.md content for the system prompt. Computed once per session. */
+	agentMdCache: string | null;
 	allDefs: AgentDef[];
 	teams: Record<string, TeamMember[]>;
 	activeTeam: string;
@@ -127,12 +119,11 @@ export interface AgentTeamContext {
 	tag: (ap: AgentProc, heading: string) => string;
 	spawnProc: (ap: AgentProc) => Promise<boolean>;
 	killProc: (ap: AgentProc, immediate?: boolean) => void;
-	killAll: (killPanesToo?: boolean) => Promise<void>;
+	killAll: () => Promise<void>;
 	persist: () => void;
 	dispatch: (agentName: string, task: string) => Promise<{ output: string; code: number; elapsed: number }>;
 	activateTeam: (name: string) => Promise<void>;
 	handleEvent: (ap: AgentProc, line: string) => void;
-	killPanes: () => void;
 	enableAgentTeam: (ctx: any) => Promise<void>;
 	disableAgentTeam: (ctx: any) => Promise<void>;
 	/** Current active tool allowlist (includes dispatch_agents when parallel is on). */
@@ -324,43 +315,6 @@ export class RwLock {
 	}
 }
 
-// ── Log pane sizing ──
-
-/** Fraction of terminal/host width allocated to the NEW log pane (tmux split-window).
- *  Applied ONLY when sizing the pane itself, never when deriving box width — the
- *  box width is a clamp of the *actual* log pane width so it tracks whatever
- *  size the pane ends up at (including manual tmux dragging or herdr's split). */
-export const LOG_SPLIT_RATIO = 0.35;
-export const LOG_PANE_MIN = 50;
-export const LOG_PANE_MAX = 200;
-
-/** Per-input-line byte cap for logBoxed(). The cap exists *only* to defend the
- *  unicode-aware `[...content].length` spread inside `boxLine` against OOM on
- *  runaway subprocess output. It does NOT limit the visible output — `boxLine`
- *  truncates to logWidth regardless of input size. Matches the stdout
- *  `MAX_LINE_BUF = 1 << 20` plumbing in `spawnRpcSubprocess`. */
-export const LOG_LINE_INPUT_CAP = 1 << 20;
-
-/** Width to use when SIZING the tmux log pane (at create + on user resize).
- *  Formula: 35% of host width, clamped to a sane reading range. Only used by
- *  TmuxBackend; HerdrBackend has no pane-width control. */
-export function initialPaneWidth(hostWidth: number): number {
-	return hostWidth > 0
-		? Math.min(Math.max(Math.floor(hostWidth * LOG_SPLIT_RATIO), LOG_PANE_MIN), LOG_PANE_MAX)
-		: LOG_PANE_MIN;
-}
-
-/** Width to use when DRAWING the box character borders for log lines.
- *  Clamp the ACTUAL log pane width — NO 0.35 ratio. The previous bug applied
- *  that ratio twice (once to size the pane, once to derive the box width),
- *  which collapsed small pane widths (e.g. herdr `HERDR_PANE_WIDTH=100`)
- *  down to LOG_PANE_MIN and broke alignment with the on-screen pane. */
-export function boxWidth(paneWidth: number): number {
-	return paneWidth > 0
-		? Math.min(Math.max(paneWidth, LOG_PANE_MIN), LOG_PANE_MAX)
-		: LOG_PANE_MIN;
-}
-
 // ── Box drawing helpers ──
 
 export function hrPad(content: string, width: number, left: string, right: string, fill = "─"): string {
@@ -399,28 +353,6 @@ export function hrPad(content: string, width: number, left: string, right: strin
 	return left + body + fill.repeat(pad) + right;
 }
 
-export function boxLine(content: string, width: number): string {
-	const inner = width - 4; // "│ " + " │"
-	let body = content;
-	// ASCII fast path: pure-ASCII strings have grapheme count === char count,
-	// so we skip the `[...content]` spread allocation for the common case.
-	const len = (content.length === 0 || /[\u0080-\uFFFF]/.test(content))
-		? [...content].length
-		: content.length;
-	if (len > inner) {
-		// Reserve room for the marker so the total stays within `inner` cells.
-		const marker = `…[+N]`;
-		const cut = inner - marker.length;
-		if (content.length === len) {
-			// Pure ASCII: simple slice, no spread needed.
-			body = content.slice(0, Math.max(0, cut)) + marker;
-		} else {
-			body = [...content].slice(0, Math.max(0, cut)).join("") + marker;
-		}
-	}
-	return hrPad(` ${body} `, width, "│", "│", " ");
-}
-
 /** Extract last non-empty line from text. Single reverse scan: O(n) for
  *  text length n regardless of how many trailing empty lines exist. */
 export function extractLastLine(text: string): string {
@@ -438,158 +370,6 @@ export function extractLastLine(text: string): string {
 	return text.slice(start, end);
 }
 
-// ── Terminal backends ──
-
-import { spawn, spawnSync } from "child_process";
-
-export class TmuxBackend implements TerminalBackend {
-	detect(): boolean {
-		return !!process.env.TMUX;
-	}
-
-	getTerminalWidth(): number {
-		try {
-			const r = spawnSync("tmux", ["display-message", "-p", "#{client_width}"], { encoding: "utf-8" });
-			const w = parseInt(r.stdout?.trim() || "0", 10);
-			return w > 0 ? w : 0;
-		} catch { return 0; }
-	}
-
-	getLogPaneWidth(paneId: string | null): number {
-		// Query tmux for the actual current width of the log pane. This is the
-		// source of truth for box-drawing and reflects manual dragging + tmux's
-		// own rebalance on SIGWINCH — both of which we now respect instead of
-		// overriding with our own formula.
-		if (paneId && /^%\d+$/.test(paneId)) {
-			try {
-				const r = spawnSync("tmux", ["display-message", "-p", "-t", paneId, "#{pane_width}"], { encoding: "utf-8" });
-				const w = parseInt(r.stdout?.trim() || "0", 10);
-				if (w > 0) return w;
-			} catch { /* fall through to estimate */ }
-		}
-		// Pre-creation: no log pane exists yet, so derive from the host width.
-		return initialPaneWidth(this.getTerminalWidth());
-	}
-
-	createLogPane(cwd: string, logFile: string, origPaneId: string): string | null {
-		// Validate origPaneId to prevent shell injection in the tmux shell script
-		if (origPaneId && !/^%\d+$/.test(origPaneId)) origPaneId = "";
-		const escapedCwd = cwd.replace(/'/g, "'\\''");
-		// Wrap logFile in single quotes with embedded-quote escape — same
-		// pattern as escapedCwd above. This protects against paths containing
-		// shell metacharacters (single quote, $, `, ;, etc.).
-		const lf = `'${logFile.replace(/'/g, "'\\''")}'`;
-		// Horizontal split (left/right): log pane on the right.
-		// Width is proportional to terminal width so boxed log lines fit the pane.
-		const paneW = initialPaneWidth(this.getTerminalWidth());
-		const script = [
-			`P=$(tmux split-window -h -d -l ${paneW} -c '${escapedCwd}' -P -F '#{pane_id}')`,
-			`tmux select-pane -t $P -T 'Agent Team Log'`,
-			`tmux send-keys -t $P "tail -n +1 -f ${lf}" Enter`,
-			`echo $P`,
-			`tmux select-pane -t ${origPaneId}`,
-		].join("\n");
-		try {
-			const r = spawnSync("sh", ["-c", script], { encoding: "utf-8" });
-			return r.stdout?.trim() || null;
-		} catch { return null; }
-	}
-
-	resizePane(paneId: string, _width: number): void {
-		// Re-size the log pane to track the host width on terminal resize. After
-		// this call returns, the actual pane width can be read back via
-		// `getLogPaneWidth` (queries `#{pane_width}`), so subsequent log lines
-		// are box-drawn at exactly that width. Note: `-x` locks the pane at a
-		// fixed column count and overrides any manual drag the user did — we
-		// accept that trade-off because the alternative (silent tmux auto-
-		// rebalance) is version-dependent.
-		const paneW = initialPaneWidth(this.getTerminalWidth());
-		try {
-			spawnSync("tmux", ["resize-pane", "-t", paneId, "-x", String(paneW)], { encoding: "utf-8" });
-		} catch { }
-	}
-
-	killPane(paneId: string): void {
-		spawn("tmux", ["kill-pane", "-t", paneId], { stdio: "ignore" });
-	}
-
-	isValidPaneId(id: string): boolean {
-		return /^%\d+$/.test(id);
-	}
-}
-
-export class HerdrBackend implements TerminalBackend {
-	detect(): boolean {
-		return process.env.HERDR_ENV === "1";
-	}
-
-	getTerminalWidth(): number {
-		// herdr has no "host width" — the orchestrator runs in the only its own
-		// pane. We mirror `getLogPaneWidth`'s logic here so the two methods
-		// return the same value (the log pane's actual width).
-		return this.getLogPaneWidth(null);
-	}
-
-	getLogPaneWidth(_paneId: string | null): number {
-		// herdr has no resize-pane and exposes no pane-width query, so the
-		// best signal we have is the env hint set by the herdr host plus the
-		// live `stdout.columns` on the orchestrator (which gets a SIGWINCH
-		// on terminal resize and matches the log pane in a 50/50 split).
-		// Env var wins because it carries the actual log pane width set by
-		// herdr (which may NOT match stdout.columns if herdr splits 30/70).
-		const hint = parseInt(process.env.HERDR_PANE_WIDTH || "", 10);
-		if (Number.isFinite(hint) && hint > 0) return hint;
-		if (process.stdout && Number.isFinite(process.stdout.columns) && (process.stdout.columns as number) > 0) {
-			return process.stdout.columns as number;
-		}
-		return 120;
-	}
-
-	createLogPane(cwd: string, logFile: string, _origPaneId: string): string | null {
-		const paneId = process.env.HERDR_PANE_ID || "";
-		if (!paneId) return null;
-		try {
-			// Split current pane downward. herdr returns a JSON envelope:
-			// {"id":"cli:pane:split","result":{"pane":{"pane_id":"w<hex>-<n>", ...}}, "type":"pane_info"}
-			const splitResult = spawnSync("herdr", ["pane", "split", paneId, "--direction", "right", "--cwd", cwd, "--no-focus"], { encoding: "utf-8" });
-			if (splitResult.status !== 0) return null;
-			let newId: string | undefined;
-			try {
-				const envelope = JSON.parse(splitResult.stdout || "");
-				newId = envelope?.result?.pane?.pane_id;
-			} catch {
-				return null;
-			}
-			if (!newId || !this.isValidPaneId(newId)) return null;
-			// Rename pane
-			const renameResult = spawnSync("herdr", ["pane", "rename", newId, "Agent Team Log"], { encoding: "utf-8" });
-			if (renameResult.status !== 0) return null;
-			// Run tail command in new pane
-			const runResult = spawnSync("herdr", ["pane", "run", newId, `tail -n +1 -f ${logFile}`], { encoding: "utf-8" });
-			if (runResult.status !== 0) return null;
-			return newId;
-		} catch (e) {
-			console.error("[agent-team/herdr] createLogPane failed:", e instanceof Error ? e.message : e);
-			return null;
-		}
-	}
-
-	resizePane(_paneId: string, _width: number): void {
-		// herdr has no resize-pane command; no-op
-	}
-
-	killPane(paneId: string): void {
-		spawn("herdr", ["pane", "close", paneId], { stdio: "ignore" });
-	}
-
-	isValidPaneId(id: string): boolean {
-		// herdr pane IDs: as of herdr 0.7.0 the format is `w<hex>:<alnum>`
-		// (e.g. w654222c09d4a21:p8, suffix is hex/case-insensitive); pre-0.7.0
-		// used `w<hex>-<n>` (e.g. w65385dc1da5392-2). Both forms are accepted.
-		return /^w[0-9a-f]+[:-][a-z0-9]+$/i.test(id);
-	}
-}
-
 // ── Logging ──
 // In-memory, per-agent ring buffers. The TUI widget renders these directly
 // (see ui.ts), replacing the old tmux/herdr "Agent Team Log" side pane. No file
@@ -598,53 +378,38 @@ export class HerdrBackend implements TerminalBackend {
 
 export const LOG_RING_MAX = 300;
 
+/** Strip everything that corrupts the monospace log grid: ANSI escape codes,
+ *  carriage returns, and other control characters. Tabs become two spaces. */
+export const ansiRe = /\x1b\[[0-9;]*m/g;
+const ctrlRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+export function sanitizeLine(s: string): string {
+	let t = s.replace(ansiRe, "");   // drop colour/style escapes
+	t = t.replace(/\r/g, "");        // drop CR (progress bars, \r\n)
+	t = t.replace(/\t/g, "  ");      // tabs -> 2 spaces
+	t = t.replace(ctrlRe, "");       // drop remaining control chars
+	return t.trimEnd();
+}
+
 export class SessionLogger {
-	private logDir: string;
-	private logWidth = LOG_PANE_MIN;
-	private terminal: TerminalBackend;
-	private generalLines: string[] = []; // ap-less logs (no owning agent)
 
-	constructor(terminal: TerminalBackend, logDir: string) {
-		this.terminal = terminal;
-		this.logDir = logDir;
+	/** Append a line to the owning agent's ring buffer. The widget boxes these
+	 *  at the actual widget width, so lines are stored RAW (no border) here. */
+	private push(ap: AgentProc, s: string) {
+		const buf = ap.logLines;
+		buf.push(sanitizeLine(s));
+		if (buf.length > LOG_RING_MAX) buf.shift();
 	}
-
-	/** Append a line to the owning agent's ring buffer, or to the general
-	 *  buffer when no agent is supplied. The widget boxes these at the actual
-	 *  widget width, so lines are stored RAW (no border) here. */
-	private push(ap: AgentProc | null, s: string) {
-		if (ap) {
-			const buf = ap.logLines;
-			buf.push(s);
-			if (buf.length > LOG_RING_MAX) buf.splice(0, buf.length - LOG_RING_MAX);
-		} else {
-			this.generalLines.push(s);
-			if (this.generalLines.length > LOG_RING_MAX) this.generalLines.splice(0, this.generalLines.length - LOG_RING_MAX);
-		}
-	}
-
-	/** No-op: the widget controls render width now. Kept so callers don't change. */
-	updateWidth(): void {
-		const paneW = this.terminal.getLogPaneWidth(null);
-		this.logWidth = boxWidth(paneW);
-	}
-
-	getWidth(): number { return this.logWidth; }
 
 	// ── Low-level write helpers ──
 
-	log(msg: string, ap: AgentProc | null = null) {
+	log(msg: string, ap: AgentProc) {
 		this.push(ap, msg);
-	}
-
-	logRaw(msg: string) {
-		this.push(null, msg);
 	}
 
 	/** Store each line RAW (no outer box): the widget wraps it in the per-agent
 	 *  panel border at the actual widget width, so box-drawing here would
 	 *  mismatch. Used for subprocess stderr and memory notes. */
-	logBoxed(msg: string, ap: AgentProc | null = null) {
+	logBoxed(msg: string, ap: AgentProc) {
 		const trimmed = msg.endsWith("\n") ? msg.slice(0, -1) : msg;
 		for (const ln of trimmed.split("\n")) this.push(ap, ln);
 	}
@@ -708,9 +473,6 @@ export class SessionLogger {
 		if (detail) this.push(ap, `  ${detail}`);
 	}
 
-	/** No-op: per-agent buffers already isolate concurrent runs, so there is no
-	 *  shared stream to flush into. Kept so callers don't change. */
-	flushAgent(_ap: AgentProc, _width?: number) { }
 }
 
 // ── RPC subprocess spawner ──
@@ -804,7 +566,7 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
 
 	proc.stderr!.setEncoding("utf-8");
 	proc.stderr!.on("data", (d: string) => {
-		for (const line of d.split("\n")) if (line.trim()) opts.logger.logBoxed(line, opts.owner ?? null);
+		for (const line of d.split("\n")) if (line.trim() && opts.owner) opts.logger.logBoxed(line, opts.owner);
 	});
 
 	proc.on("error", (err) => {

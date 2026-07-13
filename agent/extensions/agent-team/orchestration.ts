@@ -1,7 +1,6 @@
 // ── Orchestration: process manager + dispatch + RPC handlers ──
 
 import { unlinkSync, writeFileSync, existsSync } from "fs";
-import { homedir } from "os";
 import { join } from "path";
 import type { AgentProc } from "./core";
 import type { SessionLogger } from "./core";
@@ -9,10 +8,12 @@ import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
 import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, hasPiScopeExtension, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext } from "./core";
 
-const SIGKILL_BACKSTOP_MS = 2_000;
 const KILLALL_TIMEOUT_MS = 5_000;
 const READY_PROBE_DELAY_MS = 500;
 const SPAWN_READY_TIMEOUT_MS = 15_000;
+/** Minimum time between streaming-token UI invalidations. Prevents render
+ *  thrashing when a subagent emits many rapid text_delta events. */
+const STREAM_INVALIDATE_THROTTLE_MS = 100;
 
 export const MAX_RESPONSE_LENGTH = 20000; // Subagent tool-result cap. Keep the marker string in dispatch_agent in sync.
 export const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
@@ -94,6 +95,10 @@ export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
 	}
 }
 
+/** Per-agent streaming invalidation timestamps. Using a WeakMap keeps the
+ *  AgentProc interface unchanged and avoids cross-agent update suppression. */
+const lastStreamInvalidate = new WeakMap<AgentProc, number>();
+
 export function handleMessageUpdate(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
 	const delta = ev.assistantMessageEvent;
 	if (delta?.type !== "text_delta") return;
@@ -104,7 +109,14 @@ export function handleMessageUpdate(ctx: AgentTeamContext, ap: AgentProc, ev: an
 	const lastNl = chunk.lastIndexOf("\n");
 	const tail = lastNl >= 0 ? chunk.slice(lastNl + 1) : chunk;
 	if (tail.trim()) ap.lastWork = tail.slice(0, 80);
-	ctx.invalidate();
+	// Throttle UI invalidation during streaming to avoid burning CPU on every
+	// token. The final state is still rendered on message_end / agent_end.
+	const now = Date.now();
+	const last = lastStreamInvalidate.get(ap) ?? 0;
+	if (now - last > STREAM_INVALIDATE_THROTTLE_MS) {
+		lastStreamInvalidate.set(ap, now);
+		ctx.invalidate();
+	}
 }
 
 export function handleMessageEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
@@ -202,7 +214,6 @@ export async function dispatch(
 	agentName: string,
 	task: string,
 ): Promise<{ output: string; code: number; elapsed: number }> {
-	ctx.logger.updateWidth();
 	const ap = ctx.procs.get(agentName.toLowerCase());
 	if (!ap) {
 		const available = Array.from(ctx.procs.values()).map(a => displayName(a.def.name)).join(", ");
@@ -310,11 +321,6 @@ export async function runAgent(
 		};
 	});
 
-	// Write separator to combined session log (and flush any buffered
-	// parallel-clone output as one contiguous block so concurrent agents in
-	// dispatch_agents don't interleave line-by-line in the shared pane).
-	ctx.logger.flushAgent(ap);
-
 	// Task complete — kill the subagent process but KEEP the terminal pane alive
 	// so the user can scroll back and see what the agent did.
 	// The pane will be reused on the next dispatch (same agent = same pane).
@@ -346,6 +352,7 @@ function makeClone(ctx: AgentTeamContext, def: AgentDef, model: string, teamMode
 export async function dispatchMany(
 	ctx: AgentTeamContext,
 	tasks: Array<{ agent: string; task: string }>,
+	signal?: AbortSignal,
 ): Promise<BatchDispatchResult> {
 	// Validate: every task must resolve to a known, READ-ONLY agent. Writable
 	// agents are rejected wholesale — they must go through dispatch_agent and
@@ -367,11 +374,30 @@ export async function dispatchMany(
 		resolved.push({ name: t.agent, def: ap.def, model: ap.model, teamModel: ap.teamModel, task: t.task });
 	}
 
+	if (signal?.aborted) {
+		return { ok: false, error: "Aborted", results: [] };
+	}
+
 	const results: BatchTaskResult[] = new Array(resolved.length);
 	let cursor = 0;
+	const localClones: AgentProc[] = [];
+
+	const onAbort = () => {
+		for (const ap of localClones) {
+			if (ap.status === "running" || ap.status === "starting") {
+				ctx.killProc(ap, true);
+				ctx.wipeSessionFile(ap);
+				ap.status = "dead";
+				ctx.invalidate();
+			}
+		}
+	};
+	signal?.addEventListener("abort", onAbort);
+
 	const runOne = async (idx: number) => {
 		const it = resolved[idx];
-		const ap = makeClone(ctx, it.def, it.model, it.teamModel, `${it.name}-${idx}-${Date.now()}`);
+		const ap = makeClone(ctx, it.def, it.model, it.teamModel, `${it.name}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+		localClones.push(ap);
 		ctx.batchClones.add(ap);
 		try {
 			const r = await runAgent(ctx, ap, it.task);
@@ -379,9 +405,6 @@ export async function dispatchMany(
 		} catch (e: any) {
 			results[idx] = { agent: it.name, task: it.task, output: String(e?.message || e), code: 1, elapsed: 0, error: String(e?.message || e) };
 		} finally {
-			// Safety net: if runAgent threw before its own flushAgent, drain the
-			// buffer now. Per-agent buffers are isolated, so this is a no-op.
-			ctx.logger.flushAgent(ap);
 			ctx.batchClones.delete(ap);
 		}
 	};
@@ -393,8 +416,13 @@ export async function dispatchMany(
 	// All read-only → run under the shared read lock so they stay exclusive
 	// against any in-flight writable (write-locked) dispatch.
 	return ctx.dispatchLock.read(async () => {
-		await Promise.all(Array.from({ length: max }, worker));
-		return { ok: true, results };
+		try {
+			if (signal?.aborted) return { ok: false, error: "Aborted", results: [] };
+			await Promise.all(Array.from({ length: max }, worker));
+			return { ok: true, results };
+		} finally {
+			signal?.removeEventListener("abort", onAbort);
+		}
 	});
 }
 
@@ -406,6 +434,7 @@ export async function dispatchAgentMany(
 	ctx: AgentTeamContext,
 	agentName: string,
 	tasks: string[],
+	signal?: AbortSignal,
 ): Promise<BatchDispatchResult> {
 	const ap = ctx.procs.get(agentName.toLowerCase());
 	if (!ap) {
@@ -413,47 +442,73 @@ export async function dispatchAgentMany(
 		return { ok: false, error: `Agent "${agentName}" not found. Available: ${available}`, results: [] };
 	}
 	const writable = isWritable(ap.def, ctx.destructiveTools);
-	const runOne = async (idx: number, t: string): Promise<BatchTaskResult> => {
-		const clone = makeClone(ctx, ap.def, ap.model, ap.teamModel, `${agentName}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
-		ctx.batchClones.add(clone);
-		try {
-			const r = await runAgent(ctx, clone, t);
-			return { agent: agentName, task: t, output: r.output, code: r.code, elapsed: r.elapsed, error: null };
-		} catch (e: any) {
-			return { agent: agentName, task: t, output: String(e?.message || e), code: 1, elapsed: 0, error: String(e?.message || e) };
-		} finally {
-			ctx.logger.flushAgent(clone);
-			ctx.batchClones.delete(clone);
-		}
-	};
 
-	if (writable) {
-		// Exclusive write lock; one clone at a time so file mutations never run concurrently.
-		return ctx.dispatchLock.write(async () => {
-			const results: BatchTaskResult[] = [];
-			for (let i = 0; i < tasks.length; i++) results.push(await runOne(i, tasks[i]));
-			return { ok: true, results };
-		});
+	if (signal?.aborted) {
+		return { ok: false, error: "Aborted", results: [] };
 	}
 
-	// Read-only: concurrent, capped at maxParallel (or 1 when parallel off).
-	const results: BatchTaskResult[] = new Array(tasks.length);
-	let cursor = 0;
-	const worker = async () => {
-		let i: number;
-		while ((i = cursor++) < tasks.length) results[i] = await runOne(i, tasks[i]);
+	const localClones: AgentProc[] = [];
+
+	const onAbort = () => {
+		for (const clone of localClones) {
+			if (clone.status === "running" || clone.status === "starting") {
+				ctx.killProc(clone, true);
+				ctx.wipeSessionFile(clone);
+				clone.status = "dead";
+				ctx.invalidate();
+			}
+		}
 	};
-	const max = ctx.parallelDispatch ? Math.max(1, Math.min(ctx.maxParallel || 5, tasks.length)) : 1;
-	return ctx.dispatchLock.read(async () => {
-		await Promise.all(Array.from({ length: max }, worker));
-		return { ok: true, results };
-	});
+	signal?.addEventListener("abort", onAbort);
+
+	try {
+		const runOne = async (idx: number, t: string): Promise<BatchTaskResult> => {
+			const clone = makeClone(ctx, ap.def, ap.model, ap.teamModel, `${agentName}-${idx}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+			localClones.push(clone);
+			ctx.batchClones.add(clone);
+			try {
+				const r = await runAgent(ctx, clone, t);
+				return { agent: agentName, task: t, output: r.output, code: r.code, elapsed: r.elapsed, error: null };
+			} catch (e: any) {
+				return { agent: agentName, task: t, output: String(e?.message || e), code: 1, elapsed: 0, error: String(e?.message || e) };
+			} finally {
+				ctx.batchClones.delete(clone);
+			}
+		};
+
+		if (writable) {
+			// Exclusive write lock; one clone at a time so file mutations never run concurrently.
+			return ctx.dispatchLock.write(async () => {
+				if (signal?.aborted) return { ok: false, error: "Aborted", results: [] };
+				const results: BatchTaskResult[] = [];
+				for (let i = 0; i < tasks.length; i++) results.push(await runOne(i, tasks[i]));
+				return { ok: true, results };
+			});
+		}
+
+		// Read-only: concurrent, capped at maxParallel (or 1 when parallel off).
+		const results: BatchTaskResult[] = new Array(tasks.length);
+		let cursor = 0;
+		const worker = async () => {
+			let i: number;
+			while ((i = cursor++) < tasks.length) results[i] = await runOne(i, tasks[i]);
+		};
+		const max = ctx.parallelDispatch ? Math.max(1, Math.min(ctx.maxParallel || 5, tasks.length)) : 1;
+		return ctx.dispatchLock.read(async () => {
+			if (signal?.aborted) return { ok: false, error: "Aborted", results: [] };
+			await Promise.all(Array.from({ length: max }, worker));
+			return { ok: true, results };
+		});
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+	}
 }
 
 export async function activateTeam(ctx: AgentTeamContext, name: string) {
 	await ctx.killAll();
 	ctx.procs.clear();
 	ctx.activeTeam = name;
+	ctx.catalogDirty = true;
 	ctx.persist();
 
 	const members = ctx.teams[name] || [];
@@ -533,10 +588,12 @@ export class ProcessManager {
 		clearTimers(ap);
 	}
 
-	async killAll(ctx: AgentTeamContext, killPanesToo = false) {
-		if (killPanesToo) ctx.killPanes();
+	async killAll(ctx: AgentTeamContext) {
 		const exitPromises: Promise<void>[] = [];
-		for (const ap of ctx.procs.values()) {
+		// Snapshot both team-member procs and active parallel clones so we don't
+		// miss any in-flight subprocess if the set is mutated during iteration.
+		const allProcs = [...ctx.procs.values(), ...ctx.batchClones];
+		for (const ap of allProcs) {
 			const dying = ap.proc;
 			if (dying) {
 				// Skip the wait if the process has already exited — its 'close' event
@@ -596,13 +653,6 @@ export class ProcessManager {
 			...(hasPiScopeExtension(extPaths) ? ["--o-name", ap.def.name] : []),
 
 		];
-
-		// Record exact spawn command to tmp file (debug aid — not logged to SessionLogger)
-		const AgentCmdDir = join(homedir(), ".pi","agent-team-log","agent-cmd");
-		const cmdParts = [bin, ...args].map(a => /[\s"'\\$\``]/.test(a) ? JSON.stringify(a) : a);
-		const cmdLine = cmdParts.join(" ");
-		const body = `${new Date().toISOString()}\nagent: ${displayName(ap.def.name)}\n\n${cmdLine}\n`;
-		writeFileSync(join(AgentCmdDir, `spawn-cmd-${agentKey(ap)}${ap.runId ? `-${ap.runId}` : ""}.txt`), body);
 
 		const sub = spawnRpcSubprocess({
 			bin,

@@ -2,9 +2,7 @@
 
 import { Text } from "@mariozechner/pi-tui";
 import type { AgentProc, AgentTeamContext } from "./core";
-import { displayName, fmtTok, hrPad, shortModel } from "./core";
-
-const ansiRe = /\x1b\[[0-9;]*m/g;
+import { displayName, fmtTok, hrPad, shortModel, ansiRe } from "./core";
 
 /** An agent is "working" when it is actively doing something. Idle / done /
  *  error / dead agents are hidden from the widget so only live subagents show. */
@@ -12,26 +10,15 @@ export function isWorking(ap: AgentProc): boolean {
 	return ap.status === "running" || ap.status === "starting";
 }
 
-/** Strip everything that corrupts the monospace log grid: ANSI escape codes,
- *  carriage returns, and other control characters. Tabs become two spaces. */
-const ctrlRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
-function sanitizeLine(s: string): string {
-	let t = s.replace(ansiRe, "");   // drop colour/style escapes
-	t = t.replace(/\r/g, "");        // drop CR (progress bars, \r\n)
-	t = t.replace(/\t/g, "  ");      // tabs -> 2 spaces
-	t = t.replace(ctrlRe, "");       // drop remaining control chars
-	return t.trimEnd();
-}
-
 // ── System prompt builder ──
 
 export function buildCatalog(ctx: AgentTeamContext): string {
-	return Array.from(ctx.procs.values())
-		.map(a => {
-			const alive = a.proc ? "alive" : "dead";
-			return `### ${a.def.name}\n ${a.def.description}\n**Tools:** ${a.def.tools}`;
-		})
+	if (!ctx.catalogDirty && ctx.catalogCache) return ctx.catalogCache;
+	ctx.catalogCache = Array.from(ctx.procs.values())
+		.map(a => `### ${a.def.name}\n ${a.def.description}\n**Tools:** ${a.def.tools}`)
 		.join("\n\n");
+	ctx.catalogDirty = false;
+	return ctx.catalogCache;
 }
 
 export function buildSystemPrompt(args: {
@@ -296,7 +283,7 @@ export function renderLogGrid(ctx: AgentTeamContext, innerW: number, theme: any)
 	const L = Math.min(maxLines, LOG_PANEL_LINES);
 
 	const wrap = (s: string) => {
-		const cells = [...sanitizeLine(s)];
+		const cells = [...s];
 		if (cells.length > colW - 1) return cells.slice(0, colW - 1).join("") + "…";
 		return cells.join("") + " ".repeat(Math.max(0, colW - cells.length));
 	};
@@ -396,7 +383,6 @@ export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, them
 		}
 
 		// Drop cache pill if it would overflow; fall back to compact if still too wide
-		const bareLen = 4 + barW + 2 + [...statStr].length; // "▌   " + bar + "  " + statStr
 		if (4 + barW + 2 + [...statStr].length + [...cachePill].length > w) cachePill = "";
 		if (4 + barW + 2 + [...statStr].length > w) {
 			// Still overflowing — drop to bar + percentage only

@@ -41,34 +41,30 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 					details: { agent, task, tasks, status: "dispatching", multi },
 				});
 
-				// Listen for ESC / abort signal — kill running subagent(s).
-				// Captures the shared team-member proc AND any in-flight clones
-				// for this agent so a multi-task fan-out is fully abortable.
+				// Listen for ESC / abort signal — kill the shared team-member proc
+				// if this is a single dispatch. Multi-task clones are aborted via the
+				// signal passed to dispatchAgentMany, which scopes termination to
+				// only the clones it created for this call.
+				let abortHandler: (() => void) | undefined;
 				if (signal) {
 					const capturedAp = team.procs.get(agent.toLowerCase());
-					signal.addEventListener("abort", () => {
-						const targets: any[] = [];
-						if (capturedAp) targets.push(capturedAp);
-						for (const c of team.batchClones) {
-							if (c.def.name.toLowerCase() === agent.toLowerCase()) targets.push(c);
+					abortHandler = () => {
+						if (capturedAp && (capturedAp.status === "running" || capturedAp.status === "starting")) {
+							team.logger.logErrorBox(capturedAp, "ABORTED", "User pressed ESC");
+							team.killProc(capturedAp, true);
+							team.wipeSessionFile(capturedAp);
+							capturedAp.status = "dead";
+							team.invalidate();
 						}
-						for (const t of targets) {
-							if (t.status === "running" || t.status === "starting") {
-								team.logger.logErrorBox(t, "ABORTED", "User pressed ESC");
-								team.killProc(t, true);
-								team.wipeSessionFile(t);
-								t.status = "dead";
-								team.invalidate();
-							}
-						}
-					});
+					};
+					signal.addEventListener("abort", abortHandler);
 				}
 
 				// Normalize to an aggregated batch result so single + multi
 				// paths share one formatting/truncation path below.
 				let aggregate: { ok: boolean; error?: string; results: Array<{ agent: string; task: string; output: string; code: number; elapsed: number; error: string | null }> };
 				if (multi) {
-					const r = await team.dispatchAgentMany(agent, tasks as string[]);
+					const r = await team.dispatchAgentMany(agent, tasks as string[], signal);
 					if (!r.ok) {
 						if (team.wCtx) team.wCtx.ui.notify(`${tag} rejected`, "error");
 						return {
@@ -116,6 +112,8 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 					content: [{ type: "text", text: `Error dispatching ${agent}: ${err?.message || err}. The orchestrator should inform the user.` }],
 					details: { agent, task, tasks, status: "error", elapsed: 0, exitCode: 1, fullOutput: "" },
 				};
+			} finally {
+				if (signal && abortHandler) signal.removeEventListener("abort", abortHandler);
 			}
 		},
 
@@ -222,20 +220,7 @@ export function registerDispatchAgentsTool(pi: ExtensionAPI, team: AgentTeamCont
 				details: { count: tasks.length, status: "dispatching" },
 			});
 
-			if (signal) {
-				signal.addEventListener("abort", () => {
-					for (const ap of team.batchClones) {
-						if (ap.status === "running" || ap.status === "starting") {
-							team.killProc(ap, true);
-							team.wipeSessionFile(ap);
-							ap.status = "dead";
-							team.invalidate();
-						}
-					}
-				});
-			}
-
-			const r = await team.dispatchMany(tasks);
+			const r = await team.dispatchMany(tasks, signal);
 
 			if (!r.ok) {
 				if (team.wCtx) team.wCtx.ui.notify(`dispatch_agents rejected`, "error");

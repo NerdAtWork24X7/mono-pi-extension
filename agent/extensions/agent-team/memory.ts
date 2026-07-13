@@ -353,16 +353,6 @@ export class MemoryManager {
 								`Assistant: ${truncate(this.pendingOutput, 200)}`;
 							memoryAp.task = taskText;
 							this.logger.logTaskBox(memoryAp, this.state.runCount, taskText);
-							const inlinedContent = (() => {
-								try {
-									if (existsSync(this.memoryFile)) {
-										const buf = readFileSync(this.memoryFile);
-										const text = buf.toString("utf8");
-										if (text.trim().length > 0) return text;
-									}
-								} catch { }
-								return `(file is empty or does not exist yet — start a fresh document with the "# Project Memory" title)`;
-							})();
 							const promptPayload = {
 								type: "prompt",
 								message:

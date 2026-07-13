@@ -21,17 +21,33 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
-import { mkdirSync } from "fs";
+import { mkdirSync, readdirSync, statSync, unlinkSync } from "fs";
 import { join } from "path";
 
-import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, TerminalBackend, BatchDispatchResult } from "./core";
-import { displayName, shortModel, TmuxBackend, HerdrBackend, SessionLogger, RwLock } from "./core";
+import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, BatchDispatchResult } from "./core";
+import { displayName, shortModel, SessionLogger, RwLock } from "./core";
 import { loadPersistedConfig, savePersistedConfig, scanAgents, scanExtensionPaths, loadTeamsYaml, discoverEnabledSkills, loadAgentMd } from "./config";
 import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchMany as dispatchManyImpl, dispatchAgentMany as dispatchAgentManyImpl, makeHandleEvent } from "./orchestration";
 import { MemoryManager, extractLastAssistantText } from "./memory";
 import { buildCatalog, buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl } from "./ui";
 import { registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
 import { homedir } from "os";
+
+/** Remove session files older than 24 hours to prevent unbounded disk growth
+ *  when the CLI exits abruptly and leaves orphaned files behind. */
+function cleanupOldSessionFiles(sessionDir: string) {
+	const CUTOFF_MS = 24 * 60 * 60 * 1000;
+	try {
+		const now = Date.now();
+		for (const f of readdirSync(sessionDir)) {
+			const p = join(sessionDir, f);
+			try {
+				const st = statSync(p);
+				if (now - st.mtimeMs > CUTOFF_MS) unlinkSync(p);
+			} catch { /* ignore per-file errors */ }
+		}
+	} catch { /* ignore directory read errors */ }
+}
 
 export class AgentTeam implements AgentTeamContext {
 	pi: ExtensionAPI;
@@ -45,7 +61,10 @@ export class AgentTeam implements AgentTeamContext {
 	wCtx: any = null;
 	wInvalidate: (() => void) | null = null;
 	sessionDir = "";
-	logDir = "";
+	catalogCache = "";
+	catalogDirty = true;
+	skillsCache: Array<{ name: string; description: string }> = [];
+	agentMdCache: string | null = null;
 	enabled = true;
 	parallelDispatch = true;
 	maxParallel = 5;
@@ -54,7 +73,6 @@ export class AgentTeam implements AgentTeamContext {
 	batchClones = new Set<AgentProc>();
 	private agentMutexes = new Map<string, Promise<unknown>>();
 
-	tmuxCwd = "";
 	cachedExtPaths: string[] = []; // resolved once per session_start
 
 	// Bound once so the same reference can be used for both `on` and `off`,
@@ -68,13 +86,8 @@ export class AgentTeam implements AgentTeamContext {
 	memoryDir = "";
 	memoryManager: MemoryManager | null = null;
 
-	// Backends
-	herdrBackend = new HerdrBackend();
-	tmuxBackend = new TmuxBackend();
-	terminal: TerminalBackend;
 	logger: SessionLogger;
 	procMgr: ProcessManager;
-	lastDispatchedAp: AgentProc | null = null;
 
 	constructor(pi: ExtensionAPI) {
 		this.pi = pi;
@@ -85,12 +98,7 @@ export class AgentTeam implements AgentTeamContext {
 		this.maxParallel = this.saved.maxParallel ?? 5;
 		this.destructiveTools = this.saved.destructiveTools ?? ["write", "edit", "doc_generator"];
 
-		// Auto-detect terminal backend at construction time
-		this.terminal = this.herdrBackend.detect() ? this.herdrBackend
-			: this.tmuxBackend.detect() ? this.tmuxBackend
-				: this.tmuxBackend; // fallback to tmux (will be no-op if tmux not available)
-
-		this.logger = new SessionLogger(this.terminal, "");
+		this.logger = new SessionLogger();
 
 		// ProcessManager takes accessor closures so it can read the latest
 		// values of sessionDir/cachedExtPaths/orchestratorModel without
@@ -110,8 +118,8 @@ export class AgentTeam implements AgentTeamContext {
 		this.procMgr.killProc(this, ap, immediate);
 	}
 
-	async killAll(killPanesToo?: boolean): Promise<void> {
-		await this.procMgr.killAll(this, killPanesToo);
+	async killAll(): Promise<void> {
+		await this.procMgr.killAll(this);
 	}
 
 	spawnProc(ap: AgentProc): Promise<boolean> {
@@ -201,41 +209,24 @@ export class AgentTeam implements AgentTeamContext {
 
 	// ── Logging methods (bound to logger) ──
 
-	getTerminalWidth(): number {
-		return this.terminal.getTerminalWidth();
-	}
-
-	updateLogWidth() {
-		// Retained for compatibility; the widget now controls render width, so
-		// there is no side pane to resize. The logger still tracks a width.
-		this.logger.updateWidth();
-	}
-
 	handleTerminalResize() {
-		this.updateLogWidth();
 		this.invalidate();
 	}
-
-	/** No-op: the "Agent Team Log" side pane was replaced by the in-TUI log
-	 *  grid (see ui.ts). Kept so killAll(killPanesToo) doesn't change. */
-	killPanes() { }
 
 	// ── Agent Loading ───────────────────────────────────────────────
 
 	async loadAgents(cwd: string): Promise<void> {
 
 		this.sessionDir = join(homedir(), ".pi","agent-team-log","agent-sessions");
-		this.logDir = join(homedir(), ".pi","agent-team-log","agent-logs");
-		const AgentCmdDir = join(homedir(), ".pi","agent-team-log","agent-cmd");
 		this.memoryDir = join(cwd, ".pi_memory");
 		this.memoryFile = "";
 		mkdirSync(this.sessionDir, { recursive: true });
-		mkdirSync(this.logDir, { recursive: true });
-		mkdirSync(AgentCmdDir, { recursive: true });
-		this.updateLogWidth();
+		cleanupOldSessionFiles(this.sessionDir);
 
 		this.allDefs = scanAgents(cwd);
 		this.cachedExtPaths = scanExtensionPaths(cwd);
+		this.skillsCache = discoverEnabledSkills();
+		this.agentMdCache = loadAgentMd(cwd);
 
 		const tp = join(getAgentDir(), "agents", "teams.yaml");
 		const parsed = loadTeamsYaml(tp);
@@ -283,7 +274,6 @@ export class AgentTeam implements AgentTeamContext {
 		this.procs.clear();
 
 		this.loadAgents(ctx.cwd);
-		this.tmuxCwd = ctx.cwd;
 
 		const names = Object.keys(this.teams);
 		const teamToActivate = (this.activeTeam && names.includes(this.activeTeam)) ? this.activeTeam : (names[0] || "");
@@ -293,7 +283,6 @@ export class AgentTeam implements AgentTeamContext {
 
 		this.pi.setActiveTools(this.activeToolList());
 		this.invalidate();
-		const members = Array.from(this.procs.values()).map(a => displayName(a.def.name)).join(", ");
 		this.wCtx = ctx;
 		ctx.ui.setStatus("agent-team", `Team: ${this.activeTeam} (${this.procs.size})`);
 	}
@@ -303,8 +292,8 @@ export class AgentTeam implements AgentTeamContext {
 		this.persist();
 		await this.killAll();
 		this.wCtx = ctx;
-		// Restore all tools EXCEPT dispatch_agent
-		const allNames = this.pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent");
+		// Restore all tools EXCEPT dispatch_agent / dispatch_agents
+		const allNames = this.pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent" && n !== "dispatch_agents");
 		this.pi.setActiveTools(allNames);
 		this.invalidate();
 	}
@@ -353,8 +342,8 @@ export default function (pi: ExtensionAPI) {
 			date: new Date(t0).toISOString().split("T")[0],
 			cwd,
 			memory: team.memoryManager ? { file: team.memoryFile } : null,
-			agentMd: loadAgentMd(cwd),
-			skills: discoverEnabledSkills(),
+			agentMd: team.agentMdCache,
+			skills: team.skillsCache,
 			parallel: team.parallelDispatch,
 		});
 	});
@@ -381,7 +370,6 @@ export default function (pi: ExtensionAPI) {
 		team.orchestratorModel = m0 ? (m0.provider ? `${m0.provider}/${m0.id}` : m0.id) : "";
 
 		await team.loadAgents(_ctx.cwd);
-		team.tmuxCwd = _ctx.cwd;
 
 		team.initWidget();
 
@@ -406,7 +394,6 @@ export default function (pi: ExtensionAPI) {
 		pi.setActiveTools(team.activeToolList());
 
 		_ctx.ui.setStatus("agent-team", `Team: ${team.activeTeam} (${team.procs.size})`);
-		const members = Array.from(team.procs.values()).map(a => displayName(a.def.name)).join(", ");
 		// Rainbow VS banner — each line gets its own 256-color wrap.
 		// notify() has no color param, so we embed raw SGR codes here. The
 		// outer showStatus wrap applies `theme.fg("dim", …)` which only
@@ -443,7 +430,7 @@ export default function (pi: ExtensionAPI) {
 		process.stdout.off("resize", team.resizeHandler);
 		team.persist();
 		if (team.memoryManager) await team.memoryManager.awaitIdle(3000);
-		await team.killAll(true);
+		await team.killAll();
 	});
 
 	// Register tool, commands, shortcut
