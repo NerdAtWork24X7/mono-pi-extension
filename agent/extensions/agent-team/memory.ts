@@ -148,6 +148,10 @@ export class MemoryManager {
 		if (this.currentSub) {
 			this.currentSub.kill();
 			this.currentSub = null;
+			// Ensure the previous turn's log panel is dismissed immediately;
+			// otherwise the old logAgent resurfaces as soon as status flips to
+			// "recording" and the widget re-renders.
+			this.logAgent = null;
 		}
 		this.pendingInput = text || "";
 		this.pendingOutput = "";
@@ -208,7 +212,8 @@ export class MemoryManager {
 					this.state.lastSummaryAt = Date.now();
 					this.state.lastError = "";
 					this.setStatus("done");
-					if (!wroteFile) {							this.logger.logBoxed(`memory: no update needed for turn #${this.state.runCount}`, this.logAgent ?? undefined);
+					if (!wroteFile) {
+						this.logger.logBoxed(`memory: no update needed for turn #${this.state.runCount}`, this.logAgent ?? undefined);
 					}
 				} catch (err: any) {
 					const msg = (err && err.message) ? err.message : String(err);
@@ -216,6 +221,9 @@ export class MemoryManager {
 				} finally {
 					this.busy = false;
 					this.currentSub = null;
+					// Detach the completed/failed memory subagent from the TUI log
+					// grid so the panel closes once the run is finished.
+					this.logAgent = null;
 					this.cleanupSessionFiles();
 				}
 			}
