@@ -10,7 +10,7 @@
 
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
+import { truncateToWidth } from "@mariozechner/pi-tui";
 
 export default function (pi: ExtensionAPI) {
 	let sessionStart = Date.now();
@@ -28,7 +28,15 @@ export default function (pi: ExtensionAPI) {
 
 	function fmt(n: number): string {
 		if (n < 1000) return `${n}`;
-		return `${(n / 1000).toFixed(1)}k`;
+		if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+		return `${(n / 1_000_000).toFixed(1)}M`;
+	}
+
+	function contextBar(pct: number, width: number, theme: any): string {
+		const filled = Math.min(width, Math.max(0, Math.round((pct / 100) * width)));
+		const bar = "█".repeat(filled) + "░".repeat(width - filled);
+		const color = pct > 90 ? "error" : pct > 70 ? "warning" : "accent";
+		return theme.fg(color, bar);
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -57,43 +65,56 @@ export default function (pi: ExtensionAPI) {
 					const usage = ctx.getContextUsage();
 					const ctxWindow = usage?.contextWindow ?? 0;
 					const pct = usage?.percent ?? 0;
-					const remaining = Math.max(0, ctxWindow - (usage?.tokens ?? 0));
 
-					const pctColor = pct > 75 ? "error" : pct > 50 ? "warning" : "success";
+					// ── Model + thinking level ──
+					const thinking = pi.getThinkingLevel();
+					const thinkColor = thinking === "high" ? "warning"
+						: thinking === "medium" ? "accent"
+						: thinking === "low" ? "dim"
+						: "muted";
+					const modelId = ctx.model?.id || "no-model";
+					const modelBadge = theme.fg("accent", `◆ ${modelId}`) + " " + theme.fg(thinkColor, `● ${thinking}`);
 
-					const cacheParts: string[] = [];
-					cacheParts.push(`⬆${fmt(cacheRead)}`);
-					cacheParts.push(`⬇${fmt(cacheWrite)}`);
-					const cacheStr = cacheParts.length > 0 ? theme.fg("success", ` [${cacheParts.join(" ")}]`) : "";
+					// ── Token stats ──
+					const tokenParts: string[] = [
+						theme.fg("accent", `↑${fmt(input)}`) + " " + theme.fg("text", `↓${fmt(output)}`),
+					];
+					if (cacheRead > 0 || cacheWrite > 0) {
+						const cacheParts: string[] = [];
+						if (cacheRead > 0) cacheParts.push(`↺${fmt(cacheRead)}`);
+						if (cacheWrite > 0) cacheParts.push(`↻${fmt(cacheWrite)}`);
+						tokenParts.push(theme.fg("success", `💾 ${cacheParts.join(" ")}`));
+					}
+					const tokenStr = tokenParts.join("  ");
 
-					const tokenStats = [
-						theme.fg("accent", `⬆${fmt(input)}: ⬇${fmt(output)}`) + cacheStr,
-						theme.fg("warning", `$${cost.toFixed(2)} `),
-						theme.fg(pctColor, `${pct.toFixed(0)}% `),
-					].join(" ");
+					// ── Cost ──
+					const costStr = theme.fg("warning", `$${cost.toFixed(2)}`);
 
-					const elapsed = theme.fg("dim", `⏱${formatElapsed(Date.now() - sessionStart)} `);
+					// ── Context usage mini-bar ──
+					let contextStr = "";
+					if (ctxWindow > 0) {
+						const bar = contextBar(pct, 8, theme);
+						contextStr = `${bar} ${theme.fg(pct > 75 ? "error" : pct > 50 ? "warning" : "success", `${pct.toFixed(0)}%`)}`;
+					}
+
+					// ── Session meta ──
+					const elapsed = theme.fg("dim", `⏱ ${formatElapsed(Date.now() - sessionStart)}`);
 
 					const parts = process.cwd().split("/");
 					const short = parts.length > 2 ? parts.slice(-2).join("/") : process.cwd();
-					const cwdStr = theme.fg("muted", `⌂ ${short} `);
+					const cwdStr = theme.fg("muted", `⌂ ${short}`);
 
 					const branch = footerData.getGitBranch();
-					const branchStr = branch ? theme.fg("accent", `⎇ ${branch} `) : "";
+					const branchStr = branch ? theme.fg("accent", `⎇ ${branch}`) : "";
 
-					const thinking = pi.getThinkingLevel();
-					const thinkColor = thinking === "high" ? "warning" : thinking === "medium" ? "accent" : thinking === "low" ? "dim" : "muted";
-					const modelId = ctx.model?.id || "no-model";
-					const modelStr = theme.fg(thinkColor, "◆") + " " + theme.fg("accent", modelId) + " | " + theme.fg(thinkColor, thinking);
-
-					// Plan mode status — read from persisted session entries (same source plan-mode uses)
+					// ── Plan mode status ──
 					type PlanEntry = { type: string; customType?: string; data?: { enabled: boolean; executing?: boolean; todos?: { completed: boolean }[] } };
 					const allEntries = ctx.sessionManager.getEntries() as PlanEntry[];
 					const planEntry = allEntries.filter((e) => e.type === "custom" && e.customType === "plan-mode").pop();
 					const planEnabled = planEntry?.data?.enabled ?? false;
 					const planExecuting = planEntry?.data?.executing ?? false;
 					const planTodos = planEntry?.data?.todos ?? [];
-					let planStr = theme.fg("accent", "BUILD");
+					let planStr = "";
 					if (planExecuting && planTodos.length > 0) {
 						const completed = planTodos.filter((t) => t.completed).length;
 						planStr = theme.fg("accent", `📋 ${completed}/${planTodos.length}`);
@@ -101,13 +122,17 @@ export default function (pi: ExtensionAPI) {
 						planStr = theme.fg("warning", "PLAN");
 					}
 
-				const sep = theme.fg("dim", "  ·  ");
-				const leftParts = [modelStr, tokenStats, elapsed, cwdStr];
-				if (branchStr) leftParts.push(branchStr);
-				if (planStr) leftParts.push(planStr);
-				const left = leftParts.join(sep);
+					// ── Assemble with subtle separators ──
+					const sep = theme.fg("dim", " · ");
+					const sections: string[] = [modelBadge, tokenStr, costStr];
+					if (contextStr) sections.push(contextStr);
+					sections.push(elapsed, cwdStr);
+					if (branchStr) sections.push(branchStr);
+					if (planStr) sections.push(planStr);
 
-				return [truncateToWidth(left, width)];
+					const line = theme.fg("accent", "▌ ") + sections.join(sep);
+
+					return [truncateToWidth(line, width)];
 				},
 			};
 		});

@@ -33,6 +33,11 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 				};
 			}
 
+			// Listen for ESC / abort signal — kill the shared team-member proc
+			// if this is a single dispatch. Multi-task clones are aborted via the
+			// signal passed to dispatchAgentMany, which scopes termination to
+			// only the clones it created for this call.
+			let abortHandler: (() => void) | undefined;
 			try {
 				const tag = this.agentTag(agent);
 
@@ -41,11 +46,6 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 					details: { agent, task, tasks, status: "dispatching", multi },
 				});
 
-				// Listen for ESC / abort signal — kill the shared team-member proc
-				// if this is a single dispatch. Multi-task clones are aborted via the
-				// signal passed to dispatchAgentMany, which scopes termination to
-				// only the clones it created for this call.
-				let abortHandler: (() => void) | undefined;
 				if (signal) {
 					const capturedAp = team.procs.get(agent.toLowerCase());
 					abortHandler = () => {
