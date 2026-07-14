@@ -36,6 +36,7 @@
     "+extensions/custom-footer.ts",
     "+extensions/agent-team/index.ts",
     "+extensions/web-fetch_crawl4ai.ts",
+    "+extensions/context-pruner.ts",
     "-extensions/web-fetch.ts"
   ],
   "terminal": {

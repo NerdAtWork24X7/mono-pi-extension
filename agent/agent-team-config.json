@@ -3,7 +3,7 @@
   "gridCols": 2,
   "enabled": true,
   "parallelDispatch": true,
-  "maxParallel": 4,
+  "maxParallel": 5,
   "destructiveTools": [
     "write",
     "edit",

@@ -285,6 +285,7 @@ export class AgentTeam implements AgentTeamContext {
 		this.invalidate();
 		this.wCtx = ctx;
 		ctx.ui.setStatus("agent-team", `Team: ${this.activeTeam} (${this.procs.size})`);
+		setAgentTeamHeader(ctx, true, isContextPrunerEnabled(ctx.cwd));
 	}
 
 	async disableAgentTeam(ctx: any) {
@@ -296,7 +297,67 @@ export class AgentTeam implements AgentTeamContext {
 		const allNames = this.pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent" && n !== "dispatch_agents");
 		this.pi.setActiveTools(allNames);
 		this.invalidate();
+		setAgentTeamHeader(ctx, false, false);
 	}
+}
+
+function buildBanner(): string {
+	// Rainbow VS banner — each line gets its own 256-color wrap.
+	// We embed raw SGR codes so the colors survive the TUI header render.
+	const RST = "\x1b[0m";
+	const rb = (s: string, i: number) =>
+		`\x1b[38;5;${[196, 208, 226, 46, 51, 21, 201][i % 7]}m${s}${RST}`;
+	return (
+		rb(`VVVVVVVV           VVVVVVVV   SSSSSSSSSSSSSSS `, 0) + "\n" +
+		rb(`V::::::V           V::::::V SS:::::::::::::::S`, 1) + "\n" +
+		rb(`V::::::V           V::::::VS:::::SSSSSS::::::S`, 2) + "\n" +
+		rb(`V::::::V           V::::::VS:::::S     SSSSSSS`, 3) + "\n" +
+		rb(` V:::::V           V:::::V S:::::S            `, 4) + "\n" +
+		rb(`  V:::::V         V:::::V  S:::::S            `, 5) + "\n" +
+		rb(`   V:::::V       V:::::V    S::::SSSS         `, 6) + "\n" +
+		rb(`    V:::::V     V:::::V      SS::::::SSSSS    `, 7) + "\n" +
+		rb(`     V:::::V   V:::::V         SSS::::::::SS  `, 8) + "\n" +
+		rb(`      V:::::V V:::::V             SSSSSS::::S `, 9) + "\n" +
+		rb(`       V:::::V:::::V                    S:::::S`, 10) + "\n" +
+		rb(`        V:::::::::V                    S:::::S`, 11) + "\n" +
+		rb(`         V:::::::V         SSSSSSS     S:::::S`, 12) + "\n" +
+		rb(`          V:::::V          S::::::SSSSSS:::::S`, 13) + "\n" +
+		rb(`           V:::V           S:::::::::::::::SS `, 14) + "\n" +
+		rb(`            VVV             SSSSSSSSSSSSSSS   `, 15) + "\n" +
+		`/context-pruner        Enable to save token \n` +
+	        `/agents-team           Select a team\n` +
+		`/Ctrl+q                Toggle agent mode`
+	);
+}
+
+/** Read context-pruner state from its persisted config. */
+function isContextPrunerEnabled(cwd: string): boolean {
+	try {
+		const p = join(cwd, ".pi", "context-pruner-config.json");
+		if (!existsSync(p)) return false;
+		const raw = JSON.parse(readFileSync(p, "utf-8"));
+		return raw.enabled === true;
+	} catch {
+		return false;
+	}
+}
+
+function setAgentTeamHeader(ctx: any, enabled: boolean, prunerEnabled: boolean = false) {
+	if (!ctx.ui?.setHeader) return;
+	if (!enabled) {
+		ctx.ui.setHeader(undefined);
+		return;
+	}
+	ctx.ui.setHeader((_tui: any, theme: any) => ({
+		render: (_width: number) => {
+			const lines = buildBanner().split("\n");
+			if (prunerEnabled) {
+				lines.push(theme.fg("dim", "🌿"));
+			}
+			return lines;
+		},
+		invalidate: () => {},
+	}));
 }
 
 export default function (pi: ExtensionAPI) {
@@ -377,6 +438,7 @@ export default function (pi: ExtensionAPI) {
 			// Ensure dispatch_agent is NOT in active tools when disabled
 			const allNames = pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent");
 			pi.setActiveTools(allNames);
+			setAgentTeamHeader(_ctx, false);
 			_ctx.ui.notify(
 				"Agent team is disabled. Use /agents-team-toggle on to enable.",
 				"info",
@@ -394,33 +456,7 @@ export default function (pi: ExtensionAPI) {
 		pi.setActiveTools(team.activeToolList());
 
 		_ctx.ui.setStatus("agent-team", `Team: ${team.activeTeam} (${team.procs.size})`);
-		// Rainbow VS banner — each line gets its own 256-color wrap.
-		// notify() has no color param, so we embed raw SGR codes here. The
-		// outer showStatus wrap applies `theme.fg("dim", …)` which only
-		// toggles intensity (SGR 2); foreground colors survive.
-		const RST = "\x1b[0m";
-		const rb = (s: string, i: number) =>
-			`\x1b[38;5;${[196, 208, 226, 46, 51, 21, 201][i % 7]}m${s}${RST}`;
-		const banner =
-			rb(`VVVVVVVV           VVVVVVVV   SSSSSSSSSSSSSSS `, 0) + "\n" +
-			rb(`V::::::V           V::::::V SS:::::::::::::::S`, 1) + "\n" +
-			rb(`V::::::V           V::::::VS:::::SSSSSS::::::S`, 2) + "\n" +
-			rb(`V::::::V           V::::::VS:::::S     SSSSSSS`, 3) + "\n" +
-			rb(` V:::::V           V:::::V S:::::S            `, 4) + "\n" +
-			rb(`  V:::::V         V:::::V  S:::::S            `, 5) + "\n" +
-			rb(`   V:::::V       V:::::V    S::::SSSS         `, 6) + "\n" +
-			rb(`    V:::::V     V:::::V      SS::::::SSSSS    `, 7) + "\n" +
-			rb(`     V:::::V   V:::::V         SSS::::::::SS  `, 8) + "\n" +
-			rb(`      V:::::V V:::::V             SSSSSS::::S `, 9) + "\n" +
-			rb(`       V:::::V:::::V                    S:::::S`, 10) + "\n" +
-			rb(`        V:::::::::V                    S:::::S`, 11) + "\n" +
-			rb(`         V:::::::V         SSSSSSS     S:::::S`, 12) + "\n" +
-			rb(`          V:::::V          S::::::SSSSSS:::::S`, 13) + "\n" +
-			rb(`           V:::V           S:::::::::::::::SS `, 14) + "\n" +
-			rb(`            VVV             SSSSSSSSSSSSSSS   `, 15) + "\n" +
-			`/agents-team          Select a team\n` +
-			`/Ctrl+q                Toggle agent mode`;
-		_ctx.ui.notify(banner);
+		setAgentTeamHeader(_ctx, team.enabled, isContextPrunerEnabled(_ctx.cwd));
 		team.invalidate();
 	});
 
@@ -431,6 +467,7 @@ export default function (pi: ExtensionAPI) {
 		team.persist();
 		if (team.memoryManager) await team.memoryManager.awaitIdle(3000);
 		await team.killAll();
+		if (team.wCtx?.ui?.setHeader) team.wCtx.ui.setHeader(undefined);
 	});
 
 	// Register tool, commands, shortcut
