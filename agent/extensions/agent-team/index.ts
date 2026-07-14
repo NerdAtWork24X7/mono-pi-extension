@@ -324,7 +324,6 @@ function buildBanner(): string {
 		rb(`          V:::::V          S::::::SSSSSS:::::S`, 13) + "\n" +
 		rb(`           V:::V           S:::::::::::::::SS `, 14) + "\n" +
 		rb(`            VVV             SSSSSSSSSSSSSSS   `, 15) + "\n" +
-		`/context-pruner        Enable to save token \n` +
 	        `/agents-team           Select a team\n` +
 		`/Ctrl+q                Toggle agent mode`
 	);

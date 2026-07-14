@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.80.2",
+  "lastChangelogVersion": "0.80.7",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
   "defaultProvider": "kilo",
@@ -36,7 +36,6 @@
     "+extensions/custom-footer.ts",
     "+extensions/agent-team/index.ts",
     "+extensions/web-fetch_crawl4ai.ts",
-    "+extensions/context-pruner.ts",
     "-extensions/web-fetch.ts"
   ],
   "terminal": {
