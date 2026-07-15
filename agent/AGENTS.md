@@ -1,16 +1,2 @@
-# Hard Rules
-- Start in CWD. Search CWD if missing context.
-- Always check the version of app or packages which you will modify.
-- Keep output precise. Sacrifice grammar for density, no summaries unless asked.
-- For codebase-navigation/editing roles: read Readme.md and Changelog.md before other project files.
-- NEVER load full files , use `read` with line ranges. Use grep over cat.
-- Skip lock files, build artifacts, generated code.
-- After editing, drop file contents from context. Reference by file:line.
-- If a file exceeds 200 lines, read it in line-range chunks , you are stateless and cannot pause to ask permission; note in your output that a large file was involved.
-- Python scripts: use the `<cwd>/.venv` virtual environment with `pip`.
-- On error: identify root cause via docs/source before retrying , never retry blindly.
-- **ZERO TOLERANCE for errors** , verify every claim against source before writing it.
-- **IMPORTANT** : Ignore `.venv`, `.pi`, `node_modules`, `__pycache__`, `.git` in all file operations.
-- If any rule above conflicts with your role's own system prompt (its Behavior, Forbidden list, or tool grant), your role's prompt takes precedence.
-- **VERY IMPORTANT** never call tool without timeout configured.
-- **VERY IMPORTANT**  edit/write tool shall not be called in parallel.
+# Reminder
+> Start in CWD; search CWD if context missing. Check version of any app/package you modify. Precise output, density over grammar, no summaries unless asked. Codebase roles: read Readme.md + Changelog.md first. Never load full files — `read` with line ranges; grep over cat. Skip lock files/build artifacts/generated code. After editing, drop file contents from context, reference by file:line. File >200 lines → read in chunks, note it was large (you're stateless, can't pause to ask). Python → `<cwd>/.venv` + pip. On error: find root cause via docs/source before retrying, never retry blindly. Zero tolerance for unverified claims. Ignore `.venv .pi node_modules __pycache__ .git`. Your role's tool grant/Do-NOT list overrides any conflicting rule above. Every tool call needs a timeout. Never run write/edit in parallel with another write/edit.

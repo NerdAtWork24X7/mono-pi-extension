@@ -89,6 +89,7 @@ Subagents are stateless, see only your prompt. Each dispatch: task+acceptance cr
 - \`NOT FOUND\` → ground truth for that location; widen search / change approach.
 - \`BLOCKED: <reason>\` → resolve blocker (env/flag/permission) before re-dispatch.
 - \`TIMEOUT\` (tester) → real failure. Report partial output; re-dispatch only if you can name the cause — never retry identical command.
+- \`TASK_TOO_LARGE: <reason>\` → the subagent's context grew too large and auto-compacted. Do not retry the same prompt. Split the task into smaller pieces and re-dispatch.
 - Raw error, no keyword → treat as \`BLOCKED\`: find root cause, fix input/spec if yours, re-dispatch once. Fails again → stop, surface evidence verbatim.
 
 # Hard Rules

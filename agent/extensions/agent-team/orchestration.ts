@@ -20,11 +20,14 @@ export const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
 
 // Map of event type → log message formatter for simple delegation
 const simpleLogEvents: Record<string, (ev: any) => string> = {
-	compaction_start: (ev) => `COMPACT start (reason: ${ev.reason || "auto"})`,
 	compaction_end: (ev) => ev.aborted ? `COMPACT aborted` : `COMPACT done (${ev.reason || "auto"})`,
 	auto_retry_start: (ev) => `AUTO-RETRY attempt ${ev.attempt}/${ev.maxAttempts} (${ev.delayMs}ms)`,
 	auto_retry_end: (ev) => `AUTO-RETRY ${ev.success ? "succeeded" : "failed"} (attempt ${ev.attempt})`,
 };
+
+/** Signal returned to the orchestrator when a subagent auto-compacts.
+ *  The orchestrator should split the task into smaller pieces. */
+const TASK_TOO_LARGE_SIGNAL = "TASK_TOO_LARGE: subagent context grew too large and auto-compacted. Split this task into smaller pieces and re-dispatch.";
 
 export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) {
 	let ev: any;
@@ -43,11 +46,32 @@ export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) 
 		case "tool_execution_end": return handleToolEnd(ctx, ap, ev);
 		case "agent_end": return handleAgentEnd(ctx, ap, ev);
 		case "extension_ui_request": return autoRespondUI(ap, ev);
+		case "compaction_start": return handleCompactionStart(ctx, ap, ev);
 		default: {
 			const fmt = simpleLogEvents[ev.type];
 			if (fmt) ctx.logger.log(fmt(ev), ap);
 		}
 	}
+}
+
+/** Auto-compaction in a subagent means the task is too large for its context
+ *  window. End the subagent immediately and return a signal so the orchestrator
+ *  can split the task into smaller pieces. */
+function handleCompactionStart(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
+	// Ignore duplicate compaction events after we've already terminated.
+	if (ap.autoCompacted) return;
+	const reason = ev.reason || "auto";
+	// Manual compacts are intentional; only abort on automatic compactions.
+	if (reason === "manual") {
+		ctx.logger.log(`COMPACT start (reason: manual)`, ap);
+		return;
+	}
+	ap.autoCompacted = true;
+	ctx.logger.logErrorBox(ap, "AUTO-COMPACT", "subagent context grew too large — ending dispatch");
+	ctx.resolveIfPending(ap, TASK_TOO_LARGE_SIGNAL, 1);
+	ctx.killProc(ap, true);
+	if (ctx.wCtx) ctx.wCtx.ui.notify(ctx.tag(ap, "auto-compacted — task too large"), "warning");
+	ctx.invalidate();
 }
 
 export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
@@ -160,6 +184,9 @@ export function handleToolEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
 }
 
 export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
+	// If we already terminated the subagent because it auto-compacted, ignore
+	// any late agent_end event and don't overwrite the TASK_TOO_LARGE signal.
+	if (ap.autoCompacted) return;
 	clearInterval(ap.timer);
 	ctx.logger.flushStreamBuf(ap);
 
@@ -674,9 +701,14 @@ export class ProcessManager {
 			},
 			onClose: (code) => {
 				if (ap.proc !== sub.proc) return; // stale process guard
-				ctx.logger.logErrorBox(ap, `PROCESS EXIT code=${code}`, "");
-				const captured = ap.lastAssistantText || ap.currentMessageText.trim() || ap.collectedText.trim();
-				this.resolveIfPending(ap, captured || `Process exited with code ${code}`, code === 0 ? 0 : 1);
+				// If we intentionally killed the subagent because it auto-compacted,
+				// don't log a scary PROCESS EXIT box and don't overwrite the
+				// TASK_TOO_LARGE signal that was already resolved.
+				if (!ap.autoCompacted) {
+					ctx.logger.logErrorBox(ap, `PROCESS EXIT code=${code}`, "");
+					const captured = ap.lastAssistantText || ap.currentMessageText.trim() || ap.collectedText.trim();
+					this.resolveIfPending(ap, captured || `Process exited with code ${code}`, code === 0 ? 0 : 1);
+				}
 				ap.proc = null;
 				ap.procRef = null;
 				ap.status = "dead";
