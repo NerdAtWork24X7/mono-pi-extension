@@ -35,8 +35,9 @@
   "extensions": [
     "+extensions/custom-footer.ts",
     "+extensions/agent-team/index.ts",
-    "+extensions/web-fetch_crawl4ai.ts",
-    "-extensions/web-fetch.ts"
+    "-extensions/web-fetch_crawl4ai.ts",
+    "+extensions/web-fetch.ts",
+    "+extension/pi-scope.ts"
   ],
   "terminal": {
     "showTerminalProgress": true
