@@ -432,16 +432,16 @@ export default async function (pi: ExtensionAPI) {
   // After session starts, pre-fetch all models if already logged in so
   // modifyModels has data to work with. Also fetch and display credits.
   pi.on("session_start", async (_event, ctx) => {
-    const cred = ctx.modelRegistry.authStorage.get("kilo");
+    const token = await ctx.modelRegistry.getApiKeyForProvider("kilo");
 
     // Clear credits if not logged in
-    if (cred?.type !== "oauth") {
+    if (!token) {
       ctx.ui.setStatus("kilo-credits", undefined);
       return;
     }
 
     try {
-      cachedAllModels = await fetchKiloModels({ token: cred.access });
+      cachedAllModels = await fetchKiloModels({ token });
     } catch (error) {
       console.warn(
         "[kilo] Failed to fetch models at session start:",
@@ -460,7 +460,7 @@ export default async function (pi: ExtensionAPI) {
 
     // Fetch and display credits balance
     try {
-      const balance = await fetchKiloBalance(cred.access);
+      const balance = await fetchKiloBalance(token);
       if (balance !== null) {
         const theme = ctx.ui.theme;
         ctx.ui.setStatus(
@@ -480,11 +480,11 @@ export default async function (pi: ExtensionAPI) {
   pi.on("model_select", async (event, ctx) => {
     if (event.model?.provider !== "kilo") return;
 
-    const cred = ctx.modelRegistry.authStorage.get("kilo");
-    if (cred?.type !== "oauth") return;
+    const token = await ctx.modelRegistry.getApiKeyForProvider("kilo");
+    if (!token) return;
 
     try {
-      const balance = await fetchKiloBalance(cred.access);
+      const balance = await fetchKiloBalance(token);
       if (balance !== null) {
         const theme = ctx.ui.theme;
         ctx.ui.setStatus(
@@ -502,11 +502,11 @@ export default async function (pi: ExtensionAPI) {
 
   // Refresh credits after each turn
   pi.on("turn_end", async (_event, ctx) => {
-    const cred = ctx.modelRegistry.authStorage.get("kilo");
-    if (cred?.type !== "oauth") return;
+    const token = await ctx.modelRegistry.getApiKeyForProvider("kilo");
+    if (!token) return;
 
     try {
-      const balance = await fetchKiloBalance(cred.access);
+      const balance = await fetchKiloBalance(token);
       if (balance !== null) {
         const theme = ctx.ui.theme;
         ctx.ui.setStatus(
@@ -529,8 +529,7 @@ export default async function (pi: ExtensionAPI) {
     if (tosShown) return;
     if (ctx.model?.provider !== "kilo") return;
 
-    const cred = ctx.modelRegistry.authStorage.get("kilo");
-    if (cred?.type === "oauth") {
+    if (ctx.modelRegistry.getProviderAuthStatus("kilo")?.label === "oauth") {
       tosShown = true;
       return;
     }
