@@ -7,6 +7,7 @@ import type { SessionLogger } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
 import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, hasPiScopeExtension, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext } from "./core";
+import { resolveSkillPath } from "./config";
 
 const KILLALL_TIMEOUT_MS = 5_000;
 const READY_PROBE_DELAY_MS = 500;
@@ -666,11 +667,27 @@ export class ProcessManager {
 		const modelName = hasProvider ? model.slice(slashIdx + 1) : model;
 
 		const extPaths = this.cachedExtPaths();
+
+		// Build skill flags: disable global skill discovery and load only the
+		// explicit skills from the agent def, or all globally enabled skills if
+		// the agent def does not specify a list.
+		const skillFlags: string[] = ["--no-skills"];
+		const skillNames = ap.def.skills ?? ctx.skillsCache.map(s => s.dir);
+		for (const skillName of skillNames) {
+			const skillPath = resolveSkillPath(skillName);
+			if (skillPath) {
+				skillFlags.push("--skill", skillPath);
+			} else {
+				ctx.logger.log(`Unknown skill: ${skillName}`, ap);
+			}
+		}
+
 		const args = [
 			"--mode", "rpc",
 			"-p",
 			"--no-extensions",
 			...extPaths.flatMap(p => ["--extension", p]),
+			...skillFlags,
 			...(provider ? ["--provider", provider] : []),
 			"--model", modelName,
 			"--tools", ap.def.tools,

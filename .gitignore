@@ -1,5 +1,9 @@
 ﻿agent/auth.json
 agent/.update-check
 .pi/*
-.pi_memory/project_memory.md
+.pi_memory/
 .venv/
+node_modules/
+
+package-lock.json
+package.json

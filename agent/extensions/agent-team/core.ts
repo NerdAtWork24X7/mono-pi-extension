@@ -8,6 +8,10 @@ export interface AgentDef {
 	tools: string;
 	model?: string;
 	thinking?: string;
+	/** Explicit skill allowlist for this subagent. When present, global skill
+	 *  discovery is disabled (`--no-skills`) and only these skill names are
+	 *  loaded. When absent, the subagent receives every globally enabled skill. */
+	skills?: string[];
 	systemPrompt: string;
 	file: string;
 }

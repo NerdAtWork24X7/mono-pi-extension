@@ -88,10 +88,30 @@ export function parseAgentFile(fp: string): AgentDef | null {
 			tools: [...tools].join(","),
 			model: fm.model,
 			thinking: fm.thinking || undefined,
+			skills: parseAgentSkills(fm.skills),
 			systemPrompt: m[2].trim(),
 			file: fp,
 		};
 	} catch { return null; }
+}
+
+/** Parse a frontmatter `skills:` value into short skill names.
+ *  Empty/whitespace entries are ignored. */
+function parseAgentSkills(raw?: string): string[] | undefined {
+	if (raw === undefined) return undefined;
+	const names: string[] = [];
+	for (const name of raw.split(",")) {
+		const trimmed = name.trim();
+		if (trimmed) names.push(trimmed);
+	}
+	return names;
+}
+
+/** Resolve a skill short name to an absolute SKILL.md path.
+ *  Returns undefined if the skill directory does not exist. */
+export function resolveSkillPath(name: string): string | undefined {
+	const p = join(getAgentDir(), "skills", name, "SKILL.md");
+	return existsSync(p) ? p : undefined;
 }
 
 /** Collect extension paths (excluding agent-team and disabled extensions) for -e flags */
@@ -187,6 +207,8 @@ export function scanAgents(cwd: string): AgentDef[] {
 export interface Skill {
 	name: string;
 	description: string;
+	/** Directory name under getAgentDir()/skills/. Used for path resolution. */
+	dir: string;
 }
 
 /** Parse YAML frontmatter (very limited: just `name:` and `description:`) */
@@ -264,8 +286,8 @@ function computeEnabledSkills(): Skill[] {
 		try {
 			const raw = readFileSync(skillMd, "utf-8");
 			const fm = parseSkillFrontmatter(raw);
-			if (fm) out.push({ name: fm.name, description: fm.description });
-			else out.push({ name: f.name, description: "" });
+			if (fm) out.push({ name: fm.name, description: fm.description, dir: f.name });
+			else out.push({ name: f.name, description: "", dir: f.name });
 		} catch { /* skip unreadable */ }
 	}
 	return out;

@@ -15,7 +15,12 @@ export function isWorking(ap: AgentProc): boolean {
 export function buildCatalog(ctx: AgentTeamContext): string {
 	if (!ctx.catalogDirty && ctx.catalogCache) return ctx.catalogCache;
 	ctx.catalogCache = Array.from(ctx.procs.values())
-		.map(a => `### ${a.def.name}\n ${a.def.description}\n**Tools:** ${a.def.tools}`)
+		.map(a => {
+			const skillsLabel = a.def.skills
+				? `**Skills:** ${a.def.skills.join(", ") || "none"}`
+				: `**Skills:** all active (${ctx.skillsCache.map(s => s.name).join(", ") || "none"})`;
+			return `### ${a.def.name}\n ${a.def.description}\n**Tools:** ${a.def.tools}\n${skillsLabel}`;
+		})
 		.join("\n\n");
 	ctx.catalogDirty = false;
 	return ctx.catalogCache;
@@ -37,7 +42,8 @@ export function buildSystemPrompt(args: {
 - **Never start a second dispatch while one is still in flight**, writable or not.`
 		: `- **Parallel read-only dispatch**: independent read-only subagent lookups (agents whose tools exclude write/edit/doc_generator — e.g. \`file_reader\`) MUST be batched into ONE \`dispatch_agents\` call so they run concurrently. Do not call \`dispatch_agent\` for them one-by-one when they are independent. Cap each batch at ~6 lookups — if more are needed, split into sequential batches rather than one giant fan-out.
 - **Read-only host tools**: you may fire multiple read-only tool calls (read/grep/find/ls) within a single turn.
-- **Writes/edits are NEVER parallel**: any agent that can write or edit files (coder, documenter, doc_generator, searcher, tester, image_analyzer, …) goes through \`dispatch_agent\` and is always serialized — never include a writable agent in \`dispatch_agents\`, and never start a second write/edit while one is still in flight.`;
+- **Writes/edits are NEVER parallel**: any agent that can write or edit files (coder, documenter, doc_generator, searcher, tester, image_analyzer, …) goes through \`dispatch_agent\` and is always serialized — never include a writable agent in \`dispatch_agents\`, and never start a second write/edit while one is still in flight.
+- **Partition parallel web lookups**: when dispatching multiple \`searcher\` agents in parallel, split the URLs/queries into disjoint subsets and assign a distinct subset to each subagent. Never give two parallel searchers the same URL or identical query.`;
 
 	// Workflow steps 2 and 4 must match parallelRules exactly, or a
 	// parallel:false run gets Workflow text telling it to batch dispatches
