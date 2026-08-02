@@ -202,8 +202,9 @@ export class AgentTeam implements AgentTeamContext {
 
 	/** Active tool allowlist. Includes dispatch_agents when parallel dispatch is on. */
 	activeToolList(): string[] {
-		const base = ["dispatch_agent", "ask_user_question", "todo", "read", "bash", "grep", "find", "ls", "write", "edit"];
+		const base = this.pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent" && n !== "dispatch_agents");
 		if (this.parallelDispatch) base.unshift("dispatch_agents");
+		base.unshift("dispatch_agent");
 		return base;
 	}
 

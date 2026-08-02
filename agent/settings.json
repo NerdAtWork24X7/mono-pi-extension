@@ -37,6 +37,7 @@
     "+extensions/agent-team/index.ts",
     "-extensions/web-fetch_crawl4ai.ts",
     "+extensions/web-fetch.ts",
+    "+extensions/browser.ts",
     "+extension/pi-scope.ts"
   ],
   "terminal": {
