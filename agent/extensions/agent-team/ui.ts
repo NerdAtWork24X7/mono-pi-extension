@@ -110,7 +110,7 @@ ${parallelRules}
 - Ignore \`.venv .pi node_modules __pycache__ .git\` everywhere.
 - YAGNI, prefer one-liners.
 - Confirm the issue is actually fixed before marking done.
-- When fixing issue always test and check if there are similar issue are found and ask if user for fixing them.
+- When fixing issue always test using subagent and check if there are similar issue are found and ask if user wants to fix them.
 
 # Tool Priority
 \`grep\` > \`read\` (offset/limit) > full file; \`find\` for filename patterns. One known file/symbol → resolve yourself; broader → subagent. Any image task → \`image_analyzer\`, never infer from filename/path. Confused subagent output → fresh session, sharper prompt, don't steer the broken one.

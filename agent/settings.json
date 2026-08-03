@@ -30,7 +30,7 @@
     "openrouter/openrouter/free",
     "xiaomi-token-plan-ams/mimo-v2.5-pro",
     "xiaomi-token-plan-ams/mimo-v2.5",
-    "kilo/tencent/hy3:free"
+    "openrouter/cohere/north-mini-code:free"
   ],
   "extensions": [
     "+extensions/custom-footer.ts",
