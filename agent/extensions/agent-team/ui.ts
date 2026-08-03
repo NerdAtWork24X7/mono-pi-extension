@@ -110,6 +110,7 @@ ${parallelRules}
 - Ignore \`.venv .pi node_modules __pycache__ .git\` everywhere.
 - YAGNI, prefer one-liners.
 - Confirm the issue is actually fixed before marking done.
+- When fixing issue always test and check if there are similar issue are found and ask if user for fixing them.
 
 # Tool Priority
 \`grep\` > \`read\` (offset/limit) > full file; \`find\` for filename patterns. One known file/symbol → resolve yourself; broader → subagent. Any image task → \`image_analyzer\`, never infer from filename/path. Confused subagent output → fresh session, sharper prompt, don't steer the broken one.
@@ -146,23 +147,23 @@ export function initWidget(ctx: AgentTeamContext) {
 				const activeClones = [...ctx.batchClones].filter(isWorking);
 				const totalCount = ctx.procs.size + activeClones.length + (hasMemory ? 1 : 0);
 
-			if (!ctx.enabled) {
-				text.setText(theme.fg("dim", "Agent team disabled. /agents-team-toggle on"));
-				return text.render(width);
-			}
+				if (!ctx.enabled) {
+					text.setText(theme.fg("dim", "Agent team disabled. /agents-team-toggle on"));
+					return text.render(width);
+				}
 
-			if (!totalCount) {
-				const hint = "No agents. Add subagent to agent.yml files to agents/";
-				const hintVis = [...hint].length;
-				const hintLine =
-					theme.fg("border", "│   ") +
-					theme.fg("dim", hint) +
-					theme.fg("border", " ".repeat(Math.max(0, width - 4 - hintVis - 2)) + " │");
-				const topBorder = theme.fg("border", hrPad("", width, "╭", "╮", "─"));
-				const bottomBorder = theme.fg("border", hrPad("", width, "╰", "╯", "─"));
-				text.setText([topBorder, hintLine, bottomBorder].join("\n"));
-				return text.render(width);
-			}
+				if (!totalCount) {
+					const hint = "No agents. Add subagent to agent.yml files to agents/";
+					const hintVis = [...hint].length;
+					const hintLine =
+						theme.fg("border", "│   ") +
+						theme.fg("dim", hint) +
+						theme.fg("border", " ".repeat(Math.max(0, width - 4 - hintVis - 2)) + " │");
+					const topBorder = theme.fg("border", hrPad("", width, "╭", "╮", "─"));
+					const bottomBorder = theme.fg("border", hrPad("", width, "╰", "╯", "─"));
+					text.setText([topBorder, hintLine, bottomBorder].join("\n"));
+					return text.render(width);
+				}
 
 				const boxPad = 4;
 				const innerW = width - boxPad;
@@ -189,17 +190,17 @@ export function initWidget(ctx: AgentTeamContext) {
 					}
 				}
 
-			const topBorder = theme.fg("border", hrPad("", width, "╭", "╮", "─"));
-			// ── Header: "Subagent Team" sits inside the box, left-aligned after the border ──
-			const headerText = "Subagent Team";
-			const headerPad = Math.max(0, innerW - [...headerText].length);
-			const headerLine =
-				theme.fg("border", "│ ") +
-				theme.fg("accent", theme.bold(headerText)) +
-				" ".repeat(headerPad) +
-				" " + theme.fg("border", "│");
-			const sepLine = theme.fg("border", hrPad("", width, "├", "┤", "─"));
-			const boxedRows = rows.map(r => {
+				const topBorder = theme.fg("border", hrPad("", width, "╭", "╮", "─"));
+				// ── Header: "Subagent Team" sits inside the box, left-aligned after the border ──
+				const headerText = "Subagent Team";
+				const headerPad = Math.max(0, innerW - [...headerText].length);
+				const headerLine =
+					theme.fg("border", "│ ") +
+					theme.fg("accent", theme.bold(headerText)) +
+					" ".repeat(headerPad) +
+					" " + theme.fg("border", "│");
+				const sepLine = theme.fg("border", hrPad("", width, "├", "┤", "─"));
+				const boxedRows = rows.map(r => {
 					const rowStr = r.join(" ".repeat(cardGap));
 					const rowVis = [...rowStr.replace(ansiRe, "")].length;
 					const padded = rowStr + " ".repeat(Math.max(0, innerW - rowVis));
@@ -207,15 +208,15 @@ export function initWidget(ctx: AgentTeamContext) {
 				});
 				const bottomBorder = theme.fg("border", hrPad("", width, "╰", "╯", "─"));
 
-			// ── Per-agent TUI log grid (scales with swapped agents) ──
-			const logRows = renderLogGrid(ctx, innerW, theme);
+				// ── Per-agent TUI log grid (scales with swapped agents) ──
+				const logRows = renderLogGrid(ctx, innerW, theme);
 
-			const parts = [topBorder, headerLine, sepLine, ...boxedRows];
-			if (logRows.length) parts.push(theme.fg("border", hrPad("", width, "├", "┤", "─")), ...logRows);
-			parts.push(bottomBorder);
+				const parts = [topBorder, headerLine, sepLine, ...boxedRows];
+				if (logRows.length) parts.push(theme.fg("border", hrPad("", width, "├", "┤", "─")), ...logRows);
+				parts.push(bottomBorder);
 
-			text.setText(parts.join("\n"));
-			return text.render(width);
+				text.setText(parts.join("\n"));
+				return text.render(width);
 			},
 		};
 	}, { placement: "aboveEditor" });
@@ -223,7 +224,7 @@ export function initWidget(ctx: AgentTeamContext) {
 	process.stdout.off("resize", ctx.resizeHandler);
 	process.stdout.on("resize", ctx.resizeHandler);
 
-	if (!ctx.wInvalidate) ctx.wInvalidate = () => {};
+	if (!ctx.wInvalidate) ctx.wInvalidate = () => { };
 }
 
 const LOG_PANEL_LINES = 6; // max log lines shown per agent panel
