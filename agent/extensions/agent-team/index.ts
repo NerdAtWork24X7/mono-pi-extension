@@ -21,7 +21,7 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
-import { mkdirSync, readdirSync, statSync, unlinkSync } from "fs";
+import { mkdirSync, readdirSync, statSync, unlinkSync, existsSync, readFileSync } from "fs";
 import { join } from "path";
 
 import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, BatchDispatchResult } from "./core";
@@ -29,7 +29,7 @@ import { displayName, shortModel, SessionLogger, RwLock } from "./core";
 import { loadPersistedConfig, savePersistedConfig, scanAgents, scanExtensionPaths, loadTeamsYaml, discoverEnabledSkills, loadAgentMd } from "./config";
 import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchMany as dispatchManyImpl, dispatchAgentMany as dispatchAgentManyImpl, makeHandleEvent } from "./orchestration";
 import { MemoryManager, extractLastAssistantText } from "./memory";
-import { buildCatalog, buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl } from "./ui";
+import { buildCatalog, buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl, closeSidebar } from "./ui";
 import { registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
 import { homedir } from "os";
 
@@ -63,7 +63,7 @@ export class AgentTeam implements AgentTeamContext {
 	sessionDir = "";
 	catalogCache = "";
 	catalogDirty = true;
-	skillsCache: Array<{ name: string; description: string }> = [];
+	skillsCache: Array<{ name: string; description: string; dir: string }> = [];
 	agentMdCache: string | null = null;
 	enabled = true;
 	parallelDispatch = true;
@@ -71,6 +71,12 @@ export class AgentTeam implements AgentTeamContext {
 	destructiveTools: string[] = ["write", "edit", "doc_generator"];
 	dispatchLock: RwLock = new RwLock();
 	batchClones = new Set<AgentProc>();
+	/** Set of agent names that are temporarily disabled by the user */
+	disabledAgents = new Set<string>();
+	/** Skill directory names enabled for orchestrator system prompt. Empty = none. */
+	orchestratorSkills = new Set<string>();
+	/** Skill directory names available to subagents. Empty = none. */
+	subagentSkills = new Set<string>();
 	private agentMutexes = new Map<string, Promise<unknown>>();
 
 	cachedExtPaths: string[] = []; // resolved once per session_start
@@ -97,6 +103,9 @@ export class AgentTeam implements AgentTeamContext {
 		this.parallelDispatch = this.saved.parallelDispatch ?? true;
 		this.maxParallel = this.saved.maxParallel ?? 5;
 		this.destructiveTools = this.saved.destructiveTools ?? ["write", "edit", "doc_generator"];
+		this.disabledAgents = new Set(this.saved.disabledAgents ?? []);
+		this.orchestratorSkills = new Set(this.saved.orchestratorSkills ?? []);
+		this.subagentSkills = new Set(this.saved.subagentSkills ?? []);
 
 		this.logger = new SessionLogger();
 
@@ -197,6 +206,9 @@ export class AgentTeam implements AgentTeamContext {
 			parallelDispatch: this.parallelDispatch,
 			maxParallel: this.maxParallel,
 			destructiveTools: this.destructiveTools,
+			disabledAgents: Array.from(this.disabledAgents),
+			orchestratorSkills: Array.from(this.orchestratorSkills),
+			subagentSkills: Array.from(this.subagentSkills),
 		});
 	}
 
@@ -326,7 +338,8 @@ function buildBanner(): string {
 		rb(`           V:::V           S:::::::::::::::SS `, 14) + "\n" +
 		rb(`            VVV             SSSSSSSSSSSSSSS   `, 15) + "\n" +
 	        `/agents-team           Select a team\n` +
-		`/Ctrl+q                Toggle agent mode`
+		`Ctrl+Q                 Toggle sidebar\n` +
+		`Ctrl+Alt+A             Toggle agent mode`
 	);
 }
 
@@ -398,13 +411,16 @@ export default function (pi: ExtensionAPI) {
 		const catalog = buildCatalog(team);
 		const t0 = Date.now();
 		const cwd = process.cwd();
+		const filteredOrchSkills = team.orchestratorSkills.size > 0
+			? team.skillsCache.filter(s => team.orchestratorSkills.has(s.dir))
+			: [];
 		return buildSystemPrompt({
 			catalog,
 			date: new Date(t0).toISOString().split("T")[0],
 			cwd,
 			memory: team.memoryManager ? { file: team.memoryFile } : null,
 			agentMd: team.agentMdCache,
-			skills: team.skillsCache,
+			skills: filteredOrchSkills,
 			parallel: team.parallelDispatch,
 		});
 	});
@@ -464,6 +480,7 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", async () => {
 		process.stdout.off("resize", team.resizeHandler);
+		closeSidebar();
 		team.persist();
 		if (team.memoryManager) await team.memoryManager.awaitIdle(3000);
 		await team.killAll();

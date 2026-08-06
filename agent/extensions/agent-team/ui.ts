@@ -1,8 +1,11 @@
 // ── UI: system prompt builder + widget rendering ──
 
-import { Text } from "@mariozechner/pi-tui";
+import { Text, matchesKey, Key } from "@mariozechner/pi-tui";
 import type { AgentProc, AgentTeamContext } from "./core";
 import { displayName, fmtTok, hrPad, shortModel, ansiRe } from "./core";
+import { saveTeamsYaml, loadTeamsYaml, discoverAllSkills, type Skill } from "./config";
+import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { join } from "path";
 
 /** An agent is "working" when it is actively doing something. Idle / done /
  *  error / dead agents are hidden from the widget so only live subagents show. */
@@ -10,15 +13,455 @@ export function isWorking(ap: AgentProc): boolean {
 	return ap.status === "running" || ap.status === "starting";
 }
 
+/** Sidebar visibility state - module-level so it persists across re-renders */
+let sidebarVisible = false;
+let sidebarOverlayHandle: any = null;
+
+export function isSidebarVisible(): boolean {
+	return sidebarVisible;
+}
+
+export function toggleSidebar(ctx: AgentTeamContext) {
+	if (sidebarVisible) {
+		closeSidebar();
+	} else {
+		openSidebar(ctx);
+	}
+}
+
+export function closeSidebar() {
+	sidebarVisible = false;
+	if (sidebarOverlayHandle) {
+		sidebarOverlayHandle.hide();
+		sidebarOverlayHandle = null;
+	}
+}
+
+/** Persist the `active` flag for a specific agent in the current team to teams.yaml */
+function persistAgentActive(ctx: AgentTeamContext, agentName: string, active: boolean) {
+	const tp = join(getAgentDir(), "agents", "teams.yaml");
+	const parsed = loadTeamsYaml(tp);
+	const teamMembers = parsed.teams[ctx.activeTeam];
+	if (teamMembers) {
+		const member = teamMembers.find(m => m.name.toLowerCase() === agentName.toLowerCase());
+		if (member) {
+			member.active = active;
+		}
+	}
+	// Also update the in-memory teams data
+	const memMembers = ctx.teams[ctx.activeTeam];
+	if (memMembers) {
+		const mem = memMembers.find(m => m.name.toLowerCase() === agentName.toLowerCase());
+		if (mem) mem.active = active;
+	}
+	saveTeamsYaml(tp, parsed);
+}
+/** Toggle a skill in a single enable-set. An empty set means "no skills
+ *  enabled". Adding/removing is straightforward add/delete. */
+function toggleSkillSet(set: Set<string>, allSkills: Skill[], sk: Skill) {
+	if (set.has(sk.dir)) {
+		set.delete(sk.dir);
+	} else {
+		set.add(sk.dir);
+	}
+}
+
+
+export function openSidebar(ctx: AgentTeamContext) {
+	if (!ctx.wCtx) return;
+	sidebarVisible = true;
+
+	const overlayWidth = 45;
+
+	ctx.wCtx.ui.custom(
+		(tui: any, theme: any, keybindings: any, done: () => void) => {
+			let section: "orch" | "teams" | "sub" = "orch"; // which section is focused
+			let teamIdx = 0; // index within teams section
+			let skillIdx = 0; // index within orchestrator skill list
+			let subIdx = 0; // index within subagents flat list (agents then skills)
+			// Snapshot ALL available skills (including disabled in settings.json) once when sidebar opens
+			const allSkills = discoverAllSkills();
+			const agents = () => Array.from(ctx.procs.values());
+
+			const component = {
+				render(width: number): string[] {
+					const lines: string[] = [];
+					const allAgents = agents();
+					const w = Math.min(width, overlayWidth);
+					const innerW = w - 2;
+					const teamNames = Object.keys(ctx.teams);
+					const subLen = allAgents.length + allSkills.length;
+
+					// Top border
+					lines.push(theme.fg("border", hrPad("", w, "╭", "╮", "─")));
+
+					// Title with orchestrator status
+					const titleText = "◆ Agent Team";
+					const titlePad = Math.max(0, innerW - [...titleText].length);
+					lines.push(
+						theme.fg("border", "│ ") +
+						theme.fg("accent", theme.bold(titleText)) +
+						" ".repeat(titlePad) +
+						theme.fg("border", " │")
+					);
+
+					// Orchestrator info (always shown)
+					const orchModel = shortModel(ctx.orchestratorModel);
+					const orchLabel = "Orchestrator";
+					const orchModelStr = orchModel ? ` ${orchModel}` : "";
+					const orchIcon = "●";
+					const orchLine = ` ${orchIcon} ${orchLabel}${orchModelStr}`;
+					const orchPad = Math.max(0, innerW - [...orchLine].length);
+					lines.push(
+						theme.fg("border", "│") +
+						theme.fg("success", orchLine) +
+						" ".repeat(orchPad) +
+						theme.fg("border", " │")
+					);
+
+					// Orchestrator skills (folded under the orchestrator header)
+					if (allSkills.length > 0) {
+						if (skillIdx >= allSkills.length) skillIdx = Math.max(0, allSkills.length - 1);
+						for (let i = 0; i < allSkills.length; i++) {
+							const sk = allSkills[i];
+							const isSelected = section === "orch" && i === skillIdx;
+							const on = ctx.orchestratorSkills.has(sk.dir);
+							const selPrefix = isSelected ? "▸ " : "  ";
+							const icon = on ? theme.fg("success", "● ") : theme.fg("dim", "○ ");
+							const label = sk.name.length > innerW - 12 ? sk.name.slice(0, innerW - 15) + "…" : sk.name;
+							const rawLine = selPrefix + (on ? "●" : "○") + " " + label;
+							const visLen = [...rawLine].length;
+							const skillPad = Math.max(0, innerW - visLen);
+							const cellContent = theme.fg(isSelected ? "accent" : "text", selPrefix) + icon + theme.fg(isSelected ? "accent" : "text", label);
+							const bgColor = isSelected ? "selectedBg" : undefined;
+							let renderedLine = theme.fg("border", "│");
+							if (bgColor) {
+								renderedLine += theme.bg(bgColor, cellContent + " ".repeat(skillPad));
+							} else {
+								renderedLine += cellContent + " ".repeat(skillPad);
+							}
+							renderedLine += theme.fg("border", " │");
+							lines.push(renderedLine);
+						}
+					}
+
+					// Separator
+					lines.push(theme.fg("border", hrPad("", w, "├", "┤", "─")));
+
+					// ── Teams section ──
+					const teamsHeader = " Teams (Tab to switch focus)";
+					const teamsHeaderPad = Math.max(0, innerW - [...teamsHeader].length);
+					lines.push(
+						theme.fg("border", "│") +
+						theme.fg("dim", theme.bold(teamsHeader)) +
+						" ".repeat(teamsHeaderPad) +
+						theme.fg("border", " │")
+					);
+
+					if (teamNames.length === 0) {
+						const emptyMsg = " No teams defined";
+						const emptyPad = Math.max(0, innerW - [...emptyMsg].length);
+						lines.push(
+							theme.fg("border", "│") +
+							theme.fg("dim", emptyMsg) +
+							" ".repeat(emptyPad) +
+							theme.fg("border", " │")
+						);
+					} else {
+						if (teamIdx >= teamNames.length) teamIdx = Math.max(0, teamNames.length - 1);
+						for (let i = 0; i < teamNames.length; i++) {
+							const tn = teamNames[i];
+							const isActive = tn === ctx.activeTeam;
+							const isSelected = section === "teams" && i === teamIdx;
+							const teamMembers = ctx.teams[tn] || [];
+							const activeCount = teamMembers.filter(m => m.active !== false).length;
+							const icon = isActive ? "●" : "○";
+							const selPrefix = isSelected ? "▸ " : "  ";
+							const countStr = ` (${activeCount}/${teamMembers.length})`;
+							const teamLine = `${selPrefix}${icon} ${tn}${countStr}`;
+							const teamCells = [...teamLine];
+							const displayLine = teamCells.length > innerW
+								? teamCells.slice(0, innerW - 1).join("") + "…"
+								: teamLine;
+							const teamPad = Math.max(0, innerW - [...displayLine].length);
+							const lineColor = isActive ? "success" : (isSelected ? "accent" : "text");
+							const bgColor = isSelected ? "selectedBg" : undefined;
+							let renderedLine = theme.fg("border", "│");
+							if (bgColor) {
+								renderedLine += theme.bg(bgColor, theme.fg(lineColor, displayLine) + " ".repeat(teamPad));
+							} else {
+								renderedLine += theme.fg(lineColor, displayLine) + " ".repeat(teamPad);
+							}
+							renderedLine += theme.fg("border", " │");
+							lines.push(renderedLine);
+						}
+					}
+
+					// Separator
+					lines.push(theme.fg("border", hrPad("", w, "├", "┤", "─")));
+
+					// ── Subagents section header ──
+					const subHeader = " Subagents (Enter to toggle)";
+					const subHeaderPad = Math.max(0, innerW - [...subHeader].length);
+					lines.push(
+						theme.fg("border", "│") +
+						theme.fg("dim", theme.bold(subHeader)) +
+						" ".repeat(subHeaderPad) +
+						theme.fg("border", " │")
+					);
+
+					// Clamp subagents-section index across agent rows + skill rows
+					if (subIdx >= subLen) subIdx = Math.max(0, subLen - 1);
+
+					// Agent list
+					if (allAgents.length === 0) {
+						const emptyMsg = " No agents loaded";
+						const emptyPad = Math.max(0, innerW - [...emptyMsg].length);
+						lines.push(
+							theme.fg("border", "│") +
+							theme.fg("dim", emptyMsg) +
+							" ".repeat(emptyPad) +
+							theme.fg("border", " │")
+						);
+					} else {
+						for (let i = 0; i < allAgents.length; i++) {
+							const ap = allAgents[i];
+							const isSelected = section === "sub" && i === subIdx;
+							const isDisabled = ctx.disabledAgents.has(ap.def.name.toLowerCase());
+
+							// Status indicator - show different icon for disabled
+							let statusColor: string;
+							let statusIcon: string;
+							if (isDisabled) {
+								statusColor = "dim";
+								statusIcon = "◌";
+							} else {
+								statusColor = ap.status === "idle" ? "dim"
+									: ap.status === "starting" ? "warning"
+										: ap.status === "running" ? "accent"
+											: ap.status === "done" ? "success" : "error";
+								statusIcon = ap.status === "idle" ? "○"
+									: ap.status === "starting" ? "◐"
+										: ap.status === "running" ? "●"
+											: ap.status === "done" ? "✓" : "✗";
+							}
+
+							const name = displayName(ap.def.name);
+							const model = shortModel(ap.model);
+							const modelStr = model ? ` · ${model}` : "";
+							const selPrefix = isSelected ? "▸ " : "  ";
+							const disableTag = isDisabled ? " [off]" : "";
+							const agentLine = `${selPrefix}${statusIcon} ${name}${modelStr}${disableTag}`;
+
+							// Truncate if too long
+							const agentCells = [...agentLine];
+							const displayLine = agentCells.length > innerW
+								? agentCells.slice(0, innerW - 1).join("") + "…"
+								: agentLine;
+							const agentPad = Math.max(0, innerW - [...displayLine].length);
+
+							const lineColor = isDisabled ? "dim" : (isSelected ? "accent" : "text");
+							const bgColor = isSelected ? "selectedBg" : undefined;
+
+							let renderedLine = theme.fg("border", "│");
+							if (bgColor) {
+								renderedLine += theme.bg(bgColor, theme.fg(lineColor, displayLine) + " ".repeat(agentPad));
+							} else {
+								renderedLine += theme.fg(lineColor, displayLine) + " ".repeat(agentPad);
+							}
+							renderedLine += theme.fg("border", " │");
+							lines.push(renderedLine);
+						}
+					}
+
+					// Subagent skills (folded under the subagents list)
+					if (allSkills.length > 0) {
+						const dash = "   " + "─".repeat(Math.max(4, innerW - 8));
+						lines.push(
+							theme.fg("border", "│") +
+							theme.fg("dim", dash) +
+							" ".repeat(Math.max(0, innerW - [...dash].length)) +
+							theme.fg("border", " │")
+						);
+						for (let i = 0; i < allSkills.length; i++) {
+							const sk = allSkills[i];
+							const rowIdx = allAgents.length + i;
+							const isSelected = section === "sub" && rowIdx === subIdx;
+							const on = ctx.subagentSkills.has(sk.dir);
+							const selPrefix = isSelected ? "▸ " : "  ";
+							const icon = on ? theme.fg("success", "● ") : theme.fg("dim", "○ ");
+							const label = sk.name.length > innerW - 12 ? sk.name.slice(0, innerW - 15) + "…" : sk.name;
+							const rawLine = selPrefix + (on ? "●" : "○") + " " + label;
+							const visLen = [...rawLine].length;
+							const skillPad = Math.max(0, innerW - visLen);
+							const cellContent = theme.fg(isSelected ? "accent" : "text", selPrefix) + icon + theme.fg(isSelected ? "accent" : "text", label);
+							const bgColor = isSelected ? "selectedBg" : undefined;
+							let renderedLine = theme.fg("border", "│");
+							if (bgColor) {
+								renderedLine += theme.bg(bgColor, cellContent + " ".repeat(skillPad));
+							} else {
+								renderedLine += cellContent + " ".repeat(skillPad);
+							}
+							renderedLine += theme.fg("border", " │");
+							lines.push(renderedLine);
+						}
+					}
+
+					// Separator
+					lines.push(theme.fg("border", hrPad("", w, "├", "┤", "─")));
+
+					// Help text
+					const helpLines = [
+						" Tab Switch focus ↑↓ Navigate",
+						" Enter Select team / Toggle skill / agent",
+						" ●=enabled ○=disabled (per group)",
+						" Esc/Ctrl+Q Close sidebar",
+					];
+					for (const help of helpLines) {
+						const helpPad = Math.max(0, innerW - [...help].length);
+						lines.push(
+							theme.fg("border", "│") +
+							theme.fg("dim", help) +
+							" ".repeat(helpPad) +
+							theme.fg("border", " │")
+						);
+					}
+
+					// Bottom border
+					lines.push(theme.fg("border", hrPad("", w, "╰", "╯", "─")));
+
+					return lines;
+				},
+
+				handleInput(data: string) {
+					const allAgents = agents();
+					const teamNames = Object.keys(ctx.teams);
+					const subLen = allAgents.length + allSkills.length;
+
+					if (matchesKey(data, Key.tab)) {
+						// Cycle focus: orch -> teams -> sub -> orch
+						section = section === "orch" ? "teams" : section === "teams" ? "sub" : "orch";
+						tui.requestRender();
+					} else if (matchesKey(data, Key.up)) {
+						if (section === "teams") {
+							teamIdx = Math.max(0, teamIdx - 1);
+						} else if (section === "orch") {
+							skillIdx = Math.max(0, skillIdx - 1);
+						} else {
+							subIdx = Math.max(0, subIdx - 1);
+						}
+						tui.requestRender();
+					} else if (matchesKey(data, Key.down)) {
+						if (section === "teams") {
+							teamIdx = Math.min(teamNames.length - 1, teamIdx + 1);
+						} else if (section === "orch") {
+							skillIdx = Math.min(allSkills.length - 1, skillIdx + 1);
+						} else {
+							subIdx = Math.min(Math.max(0, subLen - 1), subIdx + 1);
+						}
+						tui.requestRender();
+					} else if (matchesKey(data, Key.enter) || matchesKey(data, Key.space)) {
+						if (section === "teams") {
+							// Switch to the selected team
+							if (teamIdx >= 0 && teamIdx < teamNames.length) {
+								const newTeam = teamNames[teamIdx];
+								if (newTeam !== ctx.activeTeam) {
+									ctx.activateTeam(newTeam);
+									ctx.invalidate();
+									if (ctx.wCtx) {
+										ctx.wCtx.ui.setStatus("agent-team", `Team: ${newTeam} (${ctx.procs.size})`);
+										ctx.wCtx.ui.notify(`Switched to team: ${newTeam}`, "info");
+									}
+								}
+							}
+						} else if (section === "orch") {
+							// Toggle orchestrator skill
+							if (skillIdx >= 0 && skillIdx < allSkills.length) {
+								const sk = allSkills[skillIdx];
+								toggleSkillSet(ctx.orchestratorSkills, allSkills, sk);
+								ctx.catalogDirty = true;
+								ctx.persist();
+								tui.requestRender();
+							}
+						} else {
+							// Subagents section: agents list then subagent skills
+							if (subIdx >= 0 && subIdx < allAgents.length) {
+								// Toggle agent enabled/disabled
+								const ap = allAgents[subIdx];
+								const agentKey = ap.def.name.toLowerCase();
+								const wasDisabled = ctx.disabledAgents.has(agentKey);
+
+								if (wasDisabled) {
+									// Enable the agent
+									ctx.disabledAgents.delete(agentKey);
+									persistAgentActive(ctx, ap.def.name, true);
+								} else {
+									// Disable the agent - kill if running
+									if (ap.status === "running" || ap.status === "starting") {
+										ctx.killProc(ap, true);
+										ctx.wipeSessionFile(ap);
+										ap.status = "dead";
+									}
+									ctx.disabledAgents.add(agentKey);
+									persistAgentActive(ctx, ap.def.name, false);
+								}
+								ctx.catalogDirty = true;
+								ctx.persist();
+								ctx.invalidate();
+								tui.requestRender();
+							} else {
+								// Toggle subagent skill
+								const sIdx = subIdx - allAgents.length;
+								if (sIdx >= 0 && sIdx < allSkills.length) {
+									const sk = allSkills[sIdx];
+									toggleSkillSet(ctx.subagentSkills, allSkills, sk);
+									ctx.catalogDirty = true;
+									ctx.persist();
+									tui.requestRender();
+								}
+							}
+						}
+					} else if (matchesKey(data, Key.escape)) {
+						closeSidebar();
+						done();
+					}
+				},
+
+				invalidate() {},
+				wantsKeyRelease: false,
+			};
+
+			return component;
+		},
+		{
+			overlay: true,
+			overlayOptions: {
+				width: overlayWidth,
+				anchor: "right-center",
+				offsetX: -2,
+				offsetY: 0,
+				margin: 1,
+			},
+			onHandle: (handle: any) => {
+				sidebarOverlayHandle = handle;
+			},
+		}
+	);
+}
+
 // ── System prompt builder ──
 
 export function buildCatalog(ctx: AgentTeamContext): string {
 	if (!ctx.catalogDirty && ctx.catalogCache) return ctx.catalogCache;
+	const filteredSubSkills = ctx.subagentSkills.size > 0
+		? ctx.skillsCache.filter(s => ctx.subagentSkills.has(s.dir))
+		: [];
 	ctx.catalogCache = Array.from(ctx.procs.values())
+		.filter(a => !ctx.disabledAgents.has(a.def.name.toLowerCase()))
 		.map(a => {
 			const skillsLabel = a.def.skills
 				? `**Skills:** ${a.def.skills.join(", ") || "none"}`
-				: `**Skills:** all active (${ctx.skillsCache.map(s => s.name).join(", ") || "none"})`;
+				: `**Skills:** all active (${filteredSubSkills.map(s => s.name).join(", ") || "none"})`;
 			return `### ${a.def.name}\n ${a.def.description}\n**Tools:** ${a.def.tools}\n${skillsLabel}`;
 		})
 		.join("\n\n");
@@ -147,7 +590,8 @@ export function initWidget(ctx: AgentTeamContext) {
 			render(width: number): string[] {
 				const hasMemory = !!ctx.memoryManager;
 				const activeClones = [...ctx.batchClones].filter(isWorking);
-				const totalCount = ctx.procs.size + activeClones.length + (hasMemory ? 1 : 0);
+				const visibleProcs = [...ctx.procs.values()].filter(ap => !ctx.disabledAgents.has(ap.def.name.toLowerCase()));
+				const totalCount = visibleProcs.length + activeClones.length + (hasMemory ? 1 : 0);
 
 				if (!ctx.enabled) {
 					text.setText(theme.fg("dim", "Agent team disabled. /agents-team-toggle on"));
@@ -174,7 +618,7 @@ export function initWidget(ctx: AgentTeamContext) {
 				const colW = Math.floor((innerW - cardGap * (cols - 1)) / cols);
 
 				const cards: string[][] = [];
-				for (const ap of ctx.procs.values()) cards.push(renderCard(ctx, ap, colW, theme));
+				for (const ap of visibleProcs) cards.push(renderCard(ctx, ap, colW, theme));
 				for (const ap of activeClones) {
 					const label = displayName(ap.def.name) + (ap.runId ? " *" : "");
 					cards.push(renderCard(ctx, ap, colW, theme, label));
@@ -239,6 +683,7 @@ export function renderLogGrid(ctx: AgentTeamContext, innerW: number, theme: any)
 	const slots: Array<{ label: string; lines: string[]; accent: boolean }> = [];
 	for (const ap of ctx.procs.values()) {
 		if (!isWorking(ap)) continue;
+		if (ctx.disabledAgents.has(ap.def.name.toLowerCase())) continue;
 		slots.push({ label: displayName(ap.def.name), lines: ap.logLines || [], accent: true });
 	}
 	for (const ap of ctx.batchClones) {

@@ -7,6 +7,7 @@ import { Text } from "@mariozechner/pi-tui";
 import type { AgentTeamContext } from "./core";
 import { displayName, shortModel } from "./core";
 import { MAX_RESPONSE_LENGTH } from "./orchestration";
+import { toggleSidebar, isSidebarVisible } from "./ui";
 
 export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamContext) {
 	pi.registerTool({
@@ -396,6 +397,15 @@ export function registerCommands(pi: ExtensionAPI, team: AgentTeamContext) {
 
 export function registerShortcut(pi: ExtensionAPI, team: AgentTeamContext) {
 	pi.registerShortcut("ctrl+q", {
+		description: "Toggle agent team sidebar",
+		handler: async (ctx) => {
+			if (!team.enabled) return;
+			team.wCtx = ctx;
+			toggleSidebar(team);
+		},
+	});
+	
+	pi.registerShortcut("ctrl+alt+a", {
 		description: "Toggle agent team on/off",
 		handler: async (ctx) => {
 			team.wCtx = ctx;

@@ -20,25 +20,38 @@ memory_model: opencode/mimo-v2.5-free
 subagent_team:
   - name: file_reader
     model: opencode/deepseek-v4-flash-free
+    active: true
   - name: searcher
     model: opencode/deepseek-v4-flash-free
+    active: true
   - name: coder
+    active: true
   - name: tester
     model: opencode/deepseek-v4-flash-free
+    active: true
   - name: documenter
-    model: opencode/deepseek-v4-flash-free 
+    model: opencode/deepseek-v4-flash-free
+    active: true
   - name: doc_generator
-    model: opencode/deepseek-v4-flash-free 
+    model: opencode/deepseek-v4-flash-free
+    active: true
   - name: image_analyzer
     model: opencode/mimo-v2.5-free
+    active: true
 
 
 test_subagent_team:
   - name: coder
+    active: true
   - name: documenter
+    active: true
   - name: file_reader
+    active: true
   - name: searcher
+    active: true
   - name: tester
+    active: true
   - name: image_analyzer
+    active: true
   - name: doc_generator
-  
+    active: true

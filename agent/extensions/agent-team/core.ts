@@ -58,6 +58,8 @@ export interface AgentProc {
 export interface TeamMember {
 	name: string;
 	model?: string;
+	/** Whether this subagent is active. Defaults to true when absent. */
+	active?: boolean;
 }
 
 export interface MemoryState {
@@ -78,6 +80,12 @@ export interface TeamConfig {
 	maxParallel?: number;
 	/** Tools that mark an agent as "writable" (serialized, never parallel). */
 	destructiveTools?: string[];
+	/** Agent names that are disabled by the user via the sidebar */
+	disabledAgents?: string[];
+	/** Skill directory names enabled for the orchestrator system prompt. Empty = none enabled. */
+	orchestratorSkills?: string[];
+	/** Skill directory names available to subagents. Empty = none enabled. */
+	subagentSkills?: string[];
 }
 
 /** Contract that the AgentTeam class satisfies structurally. All orchestration,
@@ -97,7 +105,7 @@ export interface AgentTeamContext {
 	/** True when the cached catalog needs to be rebuilt. */
 	catalogDirty: boolean;
 	/** Cached skills list for the system prompt. Computed once per session. */
-	skillsCache: Array<{ name: string; description: string }>;
+	skillsCache: Array<{ name: string; description: string; dir: string }>;
 	/** Cached AGENTS.md content for the system prompt. Computed once per session. */
 	agentMdCache: string | null;
 	allDefs: AgentDef[];
@@ -109,6 +117,12 @@ export interface AgentTeamContext {
 	parallelDispatch: boolean;
 	maxParallel: number;
 	batchClones: Set<AgentProc>;
+	/** Set of agent names that are temporarily disabled by the user */
+	disabledAgents: Set<string>;
+	/** Skill directory names enabled for orchestrator system prompt. Empty = none. */
+	orchestratorSkills: Set<string>;
+	/** Skill directory names available to subagents. Empty = none. */
+	subagentSkills: Set<string>;
 	animFrame: number;
 	wInvalidate: (() => void) | null;
 	gridCols: number;

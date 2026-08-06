@@ -247,6 +247,10 @@ export async function dispatch(
 		const available = Array.from(ctx.procs.values()).map(a => displayName(a.def.name)).join(", ");
 		return { output: `Agent "${agentName}" not found. Available: ${available}`, code: 1, elapsed: 0 };
 	}
+	// Check if agent is disabled by user
+	if (ctx.disabledAgents.has(agentName.toLowerCase())) {
+		return { output: `Agent "${agentName}" is disabled. Enable it from the sidebar (Ctrl+Q).`, code: 1, elapsed: 0 };
+	}
 	// Read-only agents run concurrently under the read lock; writable agents
 	// (any allowlist containing a destructive tool) take the exclusive write
 	// lock so writes/edits are NEVER parallel. serializeAgent guards the shared
@@ -392,6 +396,10 @@ export async function dispatchMany(
 			const available = Array.from(ctx.procs.values()).map(a => displayName(a.def.name)).join(", ");
 			return { ok: false, error: `Agent "${t.agent}" not found. Available: ${available}`, results: [] };
 		}
+		// Check if agent is disabled by user
+		if (ctx.disabledAgents.has(t.agent.toLowerCase())) {
+			return { ok: false, error: `Agent "${t.agent}" is disabled. Enable it from the sidebar (Ctrl+Q).`, results: [] };
+		}
 		if (isWritable(ap.def, ctx.destructiveTools)) {
 			return {
 				ok: false,
@@ -469,6 +477,10 @@ export async function dispatchAgentMany(
 		const available = Array.from(ctx.procs.values()).map(a => displayName(a.def.name)).join(", ");
 		return { ok: false, error: `Agent "${agentName}" not found. Available: ${available}`, results: [] };
 	}
+	// Check if agent is disabled by user
+	if (ctx.disabledAgents.has(agentName.toLowerCase())) {
+		return { ok: false, error: `Agent "${agentName}" is disabled. Enable it from the sidebar (Ctrl+Q).`, results: [] };
+	}
 	const writable = isWritable(ap.def, ctx.destructiveTools);
 
 	if (signal?.aborted) {
@@ -537,21 +549,32 @@ export async function activateTeam(ctx: AgentTeamContext, name: string) {
 	ctx.procs.clear();
 	ctx.activeTeam = name;
 	ctx.catalogDirty = true;
-	ctx.persist();
 
 	const members = ctx.teams[name] || [];
 	const byName = new Map(ctx.allDefs.map(d => [d.name.toLowerCase(), d]));
 
+	// Clear disabledAgents for this team's members so teams.yaml is the
+	// source of truth. Agents from other teams retain their state.
+	for (const m of members) {
+		const def = byName.get(m.name.toLowerCase());
+		if (def) ctx.disabledAgents.delete(def.name.toLowerCase());
+	}
+	// Now re-add inactive members from teams.yaml
 	for (const m of members) {
 		const def = byName.get(m.name.toLowerCase());
 		if (!def) continue;
-		ctx.procs.set(def.name.toLowerCase(), {
+		const agentKey = def.name.toLowerCase();
+		ctx.procs.set(agentKey, {
 			def,
 			teamModel: m.model,
 			model: m.model || def.model || ctx.orchestratorModel || "",
 			...blankProcState(),
 		});
+		if (m.active === false) {
+			ctx.disabledAgents.add(agentKey);
+		}
 	}
+	ctx.persist();
 }
 
 export class ProcessManager {
@@ -672,7 +695,10 @@ export class ProcessManager {
 		// explicit skills from the agent def, or all globally enabled skills if
 		// the agent def does not specify a list.
 		const skillFlags: string[] = ["--no-skills"];
-		const skillNames = ap.def.skills ?? ctx.skillsCache.map(s => s.dir);
+		const filteredSubSkills = ctx.subagentSkills.size > 0
+			? ctx.skillsCache.filter(s => ctx.subagentSkills.has(s.dir))
+			: [];
+		const skillNames = ap.def.skills ?? filteredSubSkills.map(s => s.dir);
 		for (const skillName of skillNames) {
 			const skillPath = resolveSkillPath(skillName);
 			if (skillPath) {

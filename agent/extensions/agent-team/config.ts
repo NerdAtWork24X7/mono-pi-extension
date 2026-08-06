@@ -39,21 +39,23 @@ export function parseTeamsYaml(raw: string): ParsedTeams {
 		// Named member: "  - name: worker"
 		const nm = line.match(/^\s*-\s+name:\s*(.+)$/);
 		if (nm) {
-			curMember = { name: nm[1].trim() };
+			curMember = { name: nm[1].trim(), active: true };
 			teams[cur].push(curMember);
 			continue;
 		}
 		// Simple string member: "  - worker"
 		const im = line.match(/^\s*-\s+(\S+)$/);
 		if (im) {
-			curMember = { name: im[1].trim() };
+			curMember = { name: im[1].trim(), active: true };
 			teams[cur].push(curMember);
 			continue;
 		}
-		// Member property: "    model: foo"  (indented under a named member)
+		// Member property: "    model: foo" or "    active: false"  (indented under a named member)
 		const pm = line.match(/^\s{2,}(\w+):\s*(.+)$/);
 		if (pm && curMember) {
-			if (pm[1].trim() === "model") curMember.model = pm[2].trim();
+			const key = pm[1].trim();
+			if (key === "model") curMember.model = pm[2].trim();
+			else if (key === "active") curMember.active = pm[2].trim().toLowerCase() !== "false";
 			continue;
 		}
 	}
@@ -293,6 +295,26 @@ function computeEnabledSkills(): Skill[] {
 	return out;
 }
 
+/** Discover ALL skills in getAgentDir()/skills/, including those disabled in settings.json.
+ *  Used by the sidebar so users can toggle skills on/off. */
+export function discoverAllSkills(): Skill[] {
+	const skillsDir = join(getAgentDir(), "skills");
+	if (!existsSync(skillsDir)) return [];
+	const out: Skill[] = [];
+	for (const f of readdirSync(skillsDir, { withFileTypes: true })) {
+		if (!f.isDirectory()) continue;
+		const skillMd = join(skillsDir, f.name, "SKILL.md");
+		if (!existsSync(skillMd)) continue;
+		try {
+			const raw = readFileSync(skillMd, "utf-8");
+			const fm = parseSkillFrontmatter(raw);
+			if (fm) out.push({ name: fm.name, description: fm.description, dir: f.name });
+			else out.push({ name: f.name, description: "", dir: f.name });
+		} catch { /* skip unreadable */ }
+	}
+	return out;
+}
+
 /** Load AGENTS.md content. Tries cwd first, then falls back to getAgentDir()/AGENTS.md.
  *  Returns the trimmed content, or null if neither file exists.
  *  Cached by mtimeMs of the chosen candidate; re-reads only if the file changes. */
@@ -335,6 +357,47 @@ export function loadTeamsYaml(filePath: string): ParsedTeams {
 	const parsed = parseTeamsYaml(readFileSync(filePath, "utf-8"));
 	teamsYamlCache = { key: mtime, parsed };
 	return parsed;
+}
+
+/** Serialize a ParsedTeams structure back to YAML and write to disk.
+ *  Preserves comments and ordering is best-effort (teams are rebuilt from
+ *  the in-memory data). */
+export function saveTeamsYaml(filePath: string, data: ParsedTeams): void {
+	const lines: string[] = [];
+	lines.push("# Agent Team Definitions");
+	lines.push("# ---------------------------------------------");
+	lines.push("# Simple format:");
+	lines.push("#   team_name:");
+	lines.push("#     - agent_name");
+	lines.push("#");
+	lines.push("# With model override (takes precedence over .md frontmatter model):");
+	lines.push("#   team_name:");
+	lines.push("#     - name: agent_name");
+	lines.push("#       model: provider/model-name");
+	lines.push("#");
+	lines.push("# Top-level keys:");
+	lines.push("#   memory_model: <provider>/<model>");
+	lines.push("#       Enables the per-turn project memory feature. When set, a background");
+	lines.push("#       subprocess summarizes each orchestrator turn and appends the result");
+	lines.push("#       to <cwd>/.pi_memory/project_memory.md. Leave unset/empty to disable.");
+	lines.push("");
+	if (data.memoryModel) {
+		lines.push(`memory_model: ${data.memoryModel}`);
+		lines.push("");
+	}
+	for (const [teamName, members] of Object.entries(data.teams)) {
+		lines.push(`${teamName}:`);
+		for (const m of members) {
+			// Always use named format so we can include model and active
+			lines.push(`  - name: ${m.name}`);
+			if (m.model) lines.push(`    model: ${m.model}`);
+			if (m.active === false) lines.push(`    active: false`);
+		}
+		lines.push("");
+	}
+	// Invalidate the in-memory cache since we just wrote new content.
+	teamsYamlCache = null;
+	writeFileSync(filePath, lines.join("\n") + "\n");
 }
 
 export const CONFIG_FILE = "agent-team-config.json";
