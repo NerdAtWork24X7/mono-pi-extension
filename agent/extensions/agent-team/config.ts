@@ -7,6 +7,7 @@ import type { AgentDef, TeamMember, TeamConfig } from "./core";
 export interface ParsedTeams {
 	teams: Record<string, TeamMember[]>;
 	memoryModel?: string;
+	memoryActive?: boolean;
 }
 
 export function parseTeamsYaml(raw: string): ParsedTeams {
@@ -17,18 +18,24 @@ export function parseTeamsYaml(raw: string): ParsedTeams {
 	raw = raw.replace(/\r\n?/g, "\n");
 	const teams: Record<string, TeamMember[]> = {};
 	let memoryModel: string | undefined;
+	let memoryActive: boolean | undefined;
 	let cur = "";
 	let curMember: TeamMember | null = null;
 	for (const line of raw.split("\n")) {
 		if (!line.trim() || line.trim().startsWith("#")) continue;
-		// Top-level memory_model: <provider>/<model>
-		// Must be checked BEFORE the generic team-key match, since the generic
-		// pattern would otherwise treat "memory_model" as a team name and create
-		// a phantom empty team.
+		// Nested memory_model block: "memory_model:" followed by indented model:/active:
+		const mmBlock = line.match(/^memory_model:\s*$/);
+		if (mmBlock) {
+			cur = "memory_model";
+			curMember = null;
+			memoryActive = true;
+			continue;
+		}
 		const mm = line.match(/^memory_model:\s*(.+)$/);
 		if (mm) {
 			const v = mm[1].trim();
 			if (v) memoryModel = v;
+			memoryActive = true; // legacy flat form implies active
 			cur = "";
 			curMember = null;
 			continue;
@@ -39,26 +46,35 @@ export function parseTeamsYaml(raw: string): ParsedTeams {
 		// Named member: "  - name: worker"
 		const nm = line.match(/^\s*-\s+name:\s*(.+)$/);
 		if (nm) {
-			curMember = { name: nm[1].trim() };
+			curMember = { name: nm[1].trim(), active: true };
 			teams[cur].push(curMember);
 			continue;
 		}
 		// Simple string member: "  - worker"
 		const im = line.match(/^\s*-\s+(\S+)$/);
 		if (im) {
-			curMember = { name: im[1].trim() };
+			curMember = { name: im[1].trim(), active: true };
 			teams[cur].push(curMember);
 			continue;
 		}
-		// Member property: "    model: foo"  (indented under a named member)
+		// Member property: "    model: foo" or "    active: false"  (indented under a named member)
 		const pm = line.match(/^\s{2,}(\w+):\s*(.+)$/);
 		if (pm && curMember) {
-			if (pm[1].trim() === "model") curMember.model = pm[2].trim();
+			const key = pm[1].trim();
+			if (key === "model") curMember.model = pm[2].trim();
+			else if (key === "active") curMember.active = pm[2].trim().toLowerCase() !== "false";
+			continue;
+		}
+		if (pm && cur === "memory_model" && !curMember) {
+			const key = pm[1].trim();
+			if (key === "model") memoryModel = pm[2].trim();
+			else if (key === "active") memoryActive = pm[2].trim().toLowerCase() !== "false";
 			continue;
 		}
 	}
 	const out: ParsedTeams = { teams };
 	if (memoryModel) out.memoryModel = memoryModel;
+	if (memoryActive !== undefined) out.memoryActive = memoryActive;
 	return out;
 }
 
@@ -293,6 +309,26 @@ function computeEnabledSkills(): Skill[] {
 	return out;
 }
 
+/** Discover ALL skills in getAgentDir()/skills/, including those disabled in settings.json.
+ *  Used by the sidebar so users can toggle skills on/off. */
+export function discoverAllSkills(): Skill[] {
+	const skillsDir = join(getAgentDir(), "skills");
+	if (!existsSync(skillsDir)) return [];
+	const out: Skill[] = [];
+	for (const f of readdirSync(skillsDir, { withFileTypes: true })) {
+		if (!f.isDirectory()) continue;
+		const skillMd = join(skillsDir, f.name, "SKILL.md");
+		if (!existsSync(skillMd)) continue;
+		try {
+			const raw = readFileSync(skillMd, "utf-8");
+			const fm = parseSkillFrontmatter(raw);
+			if (fm) out.push({ name: fm.name, description: fm.description, dir: f.name });
+			else out.push({ name: f.name, description: "", dir: f.name });
+		} catch { /* skip unreadable */ }
+	}
+	return out;
+}
+
 /** Load AGENTS.md content. Tries cwd first, then falls back to getAgentDir()/AGENTS.md.
  *  Returns the trimmed content, or null if neither file exists.
  *  Cached by mtimeMs of the chosen candidate; re-reads only if the file changes. */
@@ -335,6 +371,50 @@ export function loadTeamsYaml(filePath: string): ParsedTeams {
 	const parsed = parseTeamsYaml(readFileSync(filePath, "utf-8"));
 	teamsYamlCache = { key: mtime, parsed };
 	return parsed;
+}
+
+/** Serialize a ParsedTeams structure back to YAML and write to disk.
+ *  Preserves comments and ordering is best-effort (teams are rebuilt from
+ *  the in-memory data). */
+export function saveTeamsYaml(filePath: string, data: ParsedTeams): void {
+	const lines: string[] = [];
+	lines.push("# Agent Team Definitions");
+	lines.push("# ---------------------------------------------");
+	lines.push("# Simple format:");
+	lines.push("#   team_name:");
+	lines.push("#     - agent_name");
+	lines.push("#");
+	lines.push("# With model override (takes precedence over .md frontmatter model):");
+	lines.push("#   team_name:");
+	lines.push("#     - name: agent_name");
+	lines.push("#       model: provider/model-name");
+	lines.push("#");
+	lines.push("# Top-level keys:");
+	lines.push("#   memory_model:");
+	lines.push("#       model: <provider>/<model>  - enables the per-turn project memory feature.");
+	lines.push("#       active: true|false         - persistent on/off switch (sidebar toggle).");
+	lines.push("#       A background subprocess summarizes each orchestrator turn and appends");
+	lines.push("#       the result to <cwd>/.pi_memory/project_memory.md.");
+	lines.push("");
+	if (data.memoryModel) {
+		lines.push("memory_model:");
+		lines.push(`  model: ${data.memoryModel}`);
+		lines.push(`  active: ${data.memoryActive === false ? "false" : "true"}`);
+		lines.push("");
+	}
+	for (const [teamName, members] of Object.entries(data.teams)) {
+		lines.push(`${teamName}:`);
+		for (const m of members) {
+			// Always use named format so we can include model and active
+			lines.push(`  - name: ${m.name}`);
+			if (m.model) lines.push(`    model: ${m.model}`);
+			if (m.active === false) lines.push(`    active: false`);
+		}
+		lines.push("");
+	}
+	// Invalidate the in-memory cache since we just wrote new content.
+	teamsYamlCache = null;
+	writeFileSync(filePath, lines.join("\n") + "\n");
 }
 
 export const CONFIG_FILE = "agent-team-config.json";

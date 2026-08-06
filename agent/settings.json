@@ -1,9 +1,9 @@
 {
-  "lastChangelogVersion": "0.80.9",
+  "lastChangelogVersion": "0.84.0",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
-  "defaultProvider": "kilo",
-  "defaultModel": "tencent/hy3:free",
+  "defaultProvider": "opencode",
+  "defaultModel": "deepseek-v4-flash-free",
   "defaultThinkingLevel": "high",
   "packages": [
     "npm:@juicesharp/rpiv-ask-user-question",
@@ -24,13 +24,10 @@
   "enabledModels": [
     "opencode/big-pickle",
     "opencode/deepseek-v4-flash-free",
-    "opencode/nemotron-3-ultra-free",
-    "tokenrouter/MiniMax-M3",
-    "kilo/kilo-auto/free",
-    "openrouter/openrouter/free",
     "xiaomi-token-plan-ams/mimo-v2.5-pro",
     "xiaomi-token-plan-ams/mimo-v2.5",
-    "openrouter/cohere/north-mini-code:free"
+    "openrouter/cohere/north-mini-code:free",
+    "tokenrouter/moonshotai/kimi-k3-free"
   ],
   "extensions": [
     "+extensions/custom-footer.ts",

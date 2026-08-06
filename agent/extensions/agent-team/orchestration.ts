@@ -5,7 +5,7 @@ import { join } from "path";
 import type { AgentProc } from "./core";
 import type { SessionLogger } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
-import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, hasPiScopeExtension, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
+import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, hasPiScopeExtension, parseModelId, filterSkills, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext } from "./core";
 import { resolveSkillPath } from "./config";
 
@@ -130,6 +130,12 @@ export function handleMessageUpdate(ctx: AgentTeamContext, ap: AgentProc, ev: an
 	const chunk = delta.delta || "";
 	ap.collectedText += chunk;
 	ap.currentMessageText += chunk;
+	// Cap collectedText to prevent unbounded memory growth during long streams.
+	// The lastAssistantText (set on message_end) is the authoritative output;
+	// collectedText is only a fallback for process-close edge cases.
+	if (ap.collectedText.length > MAX_COLLECTED_TEXT) {
+		ap.collectedText = ap.collectedText.slice(-MAX_COLLECTED_TEXT);
+	}
 	ctx.logger.logStreamingText(ap, chunk);
 	const lastNl = chunk.lastIndexOf("\n");
 	const tail = lastNl >= 0 ? chunk.slice(lastNl + 1) : chunk;
@@ -246,6 +252,10 @@ export async function dispatch(
 	if (!ap) {
 		const available = Array.from(ctx.procs.values()).map(a => displayName(a.def.name)).join(", ");
 		return { output: `Agent "${agentName}" not found. Available: ${available}`, code: 1, elapsed: 0 };
+	}
+	// Check if agent is disabled by user
+	if (ctx.disabledAgents.has(agentName.toLowerCase())) {
+		return { output: `Agent "${agentName}" is disabled. Enable it from the sidebar (Ctrl+Q).`, code: 1, elapsed: 0 };
 	}
 	// Read-only agents run concurrently under the read lock; writable agents
 	// (any allowlist containing a destructive tool) take the exclusive write
@@ -392,6 +402,10 @@ export async function dispatchMany(
 			const available = Array.from(ctx.procs.values()).map(a => displayName(a.def.name)).join(", ");
 			return { ok: false, error: `Agent "${t.agent}" not found. Available: ${available}`, results: [] };
 		}
+		// Check if agent is disabled by user
+		if (ctx.disabledAgents.has(t.agent.toLowerCase())) {
+			return { ok: false, error: `Agent "${t.agent}" is disabled. Enable it from the sidebar (Ctrl+Q).`, results: [] };
+		}
 		if (isWritable(ap.def, ctx.destructiveTools)) {
 			return {
 				ok: false,
@@ -469,6 +483,10 @@ export async function dispatchAgentMany(
 		const available = Array.from(ctx.procs.values()).map(a => displayName(a.def.name)).join(", ");
 		return { ok: false, error: `Agent "${agentName}" not found. Available: ${available}`, results: [] };
 	}
+	// Check if agent is disabled by user
+	if (ctx.disabledAgents.has(agentName.toLowerCase())) {
+		return { ok: false, error: `Agent "${agentName}" is disabled. Enable it from the sidebar (Ctrl+Q).`, results: [] };
+	}
 	const writable = isWritable(ap.def, ctx.destructiveTools);
 
 	if (signal?.aborted) {
@@ -537,21 +555,32 @@ export async function activateTeam(ctx: AgentTeamContext, name: string) {
 	ctx.procs.clear();
 	ctx.activeTeam = name;
 	ctx.catalogDirty = true;
-	ctx.persist();
 
 	const members = ctx.teams[name] || [];
 	const byName = new Map(ctx.allDefs.map(d => [d.name.toLowerCase(), d]));
 
+	// Clear disabledAgents for this team's members so teams.yaml is the
+	// source of truth. Agents from other teams retain their state.
+	for (const m of members) {
+		const def = byName.get(m.name.toLowerCase());
+		if (def) ctx.disabledAgents.delete(def.name.toLowerCase());
+	}
+	// Now re-add inactive members from teams.yaml
 	for (const m of members) {
 		const def = byName.get(m.name.toLowerCase());
 		if (!def) continue;
-		ctx.procs.set(def.name.toLowerCase(), {
+		const agentKey = def.name.toLowerCase();
+		ctx.procs.set(agentKey, {
 			def,
 			teamModel: m.model,
 			model: m.model || def.model || ctx.orchestratorModel || "",
 			...blankProcState(),
 		});
+		if (m.active === false) {
+			ctx.disabledAgents.add(agentKey);
+		}
 	}
+	ctx.persist();
 }
 
 export class ProcessManager {
@@ -660,11 +689,7 @@ export class ProcessManager {
 		// --tools uses the agent's prompt-file tools as the allowlist.
 
 		// Split provider from model if model contains a provider prefix
-		// e.g. "openrouter/baidu/cobuddy:free" → provider="openrouter", model="baidu/cobuddy:free"
-		const slashIdx = model.indexOf("/");
-		const hasProvider = slashIdx > 0;
-		const provider = hasProvider ? model.slice(0, slashIdx) : undefined;
-		const modelName = hasProvider ? model.slice(slashIdx + 1) : model;
+		const { provider, model: modelName } = parseModelId(model);
 
 		const extPaths = this.cachedExtPaths();
 
@@ -672,7 +697,8 @@ export class ProcessManager {
 		// explicit skills from the agent def, or all globally enabled skills if
 		// the agent def does not specify a list.
 		const skillFlags: string[] = ["--no-skills"];
-		const skillNames = ap.def.skills ?? ctx.skillsCache.map(s => s.dir);
+		const filteredSubSkills = filterSkills(ctx.skillsCache, ctx.subagentSkills);
+		const skillNames = ap.def.skills ?? filteredSubSkills.map(s => s.dir);
 		for (const skillName of skillNames) {
 			const skillPath = resolveSkillPath(skillName);
 			if (skillPath) {

@@ -8,5 +8,12 @@
     "write",
     "edit",
     "doc_generator"
-  ]
+  ],
+  "disabledAgents": [
+    "documenter",
+    "doc_generator",
+    "image_analyzer"
+  ],
+  "orchestratorSkills": [],
+  "subagentSkills": []
 }

@@ -58,6 +58,8 @@ export interface AgentProc {
 export interface TeamMember {
 	name: string;
 	model?: string;
+	/** Whether this subagent is active. Defaults to true when absent. */
+	active?: boolean;
 }
 
 export interface MemoryState {
@@ -78,6 +80,12 @@ export interface TeamConfig {
 	maxParallel?: number;
 	/** Tools that mark an agent as "writable" (serialized, never parallel). */
 	destructiveTools?: string[];
+	/** Agent names that are disabled by the user via the sidebar */
+	disabledAgents?: string[];
+	/** Skill directory names enabled for the orchestrator system prompt. Empty = none enabled. */
+	orchestratorSkills?: string[];
+	/** Skill directory names available to subagents. Empty = none enabled. */
+	subagentSkills?: string[];
 }
 
 /** Contract that the AgentTeam class satisfies structurally. All orchestration,
@@ -97,7 +105,7 @@ export interface AgentTeamContext {
 	/** True when the cached catalog needs to be rebuilt. */
 	catalogDirty: boolean;
 	/** Cached skills list for the system prompt. Computed once per session. */
-	skillsCache: Array<{ name: string; description: string }>;
+	skillsCache: Array<{ name: string; description: string; dir: string }>;
 	/** Cached AGENTS.md content for the system prompt. Computed once per session. */
 	agentMdCache: string | null;
 	allDefs: AgentDef[];
@@ -109,11 +117,21 @@ export interface AgentTeamContext {
 	parallelDispatch: boolean;
 	maxParallel: number;
 	batchClones: Set<AgentProc>;
+	/** Set of agent names that are temporarily disabled by the user */
+	disabledAgents: Set<string>;
+	/** Skill directory names enabled for orchestrator system prompt. Empty = none. */
+	orchestratorSkills: Set<string>;
+	/** Skill directory names available to subagents. Empty = none. */
+	subagentSkills: Set<string>;
 	animFrame: number;
 	wInvalidate: (() => void) | null;
 	gridCols: number;
 	memoryManager: any; // MemoryManager | null (typed in memory.ts; elided here to avoid circular import)
 	memoryModel: string;
+	memoryFile: string;
+	memoryDir: string;
+	originalMemoryModel: string; // preserved value for re-enabling after toggle off
+	memoryActive: boolean; // persisted on/off switch from teams.yaml memory_model.active
 	resizeHandler: () => void; // bound closure used by initWidget + session_shutdown
 
 	// Callbacks
@@ -140,9 +158,9 @@ export interface AgentTeamContext {
 	/** Serialize dispatches to the SAME agent so its shared AgentProc state never collides. */
 	serializeAgent: (name: string, fn: () => Promise<any>) => Promise<any>;
 	/** Batched parallel dispatch of read-only subagents. */
-	dispatchMany: (tasks: Array<{ agent: string; task: string }>) => Promise<BatchDispatchResult>;
+	dispatchMany: (tasks: Array<{ agent: string; task: string }>, signal?: AbortSignal) => Promise<BatchDispatchResult>;
 	/** Run the SAME agent across many tasks (one isolated clone per task). */
-	dispatchAgentMany: (agentName: string, tasks: string[]) => Promise<BatchDispatchResult>;
+	dispatchAgentMany: (agentName: string, tasks: string[], signal?: AbortSignal) => Promise<BatchDispatchResult>;
 }
 
 // ── Utilities ──
@@ -155,6 +173,31 @@ export function shortModel(model: string): string {
 	const i = model.lastIndexOf("/");
 	return i >= 0 ? model.slice(i + 1) : model;
 }
+
+/** Split a provider-prefixed model ID into provider and model name.
+ *  e.g. "openrouter/baidu/cobuddy:free" → { provider: "openrouter", model: "baidu/cobuddy:free" }
+ *  Returns provider=undefined when there is no prefix. */
+export function parseModelId(full: string): { provider: string | undefined; model: string } {
+	const slashIdx = full.indexOf("/");
+	if (slashIdx > 0) {
+		return { provider: full.slice(0, slashIdx), model: full.slice(slashIdx + 1) };
+	}
+	return { provider: undefined, model: full };
+}
+
+/** Filter skills by an enable-set. Returns all skills when the set is empty
+ *  (meaning no filter), otherwise only skills whose `dir` is in the set. */
+export function filterSkills(
+	skills: Array<{ name: string; description: string; dir: string }>,
+	enabledSet: Set<string>,
+): Array<{ name: string; description: string; dir: string }> {
+	if (enabledSet.size === 0) return [];
+	return skills.filter(s => enabledSet.has(s.dir));
+}
+
+/** Max bytes allowed for `collectedText` during streaming. Prevents unbounded
+ *  memory growth if a subagent emits extremely long output. */
+export const MAX_COLLECTED_TEXT = 1 << 20; // 1 MiB
 
 export const displayName = (name: string) =>
 	name.split("-").map(w => w[0].toUpperCase() + w.slice(1)).join(" ");
