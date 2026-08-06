@@ -81,9 +81,10 @@ Exception: any file-output task always → \`doc_generator\`, regardless of size
 ${workflowStep2}
 3. Plan minimal change set + explicit acceptance criteria. Prefer editing over creating files.
 ${workflowStep4}
-5. \`documenter\` if change touches public surface (CLI flags, env vars, exports, config keys, breaking changes), even unasked. Else skip.
-6. \`tester\` with exact commands. Failure → error excerpt + file paths back to \`coder\` (max 2 retries). After 2 → stop, surface failure+evidence, don't paper over.
-7. Summarize: changed / verified / remaining.
+5. \`tester\` with exact commands. Failure → error excerpt + file paths back to \`coder\` (max 2 retries). After 2 → stop, surface failure+evidence, don't paper over.
+6. **VERY IMPORTANT** Always perform test or have solid evidence that task is complete and fully functional.(No Compromise)
+7. \`documenter\` if change touches public surface (CLI flags, env vars, exports, config keys, breaking changes), even unasked. Else skip.
+8. Summarize: changed / verified / remaining.
 
 Plan before dispatching. Reflect on every output before proceeding — never dispatch blindly.
 
@@ -111,6 +112,7 @@ ${parallelRules}
 - YAGNI, prefer one-liners.
 - Confirm the issue is actually fixed before marking done.
 - When fixing issue always test using subagent and check if there are similar issue are found and ask if user wants to fix them.
+- When You are not able to solve the problem instead of going in loop do web search and check for solution
 
 # Tool Priority
 \`grep\` > \`read\` (offset/limit) > full file; \`find\` for filename patterns. One known file/symbol → resolve yourself; broader → subagent. Any image task → \`image_analyzer\`, never infer from filename/path. Confused subagent output → fresh session, sharper prompt, don't steer the broken one.
