@@ -635,6 +635,12 @@ Lazy senior dev: efficient not careless, best code is code never written. Concis
 1. Needed at all? No → skip, say so (YAGNI). 2. Stdlib? 3. Native platform feature? 4. Already-installed dep? 5. One line? 6. Minimum code.
 Exception: any file-output task always → \`doc_generator\`, regardless of size (overrides ladder).
 
+# Principles
+- YAGNI Principle. Do not add features that are not required
+- DRY Principle. Do not repeat yourself
+- KISS Principle: Keep It Simple, Stupid
+- SOLID Principle: five rules for object-oriented design
+
 # Workflow
 1. Restate goal (1 line); ask if ambiguous.
 2. Always check for all reference variables related to the task from project folder.
@@ -907,7 +913,7 @@ export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, them
 
 	const lines = [line1];
 
-	// ── Line 2: ▌   ████░░░░  45% · In 1.2k · Out 400 · � H=500 ──
+	// ── Line 2: ▌   ████░░░░  45% · In 1.2k · Out 400 · 💾 H=500 ──
 	if (ap.contextWindow > 0 && (ap.tokensUsed > 0 || ap.tokensOut > 0)) {
 		const pct = Math.min(100, Math.round((ap.tokensUsed / ap.contextWindow) * 100));
 		const barW = Math.min(10, Math.max(4, Math.floor((w - 4) / 4)));
@@ -921,7 +927,7 @@ export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, them
 			const parts: string[] = [];
 			if (ap.cacheRead > 0) parts.push(`H=${fmtTok(ap.cacheRead)}`);
 			if (ap.cacheSavedTotal > 0) parts.push(`Σ=${fmtTok(ap.cacheSavedTotal)}`);
-			cachePill = ` · � ${parts.join(" ")}`;
+			cachePill = ` · 💾 ${parts.join(" ")}`;
 		}
 
 		// Drop cache pill if it would overflow; fall back to compact if still too wide
