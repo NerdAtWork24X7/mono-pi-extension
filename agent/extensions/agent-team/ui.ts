@@ -407,7 +407,7 @@ export function openSidebar(ctx: AgentTeamContext) {
 							// Toggle memory on/off
 							if (ctx.memoryManager) {
 								// Disable — preserve original model for re-enabling
-								try { ctx.memoryManager.awaitIdle?.(0); } catch {}
+								try { ctx.memoryManager.awaitIdle?.(0); } catch { }
 								ctx.memoryManager = null;
 								ctx.memoryModel = "";
 								ctx.memoryFile = "";
@@ -517,7 +517,7 @@ export function openSidebar(ctx: AgentTeamContext) {
 					}
 				},
 
-				invalidate() {},
+				invalidate() { },
 				wantsKeyRelease: false,
 			};
 
@@ -584,12 +584,12 @@ export function buildSystemPrompt(args: {
 	// Workflow steps 2 and 4 must match parallelRules exactly, or a
 	// parallel:false run gets Workflow text telling it to batch dispatches
 	// while Hard Rules simultaneously forbids it.
-	const workflowStep2 = args.parallel === false
-		? `2. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer. Dispatch each one at a time via \`dispatch_agent\` (see Hard Rules — parallelism is off).`
-		: `2. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer; batch independent read-only lookups into a single \`dispatch_agents\` call to run them in parallel.`;
-	const workflowStep4 = args.parallel === false
-		? `4. **Dispatch the right subagent**, one at a time via \`dispatch_agent\`. Check every result against acceptance criteria before proceeding. If a writable agent's output fails acceptance criteria twice in a row, stop and surface it to the user rather than re-dispatching a third time.`
-		: `4. **Dispatch the right subagent.** Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). Writable agents (coder, documenter, doc_generator, …): use \`dispatch_agent\` one at a time. Check every result against acceptance criteria before proceeding.`;
+	const workflowStep3 = args.parallel === false
+		? `3. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer. Dispatch each one at a time via \`dispatch_agent\` (see Hard Rules — parallelism is off).`
+		: `3. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer; batch independent read-only lookups into a single \`dispatch_agents\` call to run them in parallel.`;
+	const workflowStep5 = args.parallel === false
+		? `5. **Dispatch the right subagent**, one at a time via \`dispatch_agent\`. Check every result against acceptance criteria before proceeding. If a writable agent's output fails acceptance criteria twice in a row, stop and surface it to the user rather than re-dispatching a third time.`
+		: `5. **Dispatch the right subagent.** Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). Writable agents (coder, documenter, doc_generator, …): use \`dispatch_agent\` one at a time. Check every result against acceptance criteria before proceeding.`;
 
 	const harshCriticSection = args.harshCriticEnabled
 		? `\n# Harsh Critic Gate
@@ -618,10 +618,10 @@ export function buildSystemPrompt(args: {
 		: "";
 	const skillsSection = args.skills && args.skills.length > 0
 		? `\n# Available Skills\n\nConsult these yourself before planning step 3 if the task matches; they inform *your* plan and acceptance criteria, not a subagent's prompt — subagents don't read this list.\n\n${args.skills.map(s => {
-				const agents = args.skillAgentMap?.[s.name];
-				const agentSuffix = agents && agents.length > 0 ? ` (agents: ${agents.join(", ")})` : "";
-				return `- **${s.name}**: ${s.description}${agentSuffix}`;
-			}).join("\n")}\n`
+			const agents = args.skillAgentMap?.[s.name];
+			const agentSuffix = agents && agents.length > 0 ? ` (agents: ${agents.join(", ")})` : "";
+			return `- **${s.name}**: ${s.description}${agentSuffix}`;
+		}).join("\n")}\n`
 		: "";
 	return {
 		systemPrompt: `
@@ -637,11 +637,12 @@ Exception: any file-output task always → \`doc_generator\`, regardless of size
 
 # Workflow
 1. Restate goal (1 line); ask if ambiguous.
-${workflowStep2}
-3. Plan minimal change set + explicit acceptance criteria. Prefer editing over creating files.
-${workflowStep4}
-5. \`tester\` with exact commands. Failure → error excerpt + file paths back to \`coder\` (max 2 retries). After 2 → stop, surface failure+evidence, don't paper over.
-6. **VERY IMPORTANT** Always perform test or have solid evidence that task is complete and fully functional.(No Compromise)
+2. Always check for all reference variables related to the task from project folder.
+3. ${workflowStep3}
+4. Plan minimal change set + explicit acceptance criteria. Prefer editing over creating files.
+5. ${workflowStep5}
+6. \`tester\` with exact commands. Failure → error excerpt + file paths back to \`coder\` (max 2 retries). After 2 → stop, surface failure+evidence, don't paper over.
+7. **VERY IMPORTANT** Always perform test or have solid evidence that task is complete and fully functional.(No Compromise)
 7. \`documenter\` if change touches public surface (CLI flags, env vars, exports, config keys, breaking changes), even unasked. Else skip.
 8. Summarize: changed / verified / remaining.
 
