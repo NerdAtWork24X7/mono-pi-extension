@@ -623,10 +623,11 @@ For each capability, use its subagent ONLY if it is active; otherwise YOU do the
 - Web search / fetch: ${routeWeb}.
 - Code edit / creation: ${routeCoder}.
 - File-output generation (.xlsx/.pdf/.docx/.pptx/.html/.csv/.json/…): ${routeDocGen}.
+- Post-deliverable critique: ${routeCritic}.
 - Run tests / build / verify: ${routeTester}.
 - Public-surface documentation: ${routeDocumenter}.
 - Image analysis: ${routeImage}.
-- Post-deliverable critique: ${routeCritic}.
+
 `;
 
 	// When parallelism is disabled, instruct the orchestrator to serialize
@@ -646,11 +647,11 @@ For each capability, use its subagent ONLY if it is active; otherwise YOU do the
 		? `Dispatch ${lookupAgents.join("/")} only if current context can't answer`
 		: `No read-only lookup subagent active — read context yourself with host tools (read/grep/find/ls)`;
 	const workflowStep3 = args.parallel === false
-		? `3. **Fill context gaps.** ${readOnlyNote}; dispatch each one at a time via \`dispatch_agent\` (see Hard Rules — parallelism is off).`
-		: `3. **Fill context gaps.** ${readOnlyNote}${readOnlyAgents.length > 0 ? `; batch independent read-only lookups into a single \`dispatch_agents\` call to run them in parallel` : ``}.`;
+		? ` **Fill context gaps.** ${readOnlyNote}; dispatch each one at a time via \`dispatch_agent\` (see Hard Rules — parallelism is off).`
+		: ` **Fill context gaps.** ${readOnlyNote}${readOnlyAgents.length > 0 ? `; batch independent read-only lookups into a single \`dispatch_agents\` call to run them in parallel` : ``}.`;
 	const workflowStep5 = args.parallel === false
-		? `5. **Dispatch the right subagent**, one at a time via \`dispatch_agent\`. If no writable subagent is active, do the work yourself (see Task Routing). Check every result against acceptance criteria before proceeding. If a writable agent's output fails acceptance criteria twice in a row, stop and surface it to the user rather than re-dispatching a third time.`
-		: `5. **Dispatch the right subagent.** ${readOnlyAgents.length > 0 ? `Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). ` : ``}${writableAgents.length > 0 ? `Writable agents (${writableAgents.join(", ")}): use \`dispatch_agent\` one at a time. ` : `No writable subagent active — do the work yourself (see Task Routing). `}Check every result against acceptance criteria before proceeding.`;
+		? ` **Dispatch the right subagent**, one at a time via \`dispatch_agent\`. If no writable subagent is active, do the work yourself (see Task Routing). Check every result against acceptance criteria before proceeding. If a writable agent's output fails acceptance criteria twice in a row, stop and surface it to the user rather than re-dispatching a third time.`
+		: ` **Dispatch the right subagent.** ${readOnlyAgents.length > 0 ? `Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). ` : ``}${writableAgents.length > 0 ? `Writable agents (${writableAgents.join(", ")}): use \`dispatch_agent\` one at a time. ` : `No writable subagent active — do the work yourself (see Task Routing). `}Check every result against acceptance criteria before proceeding.`;
 
 	const harshCriticSection = args.harshCriticEnabled
 		? `\n# Harsh Critic Gate
@@ -694,17 +695,20 @@ Exception: any file-output task always → ${routeDocGen}, regardless of size (o
 - DRY Principle. Do not repeat yourself
 - KISS Principle: Keep It Simple, Stupid
 - SOLID Principle: five rules for object-oriented design
+
 ${routingSection}
+
 # Workflow
 1. Restate goal (1 line); ask if ambiguous.
 2. Always check for all reference variables related to the task from project folder.
 3. ${workflowStep3}
 4. Plan minimal change set + explicit acceptance criteria. Prefer editing over creating files.
 5. ${workflowStep5}
-6. ${routeTester}. ${isOn("coder") ? `Failure → error excerpt + file paths back to \`coder\` (max 2 retries).` : `Failure → error excerpt + file paths; fix directly yourself (max 2 retries).`} After 2 → stop, surface failure+evidence, don't paper over.
-7. **VERY IMPORTANT** Always perform test or have solid evidence that task is complete and fully functional.(No Compromise)
-8. ${routeDocumenter} if change touches public surface (CLI flags, env vars, exports, config keys, breaking changes), even unasked. Else skip.
-9. Summarize: changed / verified / remaining.
+6. **Quality gate before verification** — ${routeCritic}.
+7. ${routeTester}. ${isOn("coder") ? `Failure → error excerpt + file paths back to \`coder\` (max 2 retries).` : `Failure → error excerpt + file paths; fix directly yourself (max 2 retries).`} After 2 → stop, surface failure+evidence, don't paper over.
+8. **VERY IMPORTANT** Always perform test or have solid evidence that task is complete and fully functional.(No Compromise)
+9. ${routeDocumenter} if change touches public surface (CLI flags, env vars, exports, config keys, breaking changes), even unasked. Else skip.
+10. Summarize: changed / verified / remaining.
 
 Plan before dispatching. Reflect on every output before proceeding — never dispatch blindly.
 
