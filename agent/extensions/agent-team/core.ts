@@ -459,7 +459,8 @@ export class SessionLogger {
 	/** Store each line RAW (no outer box): the widget wraps it in the per-agent
 	 *  panel border at the actual widget width, so box-drawing here would
 	 *  mismatch. Used for subprocess stderr and memory notes. */
-	logBoxed(msg: string, ap: AgentProc) {
+	logBoxed(msg: string, ap?: AgentProc | null) {
+		if (!ap) return;
 		const trimmed = msg.endsWith("\n") ? msg.slice(0, -1) : msg;
 		for (const ln of trimmed.split("\n")) this.push(ap, ln);
 	}
@@ -506,11 +507,29 @@ export class SessionLogger {
 	}
 
 	logToolStart(ap: AgentProc, tool: string, detail: string) {
-		this.push(ap, `┌ ${tool}${detail ? " " + detail : ""}`);
+		this.push(ap, `▶ ${tool}${detail ? " " + detail : ""}`);
 	}
 
 	logToolEnd(ap: AgentProc, tool: string, ok: boolean, durMs?: number) {
-		this.push(ap, `└ ${ok ? "✓" : "✗"} ${tool}${durMs ? ` (${Math.round(durMs)}ms)` : ""}`);
+		const tag = ok ? "✓" : "✗";
+		const dur = durMs ? ` (${Math.round(durMs)}ms)` : "";
+		// Mark the tool-call line in place (no separate status line). Scan
+		// backwards for the most recent line that starts with `▶ <tool>` — an
+		// already-ended call carries ✓/✗ instead, so this always finds the
+		// in-flight one even under parallel/out-of-order tool events or ring
+		// buffer rollover, and never corrupts a different line. The word
+		// boundary check keeps a `▶ Task #…` header from matching a tool
+		// whose name is a prefix of another string.
+		for (let i = ap.logLines.length - 1; i >= 0; i--) {
+			const line = ap.logLines[i];
+			if (line.startsWith(`▶ ${tool}`) && (line.length === tool.length + 2 || line[tool.length + 2] === " ")) {
+				ap.logLines[i] = tag + line.slice(1) + dur;
+				return;
+			}
+		}
+		// No recorded start (e.g. tool_end without tool_start) — keep the line
+		// unambiguous rather than silently dropping the event.
+		this.push(ap, `${tag} ${tool}${dur}`);
 	}
 
 	logDoneBox(ap: AgentProc, elapsedSec: number, tools: number) {

@@ -17,6 +17,7 @@ import type {
 } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ProviderModelConfig } from "@mariozechner/pi-coding-agent";
 import { visibleWidth } from "@mariozechner/pi-tui";
+import { loadCachedModels } from "./agent-team/model-cache";
 
 // =============================================================================
 // Constants
@@ -363,9 +364,14 @@ const KILO_PROVIDER_CONFIG = {
 
 export default async function (pi: ExtensionAPI) {
   // Fetch free models at load time so the provider is immediately usable.
+  // Cached to disk: the agent-team extension loads this file into every
+  // spawned subagent, so a warm cache avoids a network fetch per subagent
+  // boot (up to 10s timeout). The host process refreshes it here.
   let freeModels: ProviderModelConfig[] = [];
   try {
-    freeModels = await fetchKiloModels({ freeOnly: true });
+    freeModels = await loadCachedModels("kilo-free-models", () =>
+      fetchKiloModels({ freeOnly: true }),
+    );
   } catch (error) {
     console.warn(
       "[kilo] Failed to fetch free models at startup:",
@@ -441,7 +447,9 @@ export default async function (pi: ExtensionAPI) {
     }
 
     try {
-      cachedAllModels = await fetchKiloModels({ token });
+      cachedAllModels = await loadCachedModels("kilo-models", () =>
+        fetchKiloModels({ token }),
+      );
     } catch (error) {
       console.warn(
         "[kilo] Failed to fetch models at session start:",

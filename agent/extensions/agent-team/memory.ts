@@ -440,12 +440,12 @@ export class MemoryManager {
 				this.invalidate();
 			}, 500);
 
-			// Readiness probe — mirrors process.ts. Wait 500ms, then ask for state.
-			setTimeout(() => {
-				if (ready) return;
-				if (!sub.proc.stdin || !sub.proc.stdin.writable) return;
-				try { sub.proc.stdin.write(JSON.stringify({ type: "get_state" }) + "\n"); } catch { }
-			}, 500);
+			// Readiness probe — mirrors orchestration.ts. Send get_state
+			// immediately; the child's stdin pipe buffers it until its RPC reader
+			// is up, so no fixed startup delay is needed.
+			if (ready) return;
+			if (!sub.proc.stdin || !sub.proc.stdin.writable) return;
+			try { sub.proc.stdin.write(JSON.stringify({ type: "get_state" }) + "\n"); } catch { }
 		});
 	}
 }
