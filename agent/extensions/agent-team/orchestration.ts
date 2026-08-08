@@ -171,22 +171,54 @@ export function handleMessageEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) 
 	ctx.invalidate();
 }
 
+/** Format a single tool-call argument for the log line. Strings are sliced to
+ *  80 chars; arrays/objects become compact JSON. Null/undefined/empty values
+ *  are skipped so a tool never renders with a dangling `=`. */
+function fmtToolArg(v: unknown): string {
+	if (v === null || v === undefined) return "";
+	if (typeof v === "string") return v.trim() ? v.slice(0, 80) : "";
+	if (typeof v === "number" || typeof v === "boolean") return String(v);
+	// objects / arrays → compact JSON (skip empty containers)
+	try {
+		const s = JSON.stringify(v);
+		return s && s !== "[]" && s !== "{}" ? s.slice(0, 80) : "";
+	} catch {
+		return String(v).slice(0, 80);
+	}
+}
+
 export function handleToolStart(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
 	ap.toolCount++;
 	let detail = "";
-	const args = ev.args;
-	if (args && typeof args === "object") {
-		detail = Object.entries(args)
-			.filter(([, v]) => typeof v === "string")
-			.map(([k, v]) => `${k}=${(v as string).slice(0, 80)}`)
-			.join(" ");
+	let args: unknown = ev.args;
+	// Some hosts serialize args as a JSON string rather than an object.
+	if (typeof args === "string") {
+		try { args = JSON.parse(args); } catch { /* keep the raw string */ }
 	}
-	ctx.logger.logToolStart(ap, ev.toolName, detail);
+	if (args && typeof args === "object" && !Array.isArray(args)) {
+		detail = Object.entries(args as Record<string, unknown>)
+			.map(([k, v]) => {
+				const s = fmtToolArg(v);
+				return s ? `${k}=${s}` : "";
+			})
+			.filter(Boolean)
+			.join(" ");
+	} else if (Array.isArray(args)) {
+		detail = (args as unknown[]).map(fmtToolArg).filter(Boolean).join(" ");
+	} else if (typeof args === "string" && args.trim()) {
+		detail = args.slice(0, 80);
+	}
+	// Never render a bare tool name: a call with no visible args is still
+	// meaningful, and a blank detail reads as a logging bug.
+	ctx.logger.logToolStart(ap, ev.toolName, detail || "(no args)");
 	ctx.invalidate();
 }
 
 export function handleToolEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
 	ctx.logger.logToolEnd(ap, ev.toolName, !ev.isError, ev.durationMs);
+	// The ✓/✗ + duration update rewrites the tool-start line in place; make
+	// sure the TUI repaints it instead of waiting for the next event.
+	ctx.invalidate();
 }
 
 export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
