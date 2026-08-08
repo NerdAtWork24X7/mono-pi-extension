@@ -641,14 +641,6 @@ For each capability, use its subagent ONLY if it is active; otherwise YOU do the
 	// Workflow steps 3 and 5 must match parallelRules exactly, or a
 	// parallel:false run gets Workflow text telling it to batch dispatches
 	// while Hard Rules simultaneously forbids it.
-<<<<<<< HEAD
-	const workflowStep3 = args.parallel === false
-		? `3. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer. Dispatch each one at a time via \`dispatch_agent\` (see Hard Rules — parallelism is off).`
-		: `3. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer; batch independent read-only lookups into a single \`dispatch_agents\` call to run them in parallel.`;
-	const workflowStep5 = args.parallel === false
-		? `5. **Dispatch the right subagent**, one at a time via \`dispatch_agent\`. Check every result against acceptance criteria before proceeding. If a writable agent's output fails acceptance criteria twice in a row, stop and surface it to the user rather than re-dispatching a third time.`
-		: `5. **Dispatch the right subagent.** Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). Writable agents (coder, documenter, doc_generator, …): use \`dispatch_agent\` one at a time. Check every result against acceptance criteria before proceeding.`;
-=======
 	const readOnlyNote = lookupAgents.length > 0
 		? `Dispatch ${lookupAgents.join("/")} only if current context can't answer`
 		: `No read-only lookup subagent active — read context yourself with host tools (read/grep/find/ls)`;
@@ -658,7 +650,6 @@ For each capability, use its subagent ONLY if it is active; otherwise YOU do the
 	const workflowStep5 = args.parallel === false
 		? `5. **Dispatch the right subagent**, one at a time via \`dispatch_agent\`. If no writable subagent is active, do the work yourself (see Task Routing). Check every result against acceptance criteria before proceeding. If a writable agent's output fails acceptance criteria twice in a row, stop and surface it to the user rather than re-dispatching a third time.`
 		: `5. **Dispatch the right subagent.** ${readOnlyAgents.length > 0 ? `Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). ` : ``}${writableAgents.length > 0 ? `Writable agents (${writableAgents.join(", ")}): use \`dispatch_agent\` one at a time. ` : `No writable subagent active — do the work yourself (see Task Routing). `}Check every result against acceptance criteria before proceeding.`;
->>>>>>> refs/checkpoints/cwd-L2hvbWUvYWxleGEv/msjzq3au-0k2ehz
 
 	const harshCriticSection = args.harshCriticEnabled
 		? `\n# Harsh Critic Gate
@@ -669,16 +660,6 @@ For each capability, use its subagent ONLY if it is active; otherwise YOU do the
 	const orchestratorToolsSection = args.orchestratorTools && args.orchestratorTools.length > 0
 		? `\n# Orchestrator Tools\n\nActive tools available to you directly (without dispatching a subagent):\n${args.orchestratorTools.join(", ")}\n`
 		: "";
-<<<<<<< HEAD
-	const readOnlyAgents = args.readOnlyAgents || [];
-	const writableAgents = args.readOnlyAgents
-		? args.catalog.split(/^### /m)
-			.filter(Boolean)
-			.map(block => block.split("\n")[0].trim())
-			.filter(name => !readOnlyAgents.includes(name))
-		: [];
-=======
->>>>>>> refs/checkpoints/cwd-L2hvbWUvYWxleGEv/msjzq3au-0k2ehz
 	const subagentsSummary = args.readOnlyAgents
 		? `\n**Read-only (parallelizable via dispatch_agents):** ${readOnlyAgents.join(", ") || "none"}\n**Writable (serialized via dispatch_agent):** ${writableAgents.join(", ") || "none"}\n`
 		: "";
@@ -712,28 +693,17 @@ Exception: any file-output task always → ${routeDocGen}, regardless of size (o
 - DRY Principle. Do not repeat yourself
 - KISS Principle: Keep It Simple, Stupid
 - SOLID Principle: five rules for object-oriented design
-<<<<<<< HEAD
-
-=======
 ${routingSection}
->>>>>>> refs/checkpoints/cwd-L2hvbWUvYWxleGEv/msjzq3au-0k2ehz
 # Workflow
 1. Restate goal (1 line); ask if ambiguous.
 2. Always check for all reference variables related to the task from project folder.
 3. ${workflowStep3}
 4. Plan minimal change set + explicit acceptance criteria. Prefer editing over creating files.
 5. ${workflowStep5}
-<<<<<<< HEAD
-6. \`tester\` with exact commands. Failure → error excerpt + file paths back to \`coder\` (max 2 retries). After 2 → stop, surface failure+evidence, don't paper over.
-7. **VERY IMPORTANT** Always perform test or have solid evidence that task is complete and fully functional.(No Compromise)
-7. \`documenter\` if change touches public surface (CLI flags, env vars, exports, config keys, breaking changes), even unasked. Else skip.
-8. Summarize: changed / verified / remaining.
-=======
 6. ${routeTester}. ${isOn("coder") ? `Failure → error excerpt + file paths back to \`coder\` (max 2 retries).` : `Failure → error excerpt + file paths; fix directly yourself (max 2 retries).`} After 2 → stop, surface failure+evidence, don't paper over.
 7. **VERY IMPORTANT** Always perform test or have solid evidence that task is complete and fully functional.(No Compromise)
 8. ${routeDocumenter} if change touches public surface (CLI flags, env vars, exports, config keys, breaking changes), even unasked. Else skip.
 9. Summarize: changed / verified / remaining.
->>>>>>> refs/checkpoints/cwd-L2hvbWUvYWxleGEv/msjzq3au-0k2ehz
 
 Plan before dispatching. Reflect on every output before proceeding — never dispatch blindly.
 
@@ -765,11 +735,7 @@ ${parallelRules}
 - When You are not able to solve the problem instead of going in loop do web search and check for solution
 
 # Tool Priority
-<<<<<<< HEAD
-\`grep\` > \`read\` (offset/limit) > full file; \`find\` for filename patterns. One known file/symbol → resolve yourself; broader → subagent. Any image task → \`image_analyzer\`, never infer from filename/path. Confused subagent output → fresh session, sharper prompt, don't steer the broken one.
-=======
 \`grep\` > \`read\` (offset/limit) > full file; \`find\` for filename patterns. One known file/symbol → resolve yourself; broader → subagent. Any image task → ${routeImage}. Confused subagent output → fresh session, sharper prompt, don't steer the broken one.
->>>>>>> refs/checkpoints/cwd-L2hvbWUvYWxleGEv/msjzq3au-0k2ehz
 ${orchestratorToolsSection}${memSection}
 
 # Subagents
