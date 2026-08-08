@@ -9,6 +9,12 @@ import { displayName, shortModel } from "./core";
 import { MAX_RESPONSE_LENGTH } from "./orchestration";
 import { toggleSidebar, isSidebarVisible } from "./ui";
 
+/** Get agent display info: [name][model] tag */
+function agentTag(team: AgentTeamContext, name: string): string {
+	const apRef = team.procs.get(name.toLowerCase());
+	return `[${name}][${apRef ? shortModel(apRef.model) : "?"}]`;
+}
+
 export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamContext) {
 	pi.registerTool({
 		name: "dispatch_agent",
@@ -24,6 +30,7 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 			const { agent, task, tasks } = params as { agent: string; task?: string; tasks?: string[] };
 			if (!team.enabled) return {
 				content: [{ type: "text", text: "Agent team is disabled. /agents-team-toggle on" }],
+				details: {},
 			};
 
 			const multi = Array.isArray(tasks) && tasks.length > 0;
@@ -31,6 +38,7 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 			if (!multi && !single) {
 				return {
 					content: [{ type: "text", text: "dispatch_agent requires either `task` (string) or non-empty `tasks` (array of strings for the same agent)." }],
+					details: {},
 				};
 			}
 
@@ -40,7 +48,7 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 			// only the clones it created for this call.
 			let abortHandler: (() => void) | undefined;
 			try {
-				const tag = this.agentTag(agent);
+				const tag = agentTag(team, agent);
 
 				onUpdate?.({
 					content: [{ type: "text", text: `${tag} - ${multi ? `dispatching ${tasks!.length} task(s)...` : "dispatching..."}` }],
@@ -118,12 +126,6 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 			}
 		},
 
-		/** Get agent display info: [name][model] tag */
-		agentTag(name: string): string {
-			const apRef = team.procs.get(name.toLowerCase());
-			return `[${name}][${apRef ? shortModel(apRef.model) : "?"}]`;
-		},
-
 		renderCall(args, theme) {
 			const a = (args as any).agent || "?";
 			const t = (args as any).task || "";
@@ -132,7 +134,7 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 			const text = t || (Array.isArray(tasksArr) ? `${tasksArr.length} task(s)` : "");
 			return new Text(
 				theme.fg("toolTitle", theme.bold("dispatch_agent ")) +
-				theme.fg("accent", `${this.agentTag(a)}${multiLabel} - `) +
+				theme.fg("accent", `${agentTag(team, a)}${multiLabel} - `) +
 				theme.fg("muted", text),
 				0, 0,
 			);
@@ -140,9 +142,9 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 
 		renderResult(result, options, theme) {
 			const d = result.details as any;
-			if (!d) return new Text(result.content[0]?.text || "", 0, 0);
+			if (!d) return new Text((result.content[0] as any)?.text || "", 0, 0);
 
-			const tag = this.agentTag(d.agent || "?");
+			const tag = agentTag(team, d.agent || "?");
 
 			if (options.isPartial || d.status === "dispatching") {
 				return new Text(
@@ -202,19 +204,21 @@ export function registerDispatchAgentsTool(pi: ExtensionAPI, team: AgentTeamCont
 		async execute(_id, params, signal, onUpdate, _ctx) {
 			const { tasks } = params as { tasks: Array<{ agent: string; task: string }> };
 			if (!team.enabled) {
-				return { content: [{ type: "text", text: "Agent team is disabled. /agents-team-toggle on" }] };
+				return { content: [{ type: "text", text: "Agent team is disabled. /agents-team-toggle on" }], details: {} };
 			}
 			if (!team.parallelDispatch) {
 				return {
 					content: [{
-					type: "text",
-					text: "Parallel dispatch is disabled. Enable with /agents-parallel on, or use dispatch_agent for each agent.",
-				}],
+						type: "text",
+						text: "Parallel dispatch is disabled. Enable with /agents-parallel on, or use dispatch_agent for each agent.",
+					}],
+					details: {},
 				};
 			}
 			if (!Array.isArray(tasks) || tasks.length === 0) {
 				return {
 					content: [{ type: "text", text: "dispatch_agents requires a non-empty `tasks` array of {agent, task}." }],
+					details: {},
 				};
 			}
 
@@ -263,7 +267,7 @@ export function registerDispatchAgentsTool(pi: ExtensionAPI, team: AgentTeamCont
 
 		renderResult(result, options, theme) {
 			const d = result.details as any;
-			if (!d) return new Text(result.content[0]?.text || "", 0, 0);
+			if (!d) return new Text((result.content[0] as any)?.text || "", 0, 0);
 			if (options.isPartial || d.status === "dispatching") {
 				return new Text(theme.fg("accent", `dispatch_agents - working...`), 0, 0);
 			}
@@ -388,7 +392,7 @@ export function registerCommands(pi: ExtensionAPI, team: AgentTeamContext) {
 			const mode = team.parallelDispatch ? "ON" : "OFF";
 			ctx.ui.notify(
 				`${note}Parallelism: ${mode} — covers subagent dispatch AND host tool calls (read/grep/find/ls); writes always serialized.${changed ? ` Max ${team.maxParallel} concurrent read-only subagents.` : ""}`,
-				changed ? "success" : "info",
+				"info",
 			);
 		},
 	});
@@ -405,7 +409,7 @@ export function registerShortcut(pi: ExtensionAPI, team: AgentTeamContext) {
 		},
 	});
 	
-	pi.registerShortcut("ctrl+alt+a", {
+	pi.registerShortcut("ctrl+shift+e", {
 		description: "Toggle agent team on/off",
 		handler: async (ctx) => {
 			team.wCtx = ctx;

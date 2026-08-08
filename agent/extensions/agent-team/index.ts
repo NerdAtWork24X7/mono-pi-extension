@@ -22,10 +22,11 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { mkdirSync, readdirSync, statSync, unlinkSync, existsSync, readFileSync } from "fs";
+import { readdir as readdirAsync, stat as statAsync, unlink as unlinkAsync } from "fs/promises";
 import { join } from "path";
 
 import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, BatchDispatchResult } from "./core";
-import { displayName, shortModel, SessionLogger, RwLock } from "./core";
+import { displayName, shortModel, SessionLogger, RwLock, isWritable, filterSkills } from "./core";
 import { loadPersistedConfig, savePersistedConfig, scanAgents, scanExtensionPaths, loadTeamsYaml, discoverEnabledSkills, loadAgentMd } from "./config";
 import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchMany as dispatchManyImpl, dispatchAgentMany as dispatchAgentManyImpl, makeHandleEvent } from "./orchestration";
 import { MemoryManager, extractLastAssistantText } from "./memory";
@@ -34,18 +35,20 @@ import { registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands
 import { homedir } from "os";
 
 /** Remove session files older than 24 hours to prevent unbounded disk growth
- *  when the CLI exits abruptly and leaves orphaned files behind. */
-function cleanupOldSessionFiles(sessionDir: string) {
+ *  when the CLI exits abruptly and leaves orphaned files behind.
+ *  Uses async I/O to avoid blocking the event loop. */
+async function cleanupOldSessionFiles(sessionDir: string) {
 	const CUTOFF_MS = 24 * 60 * 60 * 1000;
 	try {
 		const now = Date.now();
-		for (const f of readdirSync(sessionDir)) {
+		const files = await readdirAsync(sessionDir);
+		await Promise.all(files.map(async (f) => {
 			const p = join(sessionDir, f);
 			try {
-				const st = statSync(p);
-				if (now - st.mtimeMs > CUTOFF_MS) unlinkSync(p);
+				const st = await statAsync(p);
+				if (now - st.mtimeMs > CUTOFF_MS) await unlinkAsync(p);
 			} catch { /* ignore per-file errors */ }
-		}
+		}));
 	} catch { /* ignore directory read errors */ }
 }
 
@@ -88,6 +91,8 @@ export class AgentTeam implements AgentTeamContext {
 
 	// Memory feature (only used when memoryModel is set in teams.yaml)
 	memoryModel = "";
+	memoryActive = true;
+	originalMemoryModel = ""; // preserved value for re-enabling after toggle off
 	memoryFile = "";
 	memoryDir = "";
 	memoryManager: MemoryManager | null = null;
@@ -157,18 +162,25 @@ export class AgentTeam implements AgentTeamContext {
 		return dispatchImpl(this, agentName, task);
 	}
 
-	async dispatchMany(tasks: Array<{ agent: string; task: string }>): Promise<BatchDispatchResult> {
-		return dispatchManyImpl(this, tasks);
+	async dispatchMany(tasks: Array<{ agent: string; task: string }>, signal?: AbortSignal): Promise<BatchDispatchResult> {
+		return dispatchManyImpl(this, tasks, signal);
 	}
-	async dispatchAgentMany(agentName: string, tasks: string[]): Promise<BatchDispatchResult> {
-		return dispatchAgentManyImpl(this, agentName, tasks);
+	async dispatchAgentMany(agentName: string, tasks: string[], signal?: AbortSignal): Promise<BatchDispatchResult> {
+		return dispatchAgentManyImpl(this, agentName, tasks, signal);
 	}
 
 	/** Serialize dispatches to the same agent so its shared AgentProc state never collides. */
 	serializeAgent(name: string, fn: () => Promise<any>): Promise<any> {
 		const prev = this.agentMutexes.get(name) ?? Promise.resolve();
 		const next = prev.then(fn, fn);
-		this.agentMutexes.set(name, next.then(() => {}, () => {}));
+		// Store a settled reference that doesn't hold fn's closure.
+		// Once the previous chain resolves, remove the entry if it's still
+		// the one we stored (avoids unbounded Map growth over long sessions).
+		const settled = next.then(() => {}, () => {});
+		settled.then(() => {
+			if (this.agentMutexes.get(name) === settled) this.agentMutexes.delete(name);
+		});
+		this.agentMutexes.set(name, settled);
 		return next;
 	}
 
@@ -234,7 +246,7 @@ export class AgentTeam implements AgentTeamContext {
 		this.memoryDir = join(cwd, ".pi_memory");
 		this.memoryFile = "";
 		mkdirSync(this.sessionDir, { recursive: true });
-		cleanupOldSessionFiles(this.sessionDir);
+		void cleanupOldSessionFiles(this.sessionDir); // fire-and-forget async cleanup
 
 		this.allDefs = scanAgents(cwd);
 		this.cachedExtPaths = scanExtensionPaths(cwd);
@@ -245,6 +257,8 @@ export class AgentTeam implements AgentTeamContext {
 		const parsed = loadTeamsYaml(tp);
 		this.teams = parsed.teams;
 		this.memoryModel = parsed.memoryModel || "";
+		this.originalMemoryModel = this.memoryModel;
+		this.memoryActive = parsed.memoryActive !== false;
 
 		// Tear down any prior memory manager and (re)create if the model is set.
 		// When memoryModel is empty/undefined the feature is fully disabled:
@@ -253,7 +267,7 @@ export class AgentTeam implements AgentTeamContext {
 			await this.memoryManager.awaitIdle(0);
 		}
 		this.memoryManager = null;
-		if (this.memoryModel) {
+		if (this.memoryModel && this.memoryActive) {
 			mkdirSync(this.memoryDir, { recursive: true });
 			this.memoryFile = join(this.memoryDir, "project_memory.md");
 			this.memoryManager = new MemoryManager({
@@ -338,8 +352,7 @@ function buildBanner(): string {
 		rb(`           V:::V           S:::::::::::::::SS `, 14) + "\n" +
 		rb(`            VVV             SSSSSSSSSSSSSSS   `, 15) + "\n" +
 	        `/agents-team           Select a team\n` +
-		`Ctrl+Q                 Toggle sidebar\n` +
-		`Ctrl+Alt+A             Toggle agent mode`
+		`Ctrl+Q                 Toggle sidebar\n`
 	);
 }
 
@@ -411,9 +424,32 @@ export default function (pi: ExtensionAPI) {
 		const catalog = buildCatalog(team);
 		const t0 = Date.now();
 		const cwd = process.cwd();
-		const filteredOrchSkills = team.orchestratorSkills.size > 0
-			? team.skillsCache.filter(s => team.orchestratorSkills.has(s.dir))
-			: [];
+		const filteredOrchSkills = filterSkills(team.skillsCache, team.orchestratorSkills);
+
+		// Build dynamic prompt data from current agent/skill state
+		const orchestratorTools = team.activeToolList();
+		const filteredSubSkills = filterSkills(team.skillsCache, team.subagentSkills);
+		const readOnlyAgents: string[] = [];
+		const skillAgentMap: Record<string, string[]> = {};
+		for (const ap of team.procs.values()) {
+			if (team.disabledAgents.has(ap.def.name.toLowerCase())) continue;
+			if (!isWritable(ap.def, team.destructiveTools)) readOnlyAgents.push(ap.def.name);
+			// Map skills to agents
+			const agentSkillDirs = ap.def.skills ?? filteredSubSkills.map(s => s.dir);
+			for (const skillDir of agentSkillDirs) {
+				const skill = team.skillsCache.find(s => s.dir === skillDir);
+				if (skill) {
+					if (!skillAgentMap[skill.name]) skillAgentMap[skill.name] = [];
+					skillAgentMap[skill.name].push(ap.def.name);
+				}
+			}
+		}
+
+		const harshCriticEnabled = Array.from(team.procs.values()).some(ap =>
+			ap.def.name.toLowerCase() === "harsh_critic" &&
+			!team.disabledAgents.has(ap.def.name.toLowerCase())
+		);
+
 		return buildSystemPrompt({
 			catalog,
 			date: new Date(t0).toISOString().split("T")[0],
@@ -422,6 +458,10 @@ export default function (pi: ExtensionAPI) {
 			agentMd: team.agentMdCache,
 			skills: filteredOrchSkills,
 			parallel: team.parallelDispatch,
+			orchestratorTools,
+			readOnlyAgents,
+			skillAgentMap,
+			harshCriticEnabled,
 		});
 	});
 

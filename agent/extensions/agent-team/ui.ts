@@ -2,8 +2,11 @@
 
 import { Text, matchesKey, Key } from "@mariozechner/pi-tui";
 import type { AgentProc, AgentTeamContext } from "./core";
-import { displayName, fmtTok, hrPad, shortModel, ansiRe } from "./core";
+import { displayName, fmtTok, hrPad, shortModel, ansiRe, isWritable, filterSkills } from "./core";
 import { saveTeamsYaml, loadTeamsYaml, discoverAllSkills, type Skill } from "./config";
+import { MemoryManager } from "./memory";
+import { makeHandleEvent } from "./orchestration";
+import { mkdirSync } from "fs";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { join } from "path";
 
@@ -75,7 +78,7 @@ export function openSidebar(ctx: AgentTeamContext) {
 
 	ctx.wCtx.ui.custom(
 		(tui: any, theme: any, keybindings: any, done: () => void) => {
-			let section: "orch" | "teams" | "sub" = "orch"; // which section is focused
+			let section: "orch" | "memory" | "teams" | "sub" = "orch"; // which section is focused
 			let teamIdx = 0; // index within teams section
 			let skillIdx = 0; // index within orchestrator skill list
 			let subIdx = 0; // index within subagents flat list (agents then skills)
@@ -143,6 +146,45 @@ export function openSidebar(ctx: AgentTeamContext) {
 							renderedLine += theme.fg("border", " │");
 							lines.push(renderedLine);
 						}
+					}
+
+					// Separator before Memory section
+					lines.push(theme.fg("border", hrPad("", w, "├", "┤", "─")));
+
+					// ── Memory section ──
+					const memHeader = " Memory (Enter to toggle)";
+					const memHeaderPad = Math.max(0, innerW - [...memHeader].length);
+					lines.push(
+						theme.fg("border", "│") +
+						theme.fg("dim", theme.bold(memHeader)) +
+						" ".repeat(memHeaderPad) +
+						theme.fg("border", " │")
+					);
+
+					// Memory toggle
+					{
+						const hasMem = !!ctx.memoryManager;
+						const memSelected = section === "memory";
+						const memIcon = hasMem ? "●" : "○";
+						const memLabel = hasMem
+							? `Memory ${shortModel(ctx.memoryModel) || ""}`.trim()
+							: "Memory (off)";
+						const selPrefix = memSelected ? "▸ " : "  ";
+						const rawLine = selPrefix + memIcon + " " + memLabel;
+						const visLen = [...rawLine].length;
+						const memPad = Math.max(0, innerW - visLen);
+						const cellContent = theme.fg(memSelected ? "accent" : "text", selPrefix) +
+							theme.fg(hasMem ? "success" : "dim", memIcon + " ") +
+							theme.fg(memSelected ? "accent" : (hasMem ? "text" : "dim"), memLabel);
+						const bgColor = memSelected ? "selectedBg" : undefined;
+						let renderedLine = theme.fg("border", "│");
+						if (bgColor) {
+							renderedLine += theme.bg(bgColor, cellContent + " ".repeat(memPad));
+						} else {
+							renderedLine += cellContent + " ".repeat(memPad);
+						}
+						renderedLine += theme.fg("border", " │");
+						lines.push(renderedLine);
 					}
 
 					// Separator
@@ -243,7 +285,7 @@ export function openSidebar(ctx: AgentTeamContext) {
 								statusIcon = ap.status === "idle" ? "○"
 									: ap.status === "starting" ? "◐"
 										: ap.status === "running" ? "●"
-											: ap.status === "done" ? "✓" : "✗";
+											: ap.status === "done" ? "✓" : "●";
 							}
 
 							const name = displayName(ap.def.name);
@@ -313,7 +355,7 @@ export function openSidebar(ctx: AgentTeamContext) {
 					// Help text
 					const helpLines = [
 						" Tab Switch focus ↑↓ Navigate",
-						" Enter Select team / Toggle skill / agent",
+						" Enter Select team / Toggle skill / agent / memory",
 						" ●=enabled ○=disabled (per group)",
 						" Esc/Ctrl+Q Close sidebar",
 					];
@@ -340,14 +382,14 @@ export function openSidebar(ctx: AgentTeamContext) {
 
 					if (matchesKey(data, Key.tab)) {
 						// Cycle focus: orch -> teams -> sub -> orch
-						section = section === "orch" ? "teams" : section === "teams" ? "sub" : "orch";
+						section = section === "orch" ? "memory" : section === "memory" ? "teams" : section === "teams" ? "sub" : "orch";
 						tui.requestRender();
 					} else if (matchesKey(data, Key.up)) {
 						if (section === "teams") {
 							teamIdx = Math.max(0, teamIdx - 1);
 						} else if (section === "orch") {
 							skillIdx = Math.max(0, skillIdx - 1);
-						} else {
+						} else if (section === "sub") {
 							subIdx = Math.max(0, subIdx - 1);
 						}
 						tui.requestRender();
@@ -356,12 +398,60 @@ export function openSidebar(ctx: AgentTeamContext) {
 							teamIdx = Math.min(teamNames.length - 1, teamIdx + 1);
 						} else if (section === "orch") {
 							skillIdx = Math.min(allSkills.length - 1, skillIdx + 1);
-						} else {
+						} else if (section === "sub") {
 							subIdx = Math.min(Math.max(0, subLen - 1), subIdx + 1);
 						}
 						tui.requestRender();
 					} else if (matchesKey(data, Key.enter) || matchesKey(data, Key.space)) {
-						if (section === "teams") {
+						if (section === "memory") {
+							// Toggle memory on/off
+							if (ctx.memoryManager) {
+								// Disable — preserve original model for re-enabling
+								try { ctx.memoryManager.awaitIdle?.(0); } catch { }
+								ctx.memoryManager = null;
+								ctx.memoryModel = "";
+								ctx.memoryFile = "";
+							} else {
+								// Enable — use preserved original model or read from teams.yaml
+								let modelToEnable = ctx.originalMemoryModel;
+								if (!modelToEnable) {
+									const memTp = join(getAgentDir(), "agents", "teams.yaml");
+									const memParsed = loadTeamsYaml(memTp);
+									modelToEnable = memParsed.memoryModel || "";
+								}
+								if (modelToEnable) {
+									ctx.originalMemoryModel = modelToEnable;
+									ctx.memoryModel = modelToEnable;
+									mkdirSync(ctx.memoryDir, { recursive: true });
+									ctx.memoryFile = join(ctx.memoryDir, "project_memory.md");
+									ctx.memoryManager = new MemoryManager({
+										model: ctx.memoryModel,
+										memoryFile: ctx.memoryFile,
+										sessionDir: ctx.sessionDir,
+										logger: ctx.logger,
+										invalidate: () => ctx.invalidate(),
+										cachedExtPaths: () => ctx.cachedExtPaths,
+										def: {
+											name: "memory-summarizer",
+											description: "Per-turn memory summarizer spawned alongside the orchestrator.",
+											tools: "read,write,edit",
+											systemPrompt: "",
+											file: "",
+										},
+										handleEvent: makeHandleEvent(ctx),
+									});
+								}
+							}
+							// Persist toggle to teams.yaml (preserve original value when disabling)
+							const saveTp = join(getAgentDir(), "agents", "teams.yaml");
+							const saveParsed = loadTeamsYaml(saveTp);
+							saveParsed.memoryModel = ctx.memoryModel || ctx.originalMemoryModel || undefined;
+							saveParsed.memoryActive = !!ctx.memoryManager;
+							saveTeamsYaml(saveTp, saveParsed);
+							ctx.catalogDirty = true;
+							ctx.invalidate();
+							tui.requestRender();
+						} else if (section === "teams") {
 							// Switch to the selected team
 							if (teamIdx >= 0 && teamIdx < teamNames.length) {
 								const newTeam = teamNames[teamIdx];
@@ -427,7 +517,7 @@ export function openSidebar(ctx: AgentTeamContext) {
 					}
 				},
 
-				invalidate() {},
+				invalidate() { },
 				wantsKeyRelease: false,
 			};
 
@@ -453,15 +543,14 @@ export function openSidebar(ctx: AgentTeamContext) {
 
 export function buildCatalog(ctx: AgentTeamContext): string {
 	if (!ctx.catalogDirty && ctx.catalogCache) return ctx.catalogCache;
-	const filteredSubSkills = ctx.subagentSkills.size > 0
-		? ctx.skillsCache.filter(s => ctx.subagentSkills.has(s.dir))
-		: [];
+	const filteredSubSkills = filterSkills(ctx.skillsCache, ctx.subagentSkills);
 	ctx.catalogCache = Array.from(ctx.procs.values())
 		.filter(a => !ctx.disabledAgents.has(a.def.name.toLowerCase()))
 		.map(a => {
+			const access = isWritable(a.def, ctx.destructiveTools) ? "read-write" : "read-only";
 			const skillsLabel = a.def.skills
 				? `**Skills:** ${a.def.skills.join(", ") || "none"}`
-				: `**Skills:** all active (${filteredSubSkills.map(s => s.name).join(", ") || "none"})`;
+				: ``;
 			return `### ${a.def.name}\n ${a.def.description}\n**Tools:** ${a.def.tools}\n${skillsLabel}`;
 		})
 		.join("\n\n");
@@ -477,6 +566,10 @@ export function buildSystemPrompt(args: {
 	agentMd?: string | null;
 	skills?: Array<{ name: string; description: string }>;
 	parallel?: boolean;
+	harshCriticEnabled?: boolean;
+	orchestratorTools?: string[];
+	readOnlyAgents?: string[];
+	skillAgentMap?: Record<string, string[]>;
 }): { systemPrompt: string } {
 	// When parallelism is disabled, instruct the orchestrator to serialize
 	// BOTH subagent dispatches and its own parallel host tool calls.
@@ -491,13 +584,32 @@ export function buildSystemPrompt(args: {
 	// Workflow steps 2 and 4 must match parallelRules exactly, or a
 	// parallel:false run gets Workflow text telling it to batch dispatches
 	// while Hard Rules simultaneously forbids it.
-	const workflowStep2 = args.parallel === false
-		? `2. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer. Dispatch each one at a time via \`dispatch_agent\` (see Hard Rules — parallelism is off).`
-		: `2. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer; batch independent read-only lookups into a single \`dispatch_agents\` call to run them in parallel.`;
-	const workflowStep4 = args.parallel === false
-		? `4. **Dispatch the right subagent**, one at a time via \`dispatch_agent\`. Check every result against acceptance criteria before proceeding. If a writable agent's output fails acceptance criteria twice in a row, stop and surface it to the user rather than re-dispatching a third time.`
-		: `4. **Dispatch the right subagent.** Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). Writable agents (coder, documenter, doc_generator, …): use \`dispatch_agent\` one at a time. Check every result against acceptance criteria before proceeding.`;
+	const workflowStep3 = args.parallel === false
+		? `3. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer. Dispatch each one at a time via \`dispatch_agent\` (see Hard Rules — parallelism is off).`
+		: `3. **Fill context gaps.** Dispatch \`file_reader\`/\`searcher\` only if current context can't answer; batch independent read-only lookups into a single \`dispatch_agents\` call to run them in parallel.`;
+	const workflowStep5 = args.parallel === false
+		? `5. **Dispatch the right subagent**, one at a time via \`dispatch_agent\`. Check every result against acceptance criteria before proceeding. If a writable agent's output fails acceptance criteria twice in a row, stop and surface it to the user rather than re-dispatching a third time.`
+		: `5. **Dispatch the right subagent.** Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). Writable agents (coder, documenter, doc_generator, …): use \`dispatch_agent\` one at a time. Check every result against acceptance criteria before proceeding.`;
 
+	const harshCriticSection = args.harshCriticEnabled
+		? `\n# Harsh Critic Gate
+
+\`harsh_critic\` is enabled — use it as a gatekeeper after ANY Worker subagent produces a deliverable (code, doc, output). Dispatch it with the original task, the Worker's output, and any prior critique. Loop revise → critique → revise until it returns \`VERDICT: APPROVED\` before showing the output to the user or shipping. Never skip the gate to save a round-trip; never override a REJECTED without addressing every listed issue. When it rejects, hand its prioritized ISSUES back to the Worker verbatim (respect the retry cap in Workflow step 5), not a paraphrase.\n`
+		: "";
+
+	const orchestratorToolsSection = args.orchestratorTools && args.orchestratorTools.length > 0
+		? `\n# Orchestrator Tools\n\nActive tools available to you directly (without dispatching a subagent):\n${args.orchestratorTools.join(", ")}\n`
+		: "";
+	const readOnlyAgents = args.readOnlyAgents || [];
+	const writableAgents = args.readOnlyAgents
+		? args.catalog.split(/^### /m)
+			.filter(Boolean)
+			.map(block => block.split("\n")[0].trim())
+			.filter(name => !readOnlyAgents.includes(name))
+		: [];
+	const subagentsSummary = args.readOnlyAgents
+		? `\n**Read-only (parallelizable via dispatch_agents):** ${readOnlyAgents.join(", ") || "none"}\n**Writable (serialized via dispatch_agent):** ${writableAgents.join(", ") || "none"}\n`
+		: "";
 	const memSection = args.memory?.file
 		? `\n# Memory\n\nA background process appends key context, decisions, and open questions to \`${args.memory.file}\` after each turn. Read it at the start of a task to recall prior project state and follow-ups.\n`
 		: "";
@@ -505,7 +617,11 @@ export function buildSystemPrompt(args: {
 		? `\n${args.agentMd}\n`
 		: "";
 	const skillsSection = args.skills && args.skills.length > 0
-		? `\n# Available Skills\n\nConsult these yourself before planning step 3 if the task matches; they inform *your* plan and acceptance criteria, not a subagent's prompt — subagents don't read this list.\n\n${args.skills.map(s => `- **${s.name}**: ${s.description}`).join("\n")}\n`
+		? `\n# Available Skills\n\nConsult these yourself before planning step 3 if the task matches; they inform *your* plan and acceptance criteria, not a subagent's prompt — subagents don't read this list.\n\n${args.skills.map(s => {
+			const agents = args.skillAgentMap?.[s.name];
+			const agentSuffix = agents && agents.length > 0 ? ` (agents: ${agents.join(", ")})` : "";
+			return `- **${s.name}**: ${s.description}${agentSuffix}`;
+		}).join("\n")}\n`
 		: "";
 	return {
 		systemPrompt: `
@@ -519,13 +635,20 @@ Lazy senior dev: efficient not careless, best code is code never written. Concis
 1. Needed at all? No → skip, say so (YAGNI). 2. Stdlib? 3. Native platform feature? 4. Already-installed dep? 5. One line? 6. Minimum code.
 Exception: any file-output task always → \`doc_generator\`, regardless of size (overrides ladder).
 
+# Principles
+- YAGNI Principle. Do not add features that are not required
+- DRY Principle. Do not repeat yourself
+- KISS Principle: Keep It Simple, Stupid
+- SOLID Principle: five rules for object-oriented design
+
 # Workflow
 1. Restate goal (1 line); ask if ambiguous.
-${workflowStep2}
-3. Plan minimal change set + explicit acceptance criteria. Prefer editing over creating files.
-${workflowStep4}
-5. \`tester\` with exact commands. Failure → error excerpt + file paths back to \`coder\` (max 2 retries). After 2 → stop, surface failure+evidence, don't paper over.
-6. **VERY IMPORTANT** Always perform test or have solid evidence that task is complete and fully functional.(No Compromise)
+2. Always check for all reference variables related to the task from project folder.
+3. ${workflowStep3}
+4. Plan minimal change set + explicit acceptance criteria. Prefer editing over creating files.
+5. ${workflowStep5}
+6. \`tester\` with exact commands. Failure → error excerpt + file paths back to \`coder\` (max 2 retries). After 2 → stop, surface failure+evidence, don't paper over.
+7. **VERY IMPORTANT** Always perform test or have solid evidence that task is complete and fully functional.(No Compromise)
 7. \`documenter\` if change touches public surface (CLI flags, env vars, exports, config keys, breaking changes), even unasked. Else skip.
 8. Summarize: changed / verified / remaining.
 
@@ -533,6 +656,7 @@ Plan before dispatching. Reflect on every output before proceeding — never dis
 
 # Dispatch Contract
 Subagents are stateless, see only your prompt. Each dispatch: task+acceptance criteria (1 line) + all relevant paths/excerpts/errors/decisions + expected return format. Never reference prior turns ("as discussed").
+${harshCriticSection}
 
 # Escalation Protocol
 - \`AMBIGUOUS: <q>\` → fixed by context/convention/readable file → resolve yourself. Genuine judgment call (product decision, destructive-vs-safe tradeoff) → ask user. Either way, re-dispatch with answer baked in.
@@ -559,10 +683,13 @@ ${parallelRules}
 
 # Tool Priority
 \`grep\` > \`read\` (offset/limit) > full file; \`find\` for filename patterns. One known file/symbol → resolve yourself; broader → subagent. Any image task → \`image_analyzer\`, never infer from filename/path. Confused subagent output → fresh session, sharper prompt, don't steer the broken one.
-${memSection}
+${orchestratorToolsSection}${memSection}
 
 # Subagents
 ${args.catalog}
+
+# Subagents Sumary
+${subagentsSummary}
 
 ${agentMdSection}
 
@@ -591,7 +718,7 @@ export function initWidget(ctx: AgentTeamContext) {
 				const hasMemory = !!ctx.memoryManager;
 				const activeClones = [...ctx.batchClones].filter(isWorking);
 				const visibleProcs = [...ctx.procs.values()].filter(ap => !ctx.disabledAgents.has(ap.def.name.toLowerCase()));
-				const totalCount = visibleProcs.length + activeClones.length + (hasMemory ? 1 : 0);
+				const totalCount = visibleProcs.length + activeClones.length;
 
 				if (!ctx.enabled) {
 					text.setText(theme.fg("dim", "Agent team disabled. /agents-team-toggle on"));
@@ -761,7 +888,7 @@ export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, them
 	const statusIcon = ap.status === "idle" ? "○"
 		: ap.status === "starting" ? "◐"
 			: ap.status === "running" ? "●"
-				: ap.status === "done" ? "✓" : "✗";
+				: ap.status === "done" ? "✓" : "●";
 
 	const name = labelOverride ?? displayName(ap.def.name);
 	const sm = shortModel(ap.model);
@@ -786,7 +913,7 @@ export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, them
 
 	const lines = [line1];
 
-	// ── Line 2: ▌   ████░░░░  45% · In 1.2k · Out 400 · � H=500 ──
+	// ── Line 2: ▌   ████░░░░  45% · In 1.2k · Out 400 · 💾 H=500 ──
 	if (ap.contextWindow > 0 && (ap.tokensUsed > 0 || ap.tokensOut > 0)) {
 		const pct = Math.min(100, Math.round((ap.tokensUsed / ap.contextWindow) * 100));
 		const barW = Math.min(10, Math.max(4, Math.floor((w - 4) / 4)));
@@ -800,7 +927,7 @@ export function renderCard(ctx: AgentTeamContext, ap: AgentProc, w: number, them
 			const parts: string[] = [];
 			if (ap.cacheRead > 0) parts.push(`H=${fmtTok(ap.cacheRead)}`);
 			if (ap.cacheSavedTotal > 0) parts.push(`Σ=${fmtTok(ap.cacheSavedTotal)}`);
-			cachePill = ` · � ${parts.join(" ")}`;
+			cachePill = ` · 💾 ${parts.join(" ")}`;
 		}
 
 		// Drop cache pill if it would overflow; fall back to compact if still too wide
@@ -848,7 +975,7 @@ export function renderMemoryCard(ctx: AgentTeamContext, w: number, theme: any): 
 	const statusIcon = status === "idle" ? "○"
 		: status === "recording" ? "◐"
 			: status === "summarizing" ? "●"
-				: status === "done" ? "✓" : "✗";
+				: status === "done" ? "✓" : "●";
 
 	const sm = ctx.memoryModel ? shortModel(ctx.memoryModel) : "";
 	const modelStr = sm ? ` ${sm}` : "";

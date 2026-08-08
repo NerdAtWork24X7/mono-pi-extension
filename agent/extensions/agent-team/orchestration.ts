@@ -5,12 +5,11 @@ import { join } from "path";
 import type { AgentProc } from "./core";
 import type { SessionLogger } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
-import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, hasPiScopeExtension, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
+import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, hasPiScopeExtension, parseModelId, filterSkills, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext } from "./core";
 import { resolveSkillPath } from "./config";
 
 const KILLALL_TIMEOUT_MS = 5_000;
-const READY_PROBE_DELAY_MS = 500;
 const SPAWN_READY_TIMEOUT_MS = 15_000;
 /** Minimum time between streaming-token UI invalidations. Prevents render
  *  thrashing when a subagent emits many rapid text_delta events. */
@@ -130,6 +129,12 @@ export function handleMessageUpdate(ctx: AgentTeamContext, ap: AgentProc, ev: an
 	const chunk = delta.delta || "";
 	ap.collectedText += chunk;
 	ap.currentMessageText += chunk;
+	// Cap collectedText to prevent unbounded memory growth during long streams.
+	// The lastAssistantText (set on message_end) is the authoritative output;
+	// collectedText is only a fallback for process-close edge cases.
+	if (ap.collectedText.length > MAX_COLLECTED_TEXT) {
+		ap.collectedText = ap.collectedText.slice(-MAX_COLLECTED_TEXT);
+	}
 	ctx.logger.logStreamingText(ap, chunk);
 	const lastNl = chunk.lastIndexOf("\n");
 	const tail = lastNl >= 0 ? chunk.slice(lastNl + 1) : chunk;
@@ -683,11 +688,7 @@ export class ProcessManager {
 		// --tools uses the agent's prompt-file tools as the allowlist.
 
 		// Split provider from model if model contains a provider prefix
-		// e.g. "openrouter/baidu/cobuddy:free" → provider="openrouter", model="baidu/cobuddy:free"
-		const slashIdx = model.indexOf("/");
-		const hasProvider = slashIdx > 0;
-		const provider = hasProvider ? model.slice(0, slashIdx) : undefined;
-		const modelName = hasProvider ? model.slice(slashIdx + 1) : model;
+		const { provider, model: modelName } = parseModelId(model);
 
 		const extPaths = this.cachedExtPaths();
 
@@ -695,9 +696,7 @@ export class ProcessManager {
 		// explicit skills from the agent def, or all globally enabled skills if
 		// the agent def does not specify a list.
 		const skillFlags: string[] = ["--no-skills"];
-		const filteredSubSkills = ctx.subagentSkills.size > 0
-			? ctx.skillsCache.filter(s => ctx.subagentSkills.has(s.dir))
-			: [];
+		const filteredSubSkills = filterSkills(ctx.skillsCache, ctx.subagentSkills);
 		const skillNames = ap.def.skills ?? filteredSubSkills.map(s => s.dir);
 		for (const skillName of skillNames) {
 			const skillPath = resolveSkillPath(skillName);
@@ -783,15 +782,18 @@ export class ProcessManager {
 				resolve(success);
 			}
 
-			// Wait 500ms then send get_state as readiness probe
-			setTimeout(() => {
-				if (!ap.proc) return;
+			// Send get_state immediately as the readiness probe. The child's stdin
+			// pipe buffers the request until its RPC reader is up, so there is no
+			// need for a fixed startup delay — the response (or the 15s timeout)
+			// determines readiness.
+			if (ap.proc) {
 				const stdin = ap.proc.stdin;
-				if (!stdin?.writable) return;
-				try {
-					stdin.write(JSON.stringify({ type: "get_state" }) + "\n");
-				} catch { }
-			}, READY_PROBE_DELAY_MS);
+				if (stdin?.writable) {
+					try {
+						stdin.write(JSON.stringify({ type: "get_state" }) + "\n");
+					} catch { }
+				}
+			}
 		});
 	}
 }

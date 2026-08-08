@@ -7,6 +7,7 @@ import type { AgentDef, TeamMember, TeamConfig } from "./core";
 export interface ParsedTeams {
 	teams: Record<string, TeamMember[]>;
 	memoryModel?: string;
+	memoryActive?: boolean;
 }
 
 export function parseTeamsYaml(raw: string): ParsedTeams {
@@ -17,18 +18,24 @@ export function parseTeamsYaml(raw: string): ParsedTeams {
 	raw = raw.replace(/\r\n?/g, "\n");
 	const teams: Record<string, TeamMember[]> = {};
 	let memoryModel: string | undefined;
+	let memoryActive: boolean | undefined;
 	let cur = "";
 	let curMember: TeamMember | null = null;
 	for (const line of raw.split("\n")) {
 		if (!line.trim() || line.trim().startsWith("#")) continue;
-		// Top-level memory_model: <provider>/<model>
-		// Must be checked BEFORE the generic team-key match, since the generic
-		// pattern would otherwise treat "memory_model" as a team name and create
-		// a phantom empty team.
+		// Nested memory_model block: "memory_model:" followed by indented model:/active:
+		const mmBlock = line.match(/^memory_model:\s*$/);
+		if (mmBlock) {
+			cur = "memory_model";
+			curMember = null;
+			memoryActive = true;
+			continue;
+		}
 		const mm = line.match(/^memory_model:\s*(.+)$/);
 		if (mm) {
 			const v = mm[1].trim();
 			if (v) memoryModel = v;
+			memoryActive = true; // legacy flat form implies active
 			cur = "";
 			curMember = null;
 			continue;
@@ -58,9 +65,16 @@ export function parseTeamsYaml(raw: string): ParsedTeams {
 			else if (key === "active") curMember.active = pm[2].trim().toLowerCase() !== "false";
 			continue;
 		}
+		if (pm && cur === "memory_model" && !curMember) {
+			const key = pm[1].trim();
+			if (key === "model") memoryModel = pm[2].trim();
+			else if (key === "active") memoryActive = pm[2].trim().toLowerCase() !== "false";
+			continue;
+		}
 	}
 	const out: ParsedTeams = { teams };
 	if (memoryModel) out.memoryModel = memoryModel;
+	if (memoryActive !== undefined) out.memoryActive = memoryActive;
 	return out;
 }
 
@@ -376,13 +390,16 @@ export function saveTeamsYaml(filePath: string, data: ParsedTeams): void {
 	lines.push("#       model: provider/model-name");
 	lines.push("#");
 	lines.push("# Top-level keys:");
-	lines.push("#   memory_model: <provider>/<model>");
-	lines.push("#       Enables the per-turn project memory feature. When set, a background");
-	lines.push("#       subprocess summarizes each orchestrator turn and appends the result");
-	lines.push("#       to <cwd>/.pi_memory/project_memory.md. Leave unset/empty to disable.");
+	lines.push("#   memory_model:");
+	lines.push("#       model: <provider>/<model>  - enables the per-turn project memory feature.");
+	lines.push("#       active: true|false         - persistent on/off switch (sidebar toggle).");
+	lines.push("#       A background subprocess summarizes each orchestrator turn and appends");
+	lines.push("#       the result to <cwd>/.pi_memory/project_memory.md.");
 	lines.push("");
 	if (data.memoryModel) {
-		lines.push(`memory_model: ${data.memoryModel}`);
+		lines.push("memory_model:");
+		lines.push(`  model: ${data.memoryModel}`);
+		lines.push(`  active: ${data.memoryActive === false ? "false" : "true"}`);
 		lines.push("");
 	}
 	for (const [teamName, members] of Object.entries(data.teams)) {

@@ -16,6 +16,7 @@
  */
 
 import type { ExtensionAPI, ProviderModelConfig } from "@mariozechner/pi-coding-agent";
+import { loadCachedModels } from "./agent-team/model-cache";
 
 // =============================================================================
 // Constants
@@ -172,7 +173,12 @@ const TOKENROUTER_PROVIDER_CONFIG = {
 export default async function (pi: ExtensionAPI) {
   let models: ProviderModelConfig[] = [];
   try {
-    models = await fetchTokenrouterModels({ apiKey: apiKey || undefined });
+    // Cache the model list to disk: the agent-team extension loads this file
+    // into every spawned subagent, so a warm cache avoids a network fetch per
+    // subagent boot (up to 10s timeout). The host process refreshes it here.
+    models = await loadCachedModels("tokenrouter-models", () =>
+      fetchTokenrouterModels({ apiKey: apiKey || undefined }),
+    );
   } catch (error) {
     console.warn(
       "[tokenrouter] Failed to fetch models at startup:",

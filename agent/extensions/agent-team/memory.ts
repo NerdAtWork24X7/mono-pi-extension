@@ -2,7 +2,7 @@ import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "f
 import { join, resolve as resolvePath } from "path";
 import type { SessionLogger } from "./core";
 import type { AgentDef, AgentProc, MemoryState } from "./core";
-import { blankProcState, hasPiScopeExtension } from "./core";
+import { blankProcState, hasPiScopeExtension, parseModelId } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
 
 /** Tight system prompt for the memory updater subprocess. The LLM is the
@@ -56,6 +56,11 @@ const SETTLE_MS = 5_000;
  *  stays active (keeps emitting lines, so the idle timeout never fires) yet
  *  never terminates — otherwise the log could remain visible indefinitely. */
 const MEMORY_HARD_TIMEOUT_MS = 90_000;
+
+/** Max queued summaries. If the orchestrator dispatches faster than the
+ *  summarizer can consume, older entries are dropped to prevent unbounded
+ *  memory growth. Each entry holds the full turn input+output. */
+const MAX_PENDING_SUMMARIES = 10;
 
 /** Pull the final assistant text from an agent_end messages array. */
 export function extractLastAssistantText(messages: any[]): string {
@@ -193,6 +198,11 @@ export class MemoryManager {
 	}
 
 	private enqueueSummary(input: string, output: string) {
+		// Cap queue to prevent unbounded memory growth.
+		// Drop oldest entries when the summarizer can't keep up.
+		while (this.pendingSummaries.length >= MAX_PENDING_SUMMARIES) {
+			this.pendingSummaries.shift();
+		}
 		this.pendingSummaries.push({ input, output });
 		if (!this.draining) {
 			this.draining = true;
@@ -259,10 +269,7 @@ export class MemoryManager {
 		try { preMtime = statSync(this.memoryFile).mtimeMs; } catch { /* file may not exist yet */ }
 
 		// Split provider from model on first "/" (matches process.ts pattern)
-		const slashIdx = this.model.indexOf("/");
-		const hasProvider = slashIdx > 0;
-		const provider = hasProvider ? this.model.slice(0, slashIdx) : undefined;
-		const modelName = hasProvider ? this.model.slice(slashIdx + 1) : this.model;
+		const { provider, model: modelName } = parseModelId(this.model);
 
 		const ts = Date.now();
 		this.currentSessionFile = join(this.sessionDir, `memory-${ts}.json`);
@@ -433,12 +440,12 @@ export class MemoryManager {
 				this.invalidate();
 			}, 500);
 
-			// Readiness probe — mirrors process.ts. Wait 500ms, then ask for state.
-			setTimeout(() => {
-				if (ready) return;
-				if (!sub.proc.stdin || !sub.proc.stdin.writable) return;
-				try { sub.proc.stdin.write(JSON.stringify({ type: "get_state" }) + "\n"); } catch { }
-			}, 500);
+			// Readiness probe — mirrors orchestration.ts. Send get_state
+			// immediately; the child's stdin pipe buffers it until its RPC reader
+			// is up, so no fixed startup delay is needed.
+			if (ready) return;
+			if (!sub.proc.stdin || !sub.proc.stdin.writable) return;
+			try { sub.proc.stdin.write(JSON.stringify({ type: "get_state" }) + "\n"); } catch { }
 		});
 	}
 }

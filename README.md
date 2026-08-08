@@ -14,28 +14,30 @@ The Agent Team extension (`agent/extensions/agent-team/`) is a TypeScript plugin
 
 ### Architecture
 
-- **index.ts** - Entry point: registers lifecycle hooks (`before_agent_start`, `agent_end`, `session_start`, `session_shutdown`), tool registration, slash commands, and keyboard shortcuts
+- **index.ts** - Entry point: registers lifecycle hooks (`before_agent_start`, `agent_end`, `session_start`, `session_end`), tool registration, slash commands, and keyboard shortcuts
 - **orchestration.ts** - Process manager: spawns/fresh `pi --mode rpc` processes per task, readiness probing, dispatch lifecycle, RPC event handling, 10-min pong timeout
 - **config.ts** - Agent definition parsing (YAML frontmatter from `.md` files), team YAML loading, skill discovery, extension path scanning, config persistence
 - **core.ts** - Type definitions (`AgentDef`, `AgentProc`, `TeamMember`, `TerminalBackend`), terminal backends (tmux/herdr), session logging, RPC subprocess spawner
 - **memory.ts** - Per-turn background memory summarizer: captures input/output, spawns a summarizer subprocess, maintains `.pi_memory/project_memory.md`
-- **ui.ts** - TUI widget: agent status grid, anim dots, tool counts, token usage display
-- **integrations.ts** - Tool registration (`dispatch_agent`), slash commands (`/agents-team`, `/agents-list`, `/agents-grid`, `/agents-team-toggle`, `/agents-restart`), keyboard shortcut (`Ctrl+q`)
+- **ui.ts** - TUI widget + sidebar overlay: agent status grid, anim dots, tool counts, token usage display; the sidebar (opens via `Ctrl+Q`) shows the agent status grid, a snapshot of all available skills, and the team list, closing with Esc/Ctrl+Q
+- **integrations.ts** - Tool registration (`dispatch_agent`), slash commands (`/agents-team`, `/agents-list`, `/agents-grid`, `/agents-team-toggle`, `/agents-parallel`), keyboard shortcuts (`Ctrl+Q` sidebar toggle, `Ctrl+Shift+E` agent team on/off)
 
 ### Lifecycle
 
-1. **Session start** - Load agent definitions (`.md` files from `agent/agents/`, `.pi/agents/`, `.claude/agents/`), parse `teams.yaml`, initialize process registry, create combined session log pane
+1. **Session start** - Load agent definitions only (NO spawning) (`.md` files from `agent/agents/`, `.pi/agents/`, `.claude/agents/`), parse `teams.yaml`, initialize process registry, create combined session log pane
 2. **Before agent start** - Override system prompt: inject agent catalog (available agents + their descriptions), project memory content (if enabled), AGENTS.md rules, and enabled skills
 3. **Dispatch** - Tool call `dispatch_agent(agent, task)` triggers a fresh `pi --mode rpc` subprocess spawn, readiness probe (get_state), task injection via JSON stdin, streaming RPC event handling (response, message_update, message_end, tool_execution, agent_end), 10-min activity timeout, session log recording — or `dispatch_agent(agent, tasks: [...])` to fan out the same agent across many tasks in isolated subprocesses.
 4. **Agent end** - Cleanup: kill subprocess (SIGTERM + 2s SIGKILL backstop), wipe session files, log done box with elapsed time/tool count. If memory feature enabled: trigger background summarization of the turn
-5. **Session shutdown** - Persist config, await memory idle, kill all subprocesses, close session log, kill terminal pane
+5. **Session end** - Cleanup any residual subprocesses: persist config, await memory idle, kill leftover processes, close session log, kill terminal pane
 
 ### Team System
 
 Teams are defined in `agent/agents/teams.yaml`. Each team is a named group of agents with optional model overrides:
 
 ```yaml
-memory_model: opencode/mimo-v2.5-free
+memory_model:
+  model: opencode/mimo-v2.5-free
+  active: true
 
 subagent_team:
   - name: file_reader
@@ -47,19 +49,34 @@ subagent_team:
     model: opencode/deepseek-v4-flash-free
   - name: documenter
     model: opencode/deepseek-v4-flash-free
+    active: false
   - name: doc_generator
     model: opencode/deepseek-v4-flash-free
+    active: false
   - name: image_analyzer
+    model: opencode/mimo-v2.5-free
+    active: false
+  - name: harsh_critic
     model: opencode/deepseek-v4-flash-free
+
+test_subagent_team:
+  - name: coder
+  - name: documenter
+  - name: file_reader
+  - name: searcher
+  - name: tester
+  - name: image_analyzer
+  - name: doc_generator
 ```
 
 - Agents without a `model` key inherit the current orchestrator model
+- Agents can carry `active: true|false` - inactive agents are not dispatched
 - Team model overrides (`teamModel`) take highest precedence
 - Teams can be switched at runtime via `/agents-team` command
 
 ### Memory Feature (Background Summarization)
 
-When `memory_model` is set in `teams.yaml`, the extension captures every turn's user input + assistant output and spawns a summarizer subprocess that updates `.pi_memory/project_memory.md`. The memory file is reinjected into the orchestrator's system prompt on subsequent turns. Sections maintained: Design Decisions, Facts, User Taste, User Suggestions.
+When `memory_model` is set in `teams.yaml`, the extension captures every turn's user input + assistant output and spawns a summarizer subprocess that updates `.pi_memory/project_memory.md`. The `memory_model.active: true|false` key is a persistent on/off switch (toggled from the sidebar). The memory file is reinjected into the orchestrator's system prompt on subsequent turns. Sections maintained: Design Decisions, Facts, User Taste, User Suggestions.
 
 ### RPC Subprocess Model
 
@@ -101,8 +118,8 @@ Each `dispatch_agent` call follows a strict lifecycle:
 **Key properties:**
 - Subagents are **stateless** - each dispatch spawns a fresh process, no context carries over
 - All context must be included in every dispatch prompt
-- Session files (`.pi/agent-sessions/`) are cleaned after each dispatch
-- Combined session log (`.pi/agent-logs/`) tracks all activity chronologically
+- Session files (`~/.pi/agent-team-log/agent-sessions/`) are cleaned after each dispatch
+- Combined session log (`~/.pi/agent-team-log/`) tracks all activity chronologically
 
 ### Multi-Task Dispatch (same agent)
 
@@ -115,13 +132,14 @@ Each `dispatch_agent` call follows a strict lifecycle:
 ### Subagent System
 
 **Primary Subagents:**
-- **file_reader** - Scan codebases, find files, return minimal excerpts with line numbers
-- **searcher** - Research external docs, fetch web content, verify library usage
-- **coder** - Implement code changes, apply edits, return unified diffs
-- **tester** - Execute commands, run tests, verify results with pass/fail evidence
-- **documenter** - Update documentation, write README files, maintain changelogs
-- **doc_generator** - Create structured documents (`.xlsx`, `.pdf`, `.docx`, `.pptx`, `.html`, `.csv`, `.json`)
-- **image_analyzer** - Analyze, describe, extract text from, and classify images
+- **file_reader** (tools: read, grep, find, ls) - Scan codebases, find files, return minimal excerpts with line numbers
+- **searcher** (tools: read, grep, web-fetch, context7-search, context7-query) - Research external docs, fetch web content, verify library usage
+- **coder** (tools: bash, read, grep, find, ls, write, edit, browser) - Implement code changes, apply edits, return unified diffs
+- **tester** (tools: bash, read, grep, find, ls, browser) - Execute commands, run tests, verify results with pass/fail evidence
+- **documenter** (tools: read, grep, find, ls, write, edit) - Update documentation, write README files, maintain changelogs
+- **doc_generator** (tools: bash, read, write, edit) - Create structured documents (`.xlsx`, `.pdf`, `.docx`, `.pptx`, `.html`, `.csv`, `.json`)
+- **image_analyzer** (tools: bash, read) - Analyze, describe, extract text from, and classify images
+- **harsh_critic** (tools: read, grep, find, ls) - Gatekeeper review subagent; critiques Worker deliverables, returns `VERDICT: APPROVED`/`REJECTED`
 
 ### Agent Definition Format
 
@@ -145,8 +163,9 @@ Agent system prompt in markdown body...
 - `/agents-list` - List agents with process status and run counts
 - `/agents-grid <1-6>` - Set UI grid columns for agent status widgets
 - `/agents-team-toggle on|off|status` - Enable/disable the agent team
-- `/agents-restart` - Kill all running subagent processes
-- `Ctrl+q` - Keyboard shortcut to toggle agent team on/off
+- `/agents-parallel [on|off|status] [max N]` - Toggle global parallelism (subagent dispatch + read-only host tool calls)
+- `Ctrl+Q` - Toggle the sidebar overlay (agent status grid, skills snapshot, team list)
+- `Ctrl+Shift+E` - Toggle agent team on/off
 
 ### Example Workflow
 
@@ -166,6 +185,8 @@ Subagents reply with structured signals. Route them appropriately:
 - `BLOCKED: <reason>` - Resolve the blocker before re-dispatching
 
 **Retry limit:** Max 2 retry cycles for failures. After 2, surface the failure with evidence.
+
+**Harsh Critic Gate:** After ANY Worker subagent (coder, documenter, doc_generator, …) produces a deliverable, the orchestrator dispatches `harsh_critic` with the original task, the Worker's output, and any prior critique. It loops revise→critique→revise until the critic returns `VERDICT: APPROVED` before the output is shown or shipped. Never override a `REJECTED` verdict without addressing every listed issue; rejected issues are handed back to the Worker verbatim (respecting the 2-retry cap).
 
 ## Key Rules & Best Practices
 
@@ -191,11 +212,11 @@ Subagents reply with structured signals. Route them appropriately:
 - `/agent/` - Agent definitions, skills, extensions, and team configuration
 - `/agent/agents/` - Agent `.md` definition files, `teams.yaml` team definitions
 - `/agent/extensions/agent-team/` - Agent team extension implementation (orchestrator)
-- `/agent/extensions/` - Extension modules (web-fetch, tools, herdr, kilo, token router)
-- `/agent/skills/` - Skill definitions (flet, pyside6, electron-scaffold, architecture)
-- `/.pi/` - Project configuration, agent session files, logs
-- `/.pi/agent-sessions/` - Subagent session files (JSON/RPC state)
-- `/.pi/agent-logs/` - Combined session log files (chronological activity)
+- `/agent/extensions/` - Extension modules (agent-team, browser, context7, custom-footer, herdr-agent-state, kilo, modelcost, pi-scope, TokenRouter, web-fetch, web-fetch_crawl4ai)
+- `/agent/skills/` - Skill definitions (flet, pyside6, electron-scaffold, improve-codebase-architecture)
+- `/.pi/` - Project configuration
+- `~/.pi/agent-team-log/agent-sessions/` - Subagent session files (JSON/RPC state), cleaned after each dispatch; files older than 24 hours are purged
+- `~/.pi/agent-team-log/` - Combined session log files (chronological activity)
 - `/.pi_memory/` - Project memory file (per-turn background summarization)
 
 ## Quick Reference
@@ -207,7 +228,8 @@ Subagents reply with structured signals. Route them appropriately:
 - **Report generation** → Dispatch doc_generator with output format
 - **Image analysis** → Dispatch image_analyzer for visual content extraction
 - **Team selection** → `/agents-team` command
-- **Toggle agent mode** → `Ctrl+q` or `/agents-team-toggle`
+- **Toggle agent team** → `Ctrl+Shift+E` or `/agents-team-toggle`
+- **Sidebar** → `Ctrl+Q` (Esc closes it)
 
 See `agent/AGENTS.md` for detailed subagent rules and interfaces.
 See `agent/extensions/agent-team/` for the full extension source code (TypeScript).

@@ -10,48 +10,42 @@
 #       model: provider/model-name
 #
 # Top-level keys:
-#   memory_model: <provider>/<model>
-#       Enables the per-turn project memory feature. When set, a background
-#       subprocess summarizes each orchestrator turn and appends the result
-#       to <cwd>/.pi_memory/project_memory.md. Leave unset/empty to disable.
+#   memory_model:
+#       model: <provider>/<model>  - enables the per-turn project memory feature.
+#       active: true|false         - persistent on/off switch (sidebar toggle).
+#       A background subprocess summarizes each orchestrator turn and appends
+#       the result to <cwd>/.pi_memory/project_memory.md.
 
-memory_model: opencode/mimo-v2.5-free
+memory_model:
+  model: opencode/mimo-v2.5-free
+  active: true
 
 subagent_team:
   - name: file_reader
     model: opencode/deepseek-v4-flash-free
-    active: true
   - name: searcher
     model: opencode/deepseek-v4-flash-free
-    active: true
   - name: coder
-    active: true
   - name: tester
     model: opencode/deepseek-v4-flash-free
-    active: true
   - name: documenter
     model: opencode/deepseek-v4-flash-free
-    active: true
+    active: false
   - name: doc_generator
     model: opencode/deepseek-v4-flash-free
-    active: true
+    active: false
   - name: image_analyzer
     model: opencode/mimo-v2.5-free
-    active: true
-
+    active: false
+  - name: harsh_critic
+    model: opencode/deepseek-v4-flash-free
 
 test_subagent_team:
   - name: coder
-    active: true
   - name: documenter
-    active: true
   - name: file_reader
-    active: true
   - name: searcher
-    active: true
   - name: tester
-    active: true
   - name: image_analyzer
-    active: true
   - name: doc_generator
-    active: true
+
