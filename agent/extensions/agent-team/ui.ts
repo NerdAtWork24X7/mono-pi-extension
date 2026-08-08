@@ -586,13 +586,14 @@ export function buildSystemPrompt(args: {
 	const lookupAgents = readOnlyAgents.filter(n => !nonLookup.has(n));
 
 	// Task routing: delegate to a subagent ONLY if active; else orchestrator does it.
+	const readContextSelf = "read context yourself with host tools (read/grep/find/ls)";
 	const routeReader = args.parallel === false
 		? (readOnlyAgents.length > 0
-			? `dispatch read-only agents one at a time via \`dispatch_agent\` (parallelism off); or read context yourself with host tools`
-			: `read context yourself with host tools (read/grep/find/ls)`)
+			? `dispatch read-only agents one at a time via \`dispatch_agent\` (see Hard Rules); or ${readContextSelf}`
+			: readContextSelf)
 		: (lookupAgents.length > 0
 			? `batch independent read-only lookups (e.g. ${lookupAgents.join(", ")}) into one \`dispatch_agents\` call`
-			: `read context yourself with host tools (read/grep/find/ls)`);
+			: readContextSelf);
 	const routeWeb = isOn("searcher")
 		? `dispatch the \`searcher\` subagent`
 		: `perform the web lookup yourself via \`web-fetch\``;
@@ -729,7 +730,6 @@ ${parallelRules}
 - Stay in scope: no drive-by refactors/unrequested features — note as suggestions instead.
 - Temp files → \`${args.cwd}/tmp\`.
 - Ignore \`.venv .pi node_modules __pycache__ .git\` everywhere.
-- YAGNI, prefer one-liners.
 - Confirm the issue is actually fixed before marking done.
 - When fixing issue always test using subagent and check if there are similar issue are found and ask if user wants to fix them.
 - When You are not able to solve the problem instead of going in loop do web search and check for solution
@@ -741,7 +741,7 @@ ${orchestratorToolsSection}${memSection}
 # Subagents
 ${args.catalog}
 
-# Subagents Sumary
+# Subagents Summary
 ${subagentsSummary}
 
 ${agentMdSection}
