@@ -15,19 +15,28 @@ const SPAWN_READY_TIMEOUT_MS = 15_000;
  *  thrashing when a subagent emits many rapid text_delta events. */
 const STREAM_INVALIDATE_THROTTLE_MS = 100;
 
-export const MAX_RESPONSE_LENGTH = 20000; // Subagent tool-result cap. Keep the marker string in dispatch_agent in sync.
+export const MAX_RESPONSE_LENGTH = 60000; // Subagent tool-result cap. Keep the marker string in dispatch_agent in sync.
 export const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
+/** Auto-compactions tolerated within one dispatch before aborting as
+ *  TASK_TOO_LARGE. Compactions are allowed to complete — the subagent keeps
+ *  working — so large tasks aren't killed at their first sign of pressure.
+ *  Only an aborted compaction or exceeding this cap is treated as a bail. */
+const MAX_AUTO_COMPACTIONS = 2;
 
 // Map of event type → log message formatter for simple delegation
 const simpleLogEvents: Record<string, (ev: any) => string> = {
-	compaction_end: (ev) => ev.aborted ? `COMPACT aborted` : `COMPACT done (${ev.reason || "auto"})`,
 	auto_retry_start: (ev) => `AUTO-RETRY attempt ${ev.attempt}/${ev.maxAttempts} (${ev.delayMs}ms)`,
 	auto_retry_end: (ev) => `AUTO-RETRY ${ev.success ? "succeeded" : "failed"} (attempt ${ev.attempt})`,
 };
 
-/** Signal returned to the orchestrator when a subagent auto-compacts.
- *  The orchestrator should split the task into smaller pieces. */
-const TASK_TOO_LARGE_SIGNAL = "TASK_TOO_LARGE: subagent context grew too large and auto-compacted. Split this task into smaller pieces and re-dispatch.";
+/** Build the signal returned to the orchestrator when a subagent's context
+ *  genuinely cannot be managed — repeated auto-compactions or a compaction
+ *  that was aborted. The `TASK_TOO_LARGE:` prefix must stay first: the
+ *  orchestrator's Escalation Protocol routes on it and splits the task.
+ *  A single completed auto-compaction is NOT a failure — the subagent keeps
+ *  working and this only fires once the cap is exceeded or compaction fails. */
+const taskTooLargeSignal = (why: string) =>
+	`TASK_TOO_LARGE: ${why}. Split this task into smaller pieces and re-dispatch.`;
 
 export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) {
 	let ev: any;
@@ -47,6 +56,7 @@ export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) 
 		case "agent_end": return handleAgentEnd(ctx, ap, ev);
 		case "extension_ui_request": return autoRespondUI(ap, ev);
 		case "compaction_start": return handleCompactionStart(ctx, ap, ev);
+		case "compaction_end": return handleCompactionEnd(ctx, ap, ev);
 		default: {
 			const fmt = simpleLogEvents[ev.type];
 			if (fmt) ctx.logger.log(fmt(ev), ap);
@@ -54,23 +64,49 @@ export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) 
 	}
 }
 
-/** Auto-compaction in a subagent means the task is too large for its context
- *  window. End the subagent immediately and return a signal so the orchestrator
- *  can split the task into smaller pieces. */
+/** Auto-compaction in a subagent means its context is under pressure. Let the
+ *  compaction complete and the subagent continue — killing on every compaction
+ *  made large tasks impossible (the orchestrator itself compacts and keeps
+ *  working). Only abort when a dispatch auto-compacts too many times or a
+ *  compaction is aborted (context genuinely unmanageable). */
 function handleCompactionStart(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
-	// Ignore duplicate compaction events after we've already terminated.
+	// Ignore duplicate events after we've already terminated.
 	if (ap.autoCompacted) return;
 	const reason = ev.reason || "auto";
-	// Manual compacts are intentional; only abort on automatic compactions.
+	// Manual compacts are intentional; never abort on them.
 	if (reason === "manual") {
 		ctx.logger.log(`COMPACT start (reason: manual)`, ap);
 		return;
 	}
+	ap.compactionCount++;
+	ctx.logger.log(`COMPACT auto #${ap.compactionCount} — continuing dispatch`, ap);
+	if (ap.compactionCount > MAX_AUTO_COMPACTIONS) {
+		abortTooLarge(ctx, ap, `auto-compacted ${ap.compactionCount} times`);
+	}
+}
+
+/** compaction_end: a completed compaction is fine (the subagent keeps going);
+ *  an aborted one means the context could not be summarized — the task
+ *  genuinely doesn't fit, so abort and signal the orchestrator to split it. */
+function handleCompactionEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
+	if (ap.autoCompacted) return;
+	if (!ev.aborted) {
+		ctx.logger.log(`COMPACT done`, ap);
+		return;
+	}
+	ctx.logger.log(`COMPACT aborted — context could not be compacted`, ap);
+	abortTooLarge(ctx, ap, "compaction aborted");
+}
+
+/** Terminate the dispatch with a TASK_TOO_LARGE signal (including the concrete
+ *  reason) so the orchestrator splits the task instead of retrying it whole. */
+function abortTooLarge(ctx: AgentTeamContext, ap: AgentProc, why: string) {
+	if (ap.autoCompacted) return;
 	ap.autoCompacted = true;
-	ctx.logger.logErrorBox(ap, "AUTO-COMPACT", "subagent context grew too large — ending dispatch");
-	ctx.resolveIfPending(ap, TASK_TOO_LARGE_SIGNAL, 1);
+	ctx.logger.logErrorBox(ap, "AUTO-COMPACT", `subagent context grew too large (${why}) — ending dispatch`);
+	ctx.resolveIfPending(ap, taskTooLargeSignal(why), 1);
 	ctx.killProc(ap, true);
-	if (ctx.wCtx) ctx.wCtx.ui.notify(ctx.tag(ap, "auto-compacted — task too large"), "warning");
+	if (ctx.wCtx) ctx.wCtx.ui.notify(ctx.tag(ap, `auto-compacted — ${why}`), "warning");
 	ctx.invalidate();
 }
 

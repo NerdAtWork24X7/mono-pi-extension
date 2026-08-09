@@ -19,7 +19,7 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 	pi.registerTool({
 		name: "dispatch_agent",
 		label: "Dispatch Agent",
-		description: "Dispatch a task to a specialist agent. A fresh process is spawned per task — no context carries over between dispatches. Include all necessary context in the task description.",
+		description: "Dispatch a task to a specialist agent. A fresh process is spawned per task — no context carries over between dispatches. Include all necessary context in the task description. For creating/rewriting large files, do NOT paste full file content into the task — give the path + a compact spec and instruct the agent to build the file incrementally within one dispatch (write the skeleton, then append sections via edit calls).",
 		parameters: Type.Object({
 			agent: Type.String({ description: "Agent name (case-insensitive)" }),
 			task: Type.String({ description: "Task description for the agent. Use this OR `tasks`." }),

@@ -47,6 +47,7 @@ export interface AgentProc {
 	resetPongTimeout?: () => void; // resets the 10-min pong timer
 	resolveDispatch: ((output: string, code: number) => void) | null;
 	autoCompacted: boolean;        // true if subagent hit auto-compaction
+	compactionCount: number;       // auto-compactions in the current dispatch (abort at cap)
 	sessionFile: string;
 	systemPromptFile: string;
 	lastPromptHash?: string;
@@ -233,6 +234,7 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
 		timer: undefined, dispatchTimeout: undefined,
 		lastActivity: 0, resetPongTimeout: undefined, resolveDispatch: null,
 		autoCompacted: false,
+		compactionCount: 0,
 		sessionFile: "", systemPromptFile: "", lastPromptHash: undefined,
 		streamLineBuf: "",
 		logLines: [],
@@ -272,6 +274,7 @@ export function resetForDispatch(ap: AgentProc) {
 	ap.streamLineBuf = "";
 	ap.resolveDispatch = null;
 	ap.autoCompacted = false;
+	ap.compactionCount = 0;
 	ap.toolCount = 0;
 	ap.task = "";
 	ap.lastWork = "";
