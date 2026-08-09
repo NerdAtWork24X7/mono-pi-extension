@@ -2,6 +2,7 @@
 name: harsh_critic
 description: Use this critic subagent as a gatekeeper step after any Worker subagent produces a deliverable, looping revise→critique→revise until it returns APPROVED, before the output is shown to the user or shipped. 
 tools: read, grep, find, ls
+thinking: off
 ---
 
 

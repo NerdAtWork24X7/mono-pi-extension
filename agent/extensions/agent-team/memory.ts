@@ -2,8 +2,9 @@ import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "f
 import { join, resolve as resolvePath } from "path";
 import type { SessionLogger } from "./core";
 import type { AgentDef, AgentProc, MemoryState } from "./core";
-import { blankProcState, hasPiScopeExtension, parseModelId } from "./core";
+import { blankProcState, parseModelId } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
+import { buildExtensionCliArgs, buildScopeNameArgs } from "./extensions";
 
 /** Tight system prompt for the memory updater subprocess. The LLM is the
  *  sole writer of the memory file; the host only observes that a write
@@ -290,17 +291,17 @@ export class MemoryManager {
 		const cliArgs = [
 			"--mode", "rpc",
 			"-p",
-			"--no-extensions",
-			...extPaths.flatMap(p => ["--extension", p]),
+			...buildExtensionCliArgs(extPaths),
 			...(provider ? ["--provider", provider] : []),
 			"--no-skills",
 			"--no-context-files",
+			"--thinking", "off",
 			"--model", modelName,
 			"--tools", memoryAp.def.tools,
 			"--system-prompt", memoryAp.systemPromptFile,
 			"--session", memoryAp.sessionFile,
 			"--name", memoryAp.def.name,
-			...(hasPiScopeExtension(extPaths) ? ["--o-name", memoryAp.def.name] : []),
+			...buildScopeNameArgs(extPaths, memoryAp.def.name),
 		];
 
 		const bin = process.platform === "win32" ? "pi.cmd" : "pi";

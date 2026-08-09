@@ -241,18 +241,6 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
 	};
 }
 
-/** Returns true if the Pi Scope observability extension is present in the
- *  list of extension entry-point paths. Used to decide whether it is safe
- *  to pass Pi-Scope-specific CLI flags (e.g. --o-name) to spawned pi
- *  subprocesses. */
-export function hasPiScopeExtension(extPaths: string[]): boolean {
-	return extPaths.some((p) => {
-		const normalized = p.replace(/\\/g, "/");
-		const base = normalized.split("/").pop()?.replace(/\.((ts|js))$/i, "") ?? "";
-		return base === "pi-scope" || /(^|\/)pi-scope\//.test(normalized);
-	});
-}
-
 export function clearTimers(ap: AgentProc) {
 	clearInterval(ap.timer);
 	if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }

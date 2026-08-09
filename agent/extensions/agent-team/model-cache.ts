@@ -13,10 +13,27 @@
 
 import { homedir } from "os";
 import { join } from "path";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync, unlinkSync } from "fs";
+import { randomBytes } from "crypto";
 
 const CACHE_DIR = join(homedir(), ".pi", "cache");
 const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+/** Owner-only. Cached model lists can reflect account-specific entitlements
+ *  (e.g. a provider's custom/allowed model set for the caller's API key), so
+ *  the cache directory and its files should not be world-readable on shared
+ *  machines. */
+const DIR_MODE = 0o700;
+const FILE_MODE = 0o600;
+
+function ensureCacheDir(): void {
+	mkdirSync(CACHE_DIR, { recursive: true, mode: DIR_MODE });
+	// mkdirSync's `mode` isn't reliably honoured for pre-existing directories
+	// (e.g. left over from before this change, or created with a wider
+	// process umask), so enforce it explicitly. Best-effort: unsupported on
+	// some platforms/filesystems.
+	try { chmodSync(CACHE_DIR, DIR_MODE); } catch { /* best effort */ }
+}
 
 interface CacheEnvelope<T> {
 	cachedAt: number;
@@ -64,15 +81,21 @@ export async function loadCachedModels<T>(
 
 	try {
 		const data = await fetchFn();
+		// Write via temp file + rename so a concurrent reader (host + a
+		// subagent booting at the same time) never sees a torn file. The temp
+		// name is unique per call (pid + random suffix) so two writers racing
+		// on the same key — e.g. two host processes booting at once — never
+		// share a path and interleave writes into the same file; whichever
+		// rename lands last simply wins atomically instead of corrupting.
+		const tmp = `${cacheFile(key)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 		try {
-			mkdirSync(CACHE_DIR, { recursive: true });
-			// Write via temp file + rename so a concurrent reader (host + a
-			// subagent booting at the same time) never sees a torn file.
-			const tmp = `${cacheFile(key)}.tmp`;
-			writeFileSync(tmp, JSON.stringify({ cachedAt: Date.now(), data } satisfies CacheEnvelope<T[]>));
+			ensureCacheDir();
+			writeFileSync(tmp, JSON.stringify({ cachedAt: Date.now(), data } satisfies CacheEnvelope<T[]>), { mode: FILE_MODE });
 			renameSync(tmp, cacheFile(key));
 		} catch {
-			/* cache write failure is non-fatal */
+			/* cache write failure is non-fatal — but don't leave an orphaned
+			 * temp file sitting on disk forever if we got past the write. */
+			try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
 		}
 		return data;
 	} catch (err) {

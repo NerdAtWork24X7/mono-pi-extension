@@ -130,76 +130,8 @@ export function resolveSkillPath(name: string): string | undefined {
 	return existsSync(p) ? p : undefined;
 }
 
-/** Collect extension paths (excluding agent-team and disabled extensions) for -e flags */
-export function scanExtensionPaths(cwd: string): string[] {
-	const dirs = [
-		join(cwd, ".pi", "extensions"),
-		join(getAgentDir(), "extensions"),
-	];
-	const disabled = loadDisabledExtensions();
-	const paths: string[] = [];
-	for (const dir of dirs) {
-		if (!existsSync(dir)) continue;
-		try {
-			for (const f of readdirSync(dir, { withFileTypes: true })) {
-				if (f.isDirectory()) {
-					const idx = join(dir, f.name, "index.ts");
-					if (existsSync(idx) && !isDisabled(idx, disabled)) paths.push(idx);
-				} else if (f.isFile() && f.name.endsWith(".ts")) {
-					const p = join(dir, f.name);
-					if (!isDisabled(p, disabled)) paths.push(p);
-				}
-			}
-		} catch { }
-	}
-	// Also load absolute-path extensions from settings.json (e.g. observability)
-	try {
-		const settingsPath = join(getAgentDir(), "settings.json");
-		if (existsSync(settingsPath)) {
-			const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
-			for (const ext of (raw.extensions || [])) {
-				if (typeof ext !== "string") continue;
-				if (ext.startsWith("-")) continue; // disabled
-				const resolved = ext.startsWith("/") ? ext : join(getAgentDir(), ext);
-				if (existsSync(resolved) && !paths.includes(resolved)) paths.push(resolved);
-			}
-		}
-	} catch { }
-	return paths.filter(p => !p.includes("agent-team"));
-}
-
-/** Load disabled extensions from settings.json */
-export function loadDisabledExtensions(): Set<string> {
-	const disabled = new Set<string>();
-	try {
-		const settingsPath = join(getAgentDir(), "settings.json");
-		if (!existsSync(settingsPath)) return disabled;
-		const raw = JSON.parse(readFileSync(settingsPath, "utf-8"));
-		const exts: string[] = raw.extensions || [];
-		for (const e of exts) {
-			if (typeof e === "string" && e.startsWith("-")) {
-				disabled.add(e.slice(1));
-			}
-		}
-	} catch { }
-	return disabled;
-}
-
-/** Check if an extension path is disabled. Match is by basename so that
- *  patterns like "foo/index.ts" do not also match "myfoo/index.ts". */
-export function isDisabled(extPath: string, disabled: Set<string>): boolean {
-	const base = extPath.split(/[/\\]/).pop() || extPath;
-	for (const pattern of disabled) {
-		// Normalise pattern: if it has no separator, treat it as a basename
-		// match. Otherwise require the full path to end with the pattern.
-		if (!pattern.includes("/") && !pattern.includes("\\")) {
-			if (base === pattern) return true;
-		} else if (extPath.endsWith(pattern)) {
-			return true;
-		}
-	}
-	return false;
-}
+// Extension discovery (scanExtensionPaths / loadDisabledExtensions / isDisabled)
+// now lives in ./extensions — see that file for rationale.
 
 export function scanAgents(cwd: string): AgentDef[] {
 	const dirs = [

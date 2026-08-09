@@ -5,9 +5,10 @@ import { join } from "path";
 import type { AgentProc } from "./core";
 import type { SessionLogger } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
-import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, hasPiScopeExtension, parseModelId, filterSkills, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
+import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, parseModelId, filterSkills, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext } from "./core";
 import { resolveSkillPath } from "./config";
+import { buildExtensionCliArgs, buildScopeNameArgs } from "./extensions";
 
 const KILLALL_TIMEOUT_MS = 5_000;
 const SPAWN_READY_TIMEOUT_MS = 15_000;
@@ -778,17 +779,16 @@ export class ProcessManager {
 		const args = [
 			"--mode", "rpc",
 			"-p",
-			"--no-extensions",
-			...extPaths.flatMap(p => ["--extension", p]),
+			...buildExtensionCliArgs(extPaths),
 			...skillFlags,
 			...(provider ? ["--provider", provider] : []),
 			"--model", modelName,
+			...(ap.def.thinking ? ["--thinking", ap.def.thinking] : []),
 			"--tools", ap.def.tools,
 			"--system-prompt", ap.systemPromptFile,
 			"--session", ap.sessionFile,
 			"--name", ap.def.name,
-			...(hasPiScopeExtension(extPaths) ? ["--o-name", ap.def.name] : []),
-
+			...buildScopeNameArgs(extPaths, ap.def.name),
 		];
 
 		const sub = spawnRpcSubprocess({
