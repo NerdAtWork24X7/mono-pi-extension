@@ -30,7 +30,7 @@ import { displayName, shortModel, SessionLogger, RwLock, isWritable, filterSkill
 import { loadPersistedConfig, savePersistedConfig, scanAgents, loadTeamsYaml, discoverEnabledSkills, loadAgentMd } from "./config";
 import { scanExtensionPaths } from "./extensions";
 import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchMany as dispatchManyImpl, dispatchAgentMany as dispatchAgentManyImpl, makeHandleEvent } from "./orchestration";
-import { MemoryManager, extractLastAssistantText } from "./memory";
+import { MemoryManager, extractLastAssistantText, installMemoryEscEditor } from "./memory";
 import { buildCatalog, buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl, closeSidebar } from "./ui";
 import { registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
 import { homedir } from "os";
@@ -452,6 +452,7 @@ export default function (pi: ExtensionAPI) {
 		);
 
 		return buildSystemPrompt({
+			ctx: team,
 			catalog,
 			date: new Date(t0).toISOString().split("T")[0],
 			cwd,
@@ -472,7 +473,9 @@ export default function (pi: ExtensionAPI) {
 		if (!team.enabled) return;
 		if (!team.memoryManager) return;
 		const text = extractLastAssistantText(event && event.messages);
-		team.memoryManager.recordOutput(text);
+		// Pass the turn's abort signal so ESC/abort of the turn also cancels
+		// the memory summarizer spawned for it (parity with dispatch clones).
+		team.memoryManager.recordOutput(text, _ctx.signal);
 		team.invalidate();
 	});
 
@@ -488,6 +491,10 @@ export default function (pi: ExtensionAPI) {
 		team.orchestratorModel = m0 ? (m0.provider ? `${m0.provider}/${m0.id}` : m0.id) : "";
 
 		await team.loadAgents(_ctx.cwd);
+
+		// ESC aborts an in-flight memory summary (the key is reserved, so this
+		// goes through a custom editor component rather than registerShortcut).
+		if (team.memoryManager) installMemoryEscEditor(team, _ctx);
 
 		team.initWidget();
 

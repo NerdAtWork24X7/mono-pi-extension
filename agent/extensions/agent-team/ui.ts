@@ -4,7 +4,7 @@ import { Text, matchesKey, Key } from "@mariozechner/pi-tui";
 import type { AgentProc, AgentTeamContext } from "./core";
 import { displayName, fmtTok, hrPad, shortModel, ansiRe, isWritable, filterSkills } from "./core";
 import { saveTeamsYaml, loadTeamsYaml, discoverAllSkills, type Skill } from "./config";
-import { MemoryManager } from "./memory";
+import { MemoryManager, installMemoryEscEditor, removeMemoryEscEditor } from "./memory";
 import { makeHandleEvent } from "./orchestration";
 import { mkdirSync } from "fs";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
@@ -407,10 +407,12 @@ export function openSidebar(ctx: AgentTeamContext) {
 							// Toggle memory on/off
 							if (ctx.memoryManager) {
 								// Disable — preserve original model for re-enabling
+								try { ctx.memoryManager.abort?.(); } catch { }
 								try { ctx.memoryManager.awaitIdle?.(0); } catch { }
 								ctx.memoryManager = null;
 								ctx.memoryModel = "";
 								ctx.memoryFile = "";
+								removeMemoryEscEditor(ctx.wCtx);
 							} else {
 								// Enable — use preserved original model or read from teams.yaml
 								let modelToEnable = ctx.originalMemoryModel;
@@ -440,6 +442,7 @@ export function openSidebar(ctx: AgentTeamContext) {
 										},
 										handleEvent: makeHandleEvent(ctx),
 									});
+									installMemoryEscEditor(ctx, ctx.wCtx);
 								}
 							}
 							// Persist toggle to teams.yaml (preserve original value when disabling)
@@ -559,7 +562,9 @@ export function buildCatalog(ctx: AgentTeamContext): string {
 }
 
 export function buildSystemPrompt(args: {
-	catalog: string;
+	ctx: AgentTeamContext;
+	/** Retained for backward compatibility with the call site; the prompt now reads live team state from ctx. */
+	catalog?: string;
 	date: string;
 	cwd: string;
 	memory?: { file: string } | null;
@@ -571,244 +576,129 @@ export function buildSystemPrompt(args: {
 	readOnlyAgents?: string[];
 	skillAgentMap?: Record<string, string[]>;
 }): { systemPrompt: string } {
-	// ── Active-subagent sets (inputs are already active-only) ──
-	const readOnlyAgents = args.readOnlyAgents || [];
-	const writableAgents = args.readOnlyAgents
-		? args.catalog.split(/^### /m)
-			.filter(Boolean)
-			.map(block => block.split("\n")[0].trim())
-			.filter(name => !readOnlyAgents.includes(name))
-		: [];
-	const activeSet = new Set<string>([...readOnlyAgents, ...writableAgents]);
-	const isOn = (n: string) => activeSet.has(n);
-	// read-only "lookup" agents — exclude non-lookup read-only agents (tester runs commands, harsh_critic is a gatekeeper, image_analyzer handles images)
-	const nonLookup = new Set(["tester", "harsh_critic", "image_analyzer"]);
-	const lookupAgents = readOnlyAgents.filter(n => !nonLookup.has(n));
 
-	// Task routing: delegate to a subagent ONLY if active; else orchestrator does it.
-	const readContextSelf = "read context yourself with host tools (read/grep/find/ls)";
-	const routeReader = args.parallel === false
-		? (readOnlyAgents.length > 0
-			? `dispatch read-only agents one at a time via \`dispatch_agent\` (see Parallel & Serialization Rule); or ${readContextSelf}`
-			: readContextSelf)
-		: (lookupAgents.length > 0
-			? `batch independent read-only lookups (e.g. ${lookupAgents.join(", ")}) into one \`dispatch_agents\` call`
-			: readContextSelf);
-	const routeWeb = isOn("searcher")
-		? `dispatch the \`searcher\` subagent`
-		: `perform the web lookup yourself via \`web-fetch\``;
-	const routeCoder = isOn("coder")
-		? `dispatch the \`coder\` subagent`
-		: `edit/create code yourself directly (write/edit tools)`;
-	const routeDocGen = isOn("doc_generator")
-		? `dispatch \`doc_generator\``
-		: `write the output file yourself directly`;
-	const routeTester = isOn("tester")
-		? `dispatch the \`tester\` subagent with exact commands`
-		: `run the verification commands yourself via \`bash\``;
-	const routeDocumenter = isOn("documenter")
-		? `dispatch the \`documenter\` subagent`
-		: `write the documentation yourself`;
-	const routeImage = isOn("image_analyzer")
-		? `dispatch \`image_analyzer\``
-		: `you cannot inspect images — ask the user or state visual verification isn't possible, never infer from path`;
-	const routeCritic = args.harshCriticEnabled
-		? `dispatch \`harsh_critic\` as the gatekeeper (see Harsh Critic Gate)`
-		: `skip the critic gate and self-review the deliverable against acceptance criteria`;
+	const ctx = args.ctx;
 
-	const routingSection = `
-# Task Routing (by subagent availability)
-For each capability, use its subagent ONLY if it is active; otherwise YOU do the task directly — never claim a disabled subagent did work.
-- Read-only context lookup: ${routeReader}.
-- Web search / fetch: ${routeWeb}.
-- Code edit / creation: ${routeCoder}.
-- File-output generation (.xlsx/.pdf/.docx/.pptx/.html/.csv/.json/…): ${routeDocGen}.
-- Post-deliverable critique: ${routeCritic}.
-- Run tests / build / verify: ${routeTester}.
-- Public-surface documentation: ${routeDocumenter}.
-- Image analysis: ${routeImage}.
+	const enabled = Array.from(ctx.procs.values()).filter(a => !ctx.disabledAgents.has(a.def.name.toLowerCase()));
 
-`;
+	const dispatchMode = (tools: string): string =>
+		tools.split(",").map(t => t.trim().toLowerCase()).filter(Boolean)
+			.some(t => t === "write" || t === "edit") ? "single" : "parallel";
 
-	// ── Subagents table — built from the active-only catalog. A disabled
-	//    subagent never appears here; the routing rules below say who does
-	//    its work instead (the orchestrator). ──
-	const rows = args.catalog.split(/^### /m).map(b => b.trim()).filter(Boolean).map(b => {
-		const lines = b.split("\n");
-		const name = lines[0].trim();
-		const desc = lines.slice(1).filter(l => !l.trim().startsWith("**")).join(" ").trim();
-		const tools = (lines.find(l => l.trim().startsWith("**Tools:**")) || "").replace(/^\*\*Tools:\*\*\s*/, "").trim();
-		const skills = (lines.find(l => l.trim().startsWith("**Skills:**")) || "").replace(/^\*\*Skills:\*\*\s*/, "").trim();
-		return { name, desc, tools, skills };
-	});
-	const escCell = (s: string) => s.replace(/\|/g, "\\|");
-	const anySkills = rows.some(r => r.skills);
-	const tableHead = `| Subagent | Use for | Tools${anySkills ? " | Skills" : ""} |`;
-	const tableSep = `|---|---|---${anySkills ? " | ---" : ""}|`;
-	const tableBody = rows.map(r =>
-		`| ${escCell(r.name)} | ${escCell(r.desc || "—")} | ${escCell(r.tools || "—")}${anySkills ? ` | ${escCell(r.skills || "—")}` : ""} |`
-	).join("\n");
-	const subagentSection = `
-# Subagents
-Stateless — see only what you put in the dispatch prompt. Each dispatch: task + acceptance criteria (1 line) + all relevant paths/excerpts/errors/decisions + expected return format. Never reference prior turns.
+	const tableRows = enabled.map(a => "| " + a.def.name + " | " + (a.def.description || "(no description)").replace(/\s+/g, " ") + " | " + (a.def.tools || "") + " | " + dispatchMode(a.def.tools) + " |").join("\n");
 
-${rows.length > 0 ? `${tableHead}\n${tableSep}\n${tableBody}` : "*No subagents active — you do all the work yourself.*"}
-**Read-only (parallelizable via \`dispatch_agents\`):** ${readOnlyAgents.join(", ") || "none active — do lookups yourself with host tools"}
-**Writable (serialized via \`dispatch_agent\`, one at a time):** ${writableAgents.join(", ") || "none active — do the work yourself directly"}
+	// ── Dynamic, per-subagent enable checks (no hardcoded agent list) ──
+	// Each role is checked individually against the live enabled set; when a
+	// role's subagent is absent or disabled, the orchestrator performs the task.
+	const findEnabled = (role: string): string | null =>
+		enabled.find(a => a.def.name.toLowerCase() === role.toLowerCase())?.def.name ?? null;
+	const tick = (n: string) => "`" + n + "`";
 
-If a subagent is disabled, do its task yourself directly — never claim a disabled subagent did work.${isOn("searcher")
-			? `\n\n**Your own \`context7\`/\`web-fetch\` tools**: use them directly only for a single known symbol/URL you can resolve in one shot; anything requiring more than one lookup or open-ended discovery → dispatch \`searcher\` instead.`
-			: ""}
-`;
+	const searcher = findEnabled("searcher");
+	const docGen = findEnabled("doc_generator");
+	const fileReader = findEnabled("file_reader");
+	const tester = findEnabled("tester");
+	const documenter = findEnabled("documenter");
+	const harsh = findEnabled("harsh_critic");
 
-	// ── Parallel & Serialization Rule (single source of truth) ──
-	const parallelSection = args.parallel === false
-		? `
-# Parallel & Serialization Rule (single source of truth)
-- **Serialization (parallelism OFF)**: no subagent dispatch is ever batched or concurrent, read-only or writable — every subagent goes through \`dispatch_agent\` one at a time. Never start a second dispatch while one is still in flight.
-- Fire read-only host tool calls (read/grep/find/ls) one per turn too.${writableAgents.length > 0 ? `\n- Writable agents (${writableAgents.join(", ")}): always \`dispatch_agent\`, one at a time, never in parallel with each other or with another write in flight.` : ""}
-`
-		: `
-# Parallel & Serialization Rule (single source of truth)
-${readOnlyAgents.length > 0
-			? `- Independent read-only lookups (${readOnlyAgents.join(", ")}) → batch into ONE \`dispatch_agents\` call so they run concurrently; cap ~6 per batch, split into sequential batches if more needed.`
-			: `- No read-only subagent active — do lookups yourself with host tools (read/grep/find/ls).`}
-${readOnlyAgents.length > 1 ? `- When splitting web lookups across parallel agents, partition URLs/queries into disjoint subsets — never give two agents the same URL or query.` : ""}
-${writableAgents.length > 0
-			? `- Writable agents (${writableAgents.join(", ")}): always \`dispatch_agent\`, one at a time, never in parallel with each other or with another write in flight.`
-			: `- No writable subagent active — perform writes/edits yourself directly.`}
-- You may fire multiple read-only host tool calls (read/grep/find/ls) directly within one turn without dispatching.
-`;
+	// if no subagents
+	const subagents_header = (!enabled || enabled.length === 0) ? `` : `## Subagents
+Each subagent is stateless and cannot see history. Ensure each dispatch includes the task, acceptance criteria (1 line), all relevant paths/excerpts/errors/decisions, and expected return format.
+If subagent is not able to perform Task, refine the task into smaller chunks and dispatch again.Maximum 2 retries else you perform the task yourself.
 
-	// ── Ladder exception — file-output tasks go to doc_generator if active, else the orchestrator writes directly ──
-	const ladderException = isOn("doc_generator")
-		? `**Exception:** any task producing a file (.xlsx/.pdf/.docx/.pptx/.html/.csv/.json/…) always → dispatch \`doc_generator\`, however simple, regardless of size — overrides the ladder. Never inline file content yourself.`
-		: `**Exception:** any task producing a file (.xlsx/.pdf/.docx/.pptx/.html/.csv/.json/…) → write the file directly yourself (write/edit tools); never paste large content into chat.`;
+| Subagent | Use for | Tools | Dispatch |
+|---|---|---|---|`;
 
-	// ── Workflow steps 3 and 5 must match parallelSection exactly, or a
-	//    parallel:false run gets Workflow text telling it to batch
-	//    dispatches while Parallel & Serialization Rule forbids it. ──
-	const readOnlyNote = lookupAgents.length > 0
-		? `Dispatch ${lookupAgents.join("/")} only if current context can't answer`
-		: `No read-only lookup subagent active — read context yourself with host tools (read/grep/find/ls)`;
-	const workflowStep3 = args.parallel === false
-		? ` **Fill context gaps.** ${readOnlyNote}; dispatch each one at a time via \`dispatch_agent\` (see Parallel & Serialization Rule — parallelism is off).`
-		: ` **Fill context gaps.** ${readOnlyNote}${readOnlyAgents.length > 0 ? `; batch independent read-only lookups into a single \`dispatch_agents\` call to run them in parallel` : ``}.`;
-	const workflowStep5 = args.parallel === false
-		? ` **Dispatch the right subagent**, one at a time via \`dispatch_agent\`. If no writable subagent is active, do the work yourself (see Task Routing). Check every result against acceptance criteria before proceeding. If a writable agent's output fails acceptance criteria twice in a row, stop and surface it to the user rather than re-dispatching a third time.`
-		: ` **Dispatch the right subagent.** ${readOnlyAgents.length > 0 ? `Read-only agents: batch into one \`dispatch_agents\` call (runs concurrently). ` : ``}${writableAgents.length > 0 ? `Writable agents (${writableAgents.join(", ")}): use \`dispatch_agent\` one at a time. ` : `No writable subagent active — do the work yourself (see Task Routing). `}Check every result against acceptance criteria before proceeding.`;
+	// Tone & Style web fallback
+	const webFallback = searcher
+		? "dispatch the " + tick(searcher) + " subagent instead of guessing"
+		: "perform the web lookup via `web-fetch` instead of guessing";
 
-	const harshCriticSection = args.harshCriticEnabled
-		? `\n# Harsh Critic Gate
+	// Task Ladder file-generation override
+	const fileGenNote = docGen
+		? "always dispatch the " + tick(docGen) + " subagent, even if the file generation task seems simple"
+		: "generate the file directly (write the file directly, still don't paste large content into chat).";
 
-\`harsh_critic\` is enabled — use it as a gatekeeper after ANY Worker subagent produces a deliverable (code, doc, output). Dispatch it with the original task, the Worker's output, and any prior critique. Loop revise → critique → revise until it returns \`VERDICT: APPROVED\` before showing the output to the user. Never skip the gate to save a round-trip; never override a REJECTED without addressing every listed issue. On rejection, pass its ISSUES back to the Worker verbatim (not paraphrased), respecting the retry cap in Workflow step 7.\n`
-		: "";
+	// Workflow step 3: read-only context lookups
+	const readers = [fileReader, searcher].filter((n): n is string => !!n);
+	const ctxGap = readers.length
+		? "dispatch " + readers.map(tick).join("/") + ", batching independent read-only lookups"
+		: "perform the lookups directly";
 
-	const largeFileSection = `
-# Large-File Protocol
-- Never paste full file content into a dispatch task. Give the target path + a compact spec (sections, key functions, constraints); let the subagent read and compose itself.
-- Files >~300 lines: ${isOn("coder")
-			? `one \`coder\` dispatch — \`write\` the skeleton/first chunk, then append each section with \`edit\` calls. Never one giant \`write\`.`
-			: `build them incrementally yourself — \`write\` the skeleton/first chunk, then append each section with \`edit\` calls. Never one giant \`write\`.`}
-- If a single dispatch still fails (repeated \`TASK_TOO_LARGE\`/truncated output): split into 2-3 sequential dispatches, each appending to the previous file.
-- A subagent auto-compacting once and continuing is not a failure — only repeated or aborted compaction is.
-`;
+	// Workflow step 6: quality gate (harsh critic)
+	const qualityGate = harsh
+		? "Quality gate: dispatch " + tick(harsh) + " after any worker subagent produces a deliverable; loop revise→critique→revise until 'VERDICT: APPROVED'."
+		: "self-verify the deliverable before marking done.";
 
-	const orchestratorToolsSection = args.orchestratorTools && args.orchestratorTools.length > 0
-		? `\n# Orchestrator Tools\n\nActive tools available to you directly (without dispatching a subagent):\n${args.orchestratorTools.join(", ")}\n`
-		: "";
-	const memSection = args.memory?.file
-		? `\n# Memory\n\nA background process appends key context, decisions, and open questions to \`${args.memory.file}\` after each turn. Read it at the start of a task to recall prior project state and follow-ups.\n`
-		: "";
+	// Workflow step 7: verification
+	const verifyNote = tester
+		? "Verify changes (dispatch " + tick(tester) + ", documenting evidence of success or failure."
+		: "Verify changes by running the verification commands, documenting evidence of success or failure.";
+
+	// Workflow step 9: public-surface docs
+	const docsNote = documenter
+		? "If the change affects public surfaces, dispatch " + tick(documenter) + " to update docs."
+		: "If the change affects public surfaces, update the docs.";
+
+	const taskRouting = (!enabled || enabled.length === 0) ? "Perform the task yourself" : "Dispatch the appropriate subagent from the available subagents";
+
+	// AGENTS.md content (was referenced as agentMdSection but never defined)
 	const agentMdSection = args.agentMd
-		? `\n${args.agentMd}\n`
+		? "\n## Project AGENTS.md\n" + args.agentMd + "\n"
 		: "";
-	const skillsSection = args.skills && args.skills.length > 0
-		? `\n# Available Skills\n\nConsult these yourself before planning step 3 if the task matches; they inform *your* plan and acceptance criteria, not a subagent's prompt — subagents don't read this list.\n\n${args.skills.map(s => {
-			const agents = args.skillAgentMap?.[s.name];
-			const agentSuffix = agents && agents.length > 0 ? ` (agents: ${agents.join(", ")})` : "";
-			return `- **${s.name}**: ${s.description}${agentSuffix}`;
-		}).join("\n")}\n`
-		: "";
+
 	return {
-		systemPrompt: `
-# Identity
-Primary reasoning agent for a multi-agent team: decompose, dispatch, verify against acceptance criteria, synthesize. You reason, plan, and decide — subagents never do. They only execute context-heavy work (large files, web, exec).
+		systemPrompt: `## Identity
+You are the primary reasoning agent for a multi-agent team responsible for task decomposition, dispatching, verification against acceptance criteria, and synthesis. 
+Your role is to reason, plan, and dispatch subagents for context-heavy work only (e.g., large files, web searches, execution tasks).
 
-# Tone & Style
-Lazy senior dev: efficient not careless, best code is code never written. Concise, direct, no filler/apologies/restating prompt. Output = GFM in monospace CLI, minimize tokens. No emojis unless asked. Stuck beyond your knowledge → ${routeWeb}, don't guess. Ambiguity → see **Ambiguity Rule**.
 
-## Ladder (stop at first rung that holds)
-1. Needed at all? No → skip, say so (YAGNI). 2. Stdlib? 3. Native platform feature? 4. Already-installed dep? 5. One line? 6. Minimum code.
-${ladderException}
+## Tone & Style
+Act as a lazy senior developer: be efficient (not careless), as the best code is code never written. Your responses should be concise, direct, and free of filler or apologies. Use monospace CLI format in GFM, minimizing token usage; no emojis unless requested. If you are unsure beyond your knowledge, ${webFallback}. Ask questions for handling unclear situations.
 
-# Principles
-- YAGNI Principle. Do not add features that are not required
-- DRY Principle. Do not repeat yourself
-- KISS Principle: Keep It Simple, Stupid
-- SOLID Principle: five rules for object-oriented design
+## Task Ladder (stop at the first applicable rung)
+1. Is this needed? If no, state so (YAGNI).
+2. Is it in the standard library?
+3. Is it a native platform feature?
+4. Is it an already-installed dependency?
+5. Can it be done in one line?
+6. Is it the minimum code required?
+**Note:** For any task resulting in a file (.xlsx/.pdf/.docx/.pptx/.html/.csv/.json), ${fileGenNote}
 
-# Ambiguity Rule
-- Resolvable from context, project convention, or a readable file → resolve yourself, note the assumption, proceed.
-- Genuine judgment call (product decision, destructive-vs-safe tradeoff, no readable precedent) → ask the user ONE question, then proceed.
-- Never block on ambiguity you can resolve yourself; never guess on one you can't.
+## Principles
+- **YAGNI Principle**: Avoid adding unnecessary features.
+- **DRY Principle**: Do not repeat yourself.
+- **KISS Principle**: Keep It Simple, Stupid.
+- **SOLID Principles**: Adhere to the five rules of object-oriented design.
 
-${routingSection}${subagentSection}${parallelSection}
-# Workflow
-1. Restate goal (1 line). Apply Ambiguity Rule if needed.
-2. Always check for all reference variables related to the task from project folder.${args.memory?.file ? ` Check project memory (\`${args.memory.file}\`) for prior state and follow-ups.` : ""}
-3. ${workflowStep3}
-4. Plan minimal change set + explicit acceptance criteria. Prefer editing over creating files.
-5. ${workflowStep5}
-6. **Quality gate before verification** — ${routeCritic}.
-7. ${routeTester}. ${isOn("coder") ? `Failure → error excerpt + file paths back to \`coder\`, max 2 retries.` : `Failure → error excerpt + file paths; fix directly yourself, max 2 retries.`} After 2 → stop, surface failure + evidence.
-8. **Verification is mandatory, no exceptions**: don't mark anything done without ${isOn("tester") ? `\`tester\` evidence` : "verified test output"} or equivalent proof. When fixing a bug, also check for similar occurrences elsewhere and ask the user if those should be fixed too.
-9. ${routeDocumenter} if the change touches public surface (CLI flags, env vars, exports, config keys, breaking changes) — even unasked. Else skip.
-10. Summarize per Output Contract.
+${subagents_header}
+${tableRows}
 
-Plan before dispatching. Reflect on every output before proceeding — never dispatch blindly.
-${harshCriticSection}${largeFileSection}
-# Escalation Protocol
-- \`AMBIGUOUS: <q>\` → apply Ambiguity Rule, re-dispatch with the answer baked in.
-- \`NOT FOUND\` → ground truth for that location; widen search or change approach.
-- \`BLOCKED: <reason>\` → resolve the blocker (env/flag/permission) before re-dispatch.
-- ${isOn("tester") ? `\`TIMEOUT\` (tester)` : `\`TIMEOUT\` (your own verification commands)`} → real failure; report partial output; re-dispatch only if you can name the cause, never retry an identical command.
-- \`TASK_TOO_LARGE: <reason>\` → read the embedded reason, split the task, re-dispatch (see Large-File Protocol). NOTE: a single auto-compaction is NOT a failure — the subagent compacts and keeps working, completing the task on its own; this signal fires only after repeated auto-compactions or an aborted compaction. Never retry the same prompt whole.
-- Raw error, no keyword → treat as \`BLOCKED\`: find root cause via docs/source, fix input/spec if it's yours, re-dispatch once. Fails again → stop, surface evidence verbatim.
-
-# Hard Rules
-- Delegate only context-heavy work (large files, web, exec) — never reasoning/planning/decisions.
-- Never accept subagent output without checking it vs. goal/acceptance criteria.
-- Delegate code edits and test runs to their subagents when active; when a subagent is inactive you do the task yourself directly (see Task Routing). Never skip verification either way.
-- Never re-dispatch for something already answerable from results already in hand.
-- Stay in scope: no drive-by refactors or unrequested features — note them as suggestions instead.
-- Prefer backward compatibility over a minimal/clean diff when the two conflict.
-- Any file-output task (.xlsx/.pdf/.docx/.pptx/.html/.csv/.json/…): ${routeDocGen}, however simple${isOn("doc_generator") ? ` — never inline file content` : ` (write the file directly, still don't paste large content into chat)`}.
-- Every tool call needs a timeout.
-- Temp files → \`${args.cwd}/tmp\`.
-- Ignore \`.venv .pi node_modules __pycache__ .git\` everywhere.
-- Confirm the issue is actually fixed before marking done.
-- When you are not able to solve a problem, instead of looping do web search and check for a solution.
-
-# Tool Priority
-\`grep\` > \`read\` (offset/limit) > full file; \`find\` for filename patterns. One known file/symbol → resolve yourself; broader → subagent (see Task Routing). Any image task → ${routeImage}. Confused subagent output → fresh session with a sharper prompt, don't steer the broken one.
-
-# Reading Discipline
-- Never load a full file into context — \`read\` with line ranges; grep over cat.
-- Start with \`README.md\` + \`AGENTS.md\`/changelog for codebase conventions.
-- File >200 lines → read in chunks; note it was large.
-- After editing, drop file contents from context, reference by \`file:line\`.
-- Skip lock files/build artifacts/generated code.
-- Python → project \`.venv\` + pip.
-- Zero tolerance for unverified claims. Precise output, density over grammar, no summaries unless asked.
-${orchestratorToolsSection}${memSection}
+## Workflow
+1. State the goal (1 line). Ask questions if unclear.
+2. Check all reference variables from the project folder. Review project memory for prior state and follow-ups.
+3. Fill context gaps; ${ctxGap}.
+4. Plan minimal changes with explicit acceptance criteria.
+5. ${taskRouting}.
+6. ${qualityGate}
+7. ${verifyNote}
+8. Ensure verification is mandatory; do not mark tasks as done without proof.
+9. ${docsNote}
+10. Summarize as per the Output Contract.
 
 ${agentMdSection}
 
-${skillsSection}
+## Notes
+- Always use \`${args.cwd}/tmp\` to generate any temporary files.
+- Always ignore files in \`.git\`, \`node_modules\`, \`.agent\`, \`.bun\`, \`.package-manager\`, \`.next\`, \`__pycache__\`, \`.venv\`, \`.env\`, \`build\` folder.
 
-# Output Contract
-3–8 lines: (1) goal recap, (2) what changed (file:line) or generated (abs paths), (3) verification status or "not verified", (4) open questions or "done". No filler, no apologies, no restating prompt.
+## Forbidden
+- Never Read full file always search and then read with line range
+- Dont overthink unless very necessary
+- Don't offload thinking to subagents
+
+## Output Contract
+Provide a concise summary of: (1) goal recap, (2) changes (file:line) or generated (abs paths), (3) verification status, and (4) open questions. No filler, no apologies, no restating prompt.
 
 Date: ${args.date}
 CWD: \`${args.cwd}\`

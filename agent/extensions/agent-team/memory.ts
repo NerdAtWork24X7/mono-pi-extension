@@ -1,7 +1,9 @@
 import { existsSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { join, resolve as resolvePath } from "path";
+import { CustomEditor } from "@mariozechner/pi-coding-agent";
+import { matchesKey, Key } from "@mariozechner/pi-tui";
 import type { SessionLogger } from "./core";
-import type { AgentDef, AgentProc, MemoryState } from "./core";
+import type { AgentDef, AgentProc, AgentTeamContext, MemoryState } from "./core";
 import { blankProcState, parseModelId } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
 import { buildExtensionCliArgs, buildScopeNameArgs } from "./extensions";
@@ -111,10 +113,16 @@ export class MemoryManager {
 	private pendingOutput = "";
 
 	private currentSub: RpcSubprocess | null = null;
+	/** Resolves the in-flight run early (kills the child without the
+	 *  non-zero-exit path reporting it as an error). Set by runSubprocess. */
+	private currentCancel: (() => void) | null = null;
+	/** Set by abort()/cancelCurrentRun() so the drain loop reports "idle"
+	 *  instead of "done"/"error" for a run the user killed. */
+	private abortRequested = false;
 	private currentSessionFile = "";
 	private currentSystemPromptFile = "";
 	private busy = false;
-	private pendingSummaries: Array<{ input: string; output: string }> = [];
+	private pendingSummaries: Array<{ input: string; output: string; signal?: AbortSignal }> = [];
 	private draining = false;
 
 	constructor(opts: {
@@ -151,22 +159,20 @@ export class MemoryManager {
 	/** Called from before_agent_start. Captures the user prompt for this turn. */
 	recordInput(text: string) {
 		// If a previous turn's summary is still running, abandon it cleanly.
-		if (this.currentSub) {
-			this.currentSub.kill();
-			this.currentSub = null;
-			// Ensure the previous turn's log panel is dismissed immediately;
-			// otherwise the old logAgent resurfaces as soon as status flips to
-			// "recording" and the widget re-renders.
-			this.logAgent = null;
-		}
+		// Ensures the previous turn's log panel is dismissed immediately;
+		// otherwise the old logAgent resurfaces as soon as status flips to
+		// "recording" and the widget re-renders.
+		this.cancelCurrentRun();
 		this.pendingInput = text || "";
 		this.pendingOutput = "";
 		this.state.runCount++;
 		this.setStatus("recording");
 	}
 
-	/** Called from agent_end with the final assistant text (or "" if none). */
-	recordOutput(text: string) {
+	/** Called from agent_end with the final assistant text (or "" if none).
+	 *  `signal` is the turn's abort signal so an ESC/abort of the turn also
+	 *  cancels the memory summarizer spawned for it. */
+	recordOutput(text: string, signal?: AbortSignal) {
 		if (this.state.status !== "recording") return;
 		const trimmed = (text || "").trim();
 		if (!trimmed) {
@@ -174,8 +180,37 @@ export class MemoryManager {
 			this.setStatus("idle");
 			return;
 		}
-		this.enqueueSummary(this.pendingInput, trimmed);
+		this.enqueueSummary(this.pendingInput, trimmed, signal);
 		this.setStatus("summarizing");
+	}
+
+	/** Abort any in-flight memory summarization and drop queued summaries.
+	 *  Mirrors killing dispatch clones on ESC. Safe to call when idle. */
+	abort() {
+		// Drop queued work so the drain loop stops after the current run settles.
+		// `draining` is owned by drainSummaries' finally block — clearing it here
+		// would let a concurrent second drain loop start.
+		this.pendingSummaries.length = 0;
+		this.cancelCurrentRun();
+		if (this.state.status === "summarizing") {
+			this.setStatus("idle");
+		}
+	}
+
+	/** Tear down the in-flight subprocess without the drain loop flagging it
+	 *  as an error (a killed child closes with a non-zero/null code). */
+	private cancelCurrentRun() {
+		if (!this.currentSub && !this.currentCancel) return;
+		this.abortRequested = true;
+		const cancel = this.currentCancel;
+		this.currentCancel = null;
+		if (cancel) {
+			try { cancel(); } catch { }
+		} else if (this.currentSub) {
+			try { this.currentSub.kill(); } catch { }
+		}
+		this.currentSub = null;
+		this.logAgent = null;
 	}
 
 	/** Best-effort wait for any in-flight subprocess (used on session_shutdown). */
@@ -198,13 +233,13 @@ export class MemoryManager {
 		this.invalidate();
 	}
 
-	private enqueueSummary(input: string, output: string) {
+	private enqueueSummary(input: string, output: string, signal?: AbortSignal) {
 		// Cap queue to prevent unbounded memory growth.
 		// Drop oldest entries when the summarizer can't keep up.
 		while (this.pendingSummaries.length >= MAX_PENDING_SUMMARIES) {
 			this.pendingSummaries.shift();
 		}
-		this.pendingSummaries.push({ input, output });
+		this.pendingSummaries.push({ input, output, signal });
 		if (!this.draining) {
 			this.draining = true;
 			void this.drainSummaries();
@@ -219,16 +254,30 @@ export class MemoryManager {
 				try {
 					this.pendingInput = next.input;
 					this.pendingOutput = next.output;
-					const { wroteFile } = await this.runSubprocess();
-					this.state.lastSummaryAt = Date.now();
-					this.state.lastError = "";
-					this.setStatus("done");
-					if (!wroteFile) {
-						this.logger.logBoxed(`memory: no update needed for turn #${this.state.runCount}`, this.logAgent ?? undefined);
+					// Clear any flag left over from a run that finished on its own
+					// just as a cancel came in, so it can't mislabel this run.
+					this.abortRequested = false;
+					const { wroteFile } = await this.runSubprocess(next.signal);
+					if (this.abortRequested) {
+						this.abortRequested = false;
+						this.setStatus("idle");
+					} else {
+						this.state.lastSummaryAt = Date.now();
+						this.state.lastError = "";
+						this.setStatus("done");
+						if (!wroteFile) {
+							this.logger.logBoxed(`memory: no update needed for turn #${this.state.runCount}`, this.logAgent ?? undefined);
+						}
 					}
 				} catch (err: any) {
-					const msg = (err && err.message) ? err.message : String(err);
-					this.setStatus("error", msg);
+					if (this.abortRequested) {
+						// User-initiated kill — not an error worth surfacing.
+						this.abortRequested = false;
+						this.setStatus("idle");
+					} else {
+						const msg = (err && err.message) ? err.message : String(err);
+						this.setStatus("error", msg);
+					}
 				} finally {
 					this.busy = false;
 					this.currentSub = null;
@@ -259,7 +308,7 @@ export class MemoryManager {
 		this.currentSystemPromptFile = "";
 	}
 
-	private runSubprocess(): Promise<{ wroteFile: boolean }> {
+	private runSubprocess(signal?: AbortSignal): Promise<{ wroteFile: boolean }> {
 		this.writeSystemPromptFile();
 
 		// Snapshot the memory file's mtime so we can fall back to it
@@ -322,13 +371,16 @@ export class MemoryManager {
 			let lastLineAt = Date.now();
 			let settleTimer: ReturnType<typeof setTimeout> | undefined;
 			let hardTimer: ReturnType<typeof setTimeout> | undefined;
+			let abortCleanup: (() => void) | undefined;
 
 			const finish = (fn: () => void) => {
 				if (settled) return;
 				settled = true;
+				this.currentCancel = null;
 				if (memoryAp.timer) { clearInterval(memoryAp.timer); memoryAp.timer = undefined; }
 				if (settleTimer) { clearTimeout(settleTimer); settleTimer = undefined; }
 				if (hardTimer) { clearTimeout(hardTimer); hardTimer = undefined; }
+				if (abortCleanup) { abortCleanup(); abortCleanup = undefined; }
 				try { sub.kill(); } catch { }
 				fn();
 			};
@@ -420,6 +472,25 @@ export class MemoryManager {
 			memoryAp.proc = sub.proc;
 			memoryAp.procRef = sub;
 			this.currentSub = sub;
+			// Lets abort()/recordInput() end the run without the killed child's
+			// close code being reported as a memory error.
+			if (!settled) {
+				this.currentCancel = () => finish(() => resolve({ wroteFile: fileWritten || mtimeAdvanced() }));
+			}
+
+			// ESC/abort parity: if the turn that spawned this summary is aborted
+			// (ESC), tear the summarizer down too — exactly like the dispatch
+			// clones killed via the dispatch abort signal.
+			if (signal) {
+				const onAbort = () => finish(() => resolve({ wroteFile: fileWritten || mtimeAdvanced() }));
+				signal.addEventListener("abort", onAbort);
+				abortCleanup = () => { try { signal.removeEventListener("abort", onAbort); } catch { } };
+				if (signal.aborted) onAbort();
+			}
+
+			// Already aborted before we started (e.g. an ESC-aborted turn):
+			// finish() has resolved and killed the child, so skip timer setup.
+			if (settled) return;
 
 			// Hard wall-clock cap: guarantees the run terminates even if the
 			// subprocess stays active without ever emitting agent_end.
@@ -449,4 +520,52 @@ export class MemoryManager {
 			try { sub.proc.stdin.write(JSON.stringify({ type: "get_state" }) + "\n"); } catch { }
 		});
 	}
+}
+
+// ── ESC → abort the running summarizer ──
+//
+// `escape` resolves to the built-in `app.interrupt` keybinding, which is in
+// pi's RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS list — pi.registerShortcut
+// ("escape") is skipped with a warning. And the summarizer starts at
+// `agent_end`, i.e. while the app is idle, so the turn's abort signal is
+// already spent. The supported hook is a custom editor component: subclass
+// CustomEditor, intercept ESC, delegate everything else to the base class
+// (pi copies onEscape/onCtrlD/actionHandlers onto it, so default behaviour
+// is preserved — see interactive-mode setCustomEditorComponent).
+
+let escFactory: ((tui: any, theme: any, keybindings: any) => any) | null = null;
+
+/** Install the ESC interceptor. No-op when another extension already owns the
+ *  editor component slot, or when it is already installed. */
+export function installMemoryEscEditor(team: AgentTeamContext, ctx: any) {
+	const ui = ctx?.ui;
+	if (!ui || typeof ui.setEditorComponent !== "function") return;
+	if (ui.getEditorComponent?.()) return; // ours (already installed) or foreign — leave it
+	if (!escFactory) {
+		class MemoryEscEditor extends CustomEditor {
+			handleInput(data: string): void {
+				const mm = team.memoryManager;
+				if (mm && mm.status() === "summarizing"
+					&& matchesKey(data, Key.escape)
+					&& !(this as any).isShowingAutocomplete?.()) {
+					mm.abort();
+					// Idle: consume the key. Streaming (a queued summary running
+					// under the next turn): fall through so the turn aborts too.
+					let streaming = false;
+					try { streaming = team.wCtx?.isIdle?.() === false; } catch { }
+					if (!streaming) return;
+				}
+				super.handleInput(data);
+			}
+		}
+		escFactory = (tui: any, theme: any, keybindings: any) => new MemoryEscEditor(tui, theme, keybindings);
+	}
+	ui.setEditorComponent(escFactory);
+}
+
+/** Restore the default editor when memory is switched off. */
+export function removeMemoryEscEditor(ctx: any) {
+	const ui = ctx?.ui;
+	if (!ui || typeof ui.setEditorComponent !== "function") return;
+	if (escFactory && ui.getEditorComponent?.() === escFactory) ui.setEditorComponent(undefined);
 }

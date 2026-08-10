@@ -424,4 +424,5 @@ export function registerShortcut(pi: ExtensionAPI, team: AgentTeamContext) {
 			}
 		},
 	});
+
 }

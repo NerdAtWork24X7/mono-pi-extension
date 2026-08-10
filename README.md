@@ -20,7 +20,7 @@ The Agent Team extension (`agent/extensions/agent-team/`) is a TypeScript plugin
 - **core.ts** - Type definitions (`AgentDef`, `AgentProc`, `TeamMember`, `TerminalBackend`), terminal backends (tmux/herdr), session logging, RPC subprocess spawner
 - **memory.ts** - Per-turn background memory summarizer: captures input/output, spawns a summarizer subprocess, maintains `.pi_memory/project_memory.md`
 - **ui.ts** - TUI widget + sidebar overlay: agent status grid, anim dots, tool counts, token usage display; the sidebar (opens via `Ctrl+Q`) shows the agent status grid, a snapshot of all available skills, and the team list, closing with Esc/Ctrl+Q
-- **integrations.ts** - Tool registration (`dispatch_agent`), slash commands (`/agents-team`, `/agents-list`, `/agents-grid`, `/agents-team-toggle`, `/agents-parallel`), keyboard shortcuts (`Ctrl+Q` sidebar toggle, `Ctrl+Shift+E` agent team on/off)
+- **integrations.ts** - Tool registration (`dispatch_agent`), slash commands (`/agents-team`, `/agents-list`, `/agents-grid`, `/agents-team-toggle`, `/agents-parallel`), keyboard shortcuts (`Ctrl+Q` sidebar toggle, `Ctrl+Shift+E` agent team on/off, `Ctrl+Shift+M` abort the running memory summarizer)
 
 ### Lifecycle
 
@@ -127,7 +127,7 @@ Each `dispatch_agent` call follows a strict lifecycle:
 - **Read-only agents** (e.g. `file_reader`, `searcher`) run in **parallel**, capped by `maxParallel` in agent config or `/agents-parallel` — falls back to sequential when the global switch is off
 - **`/agents-parallel` is a GLOBAL switch**: `off` also forces the orchestrator to serialize its own parallel read-only host tool calls (`read`/`grep`/`find`/`ls`) within a turn, not just subagent dispatch. Writes/edits are always serialized regardless.
 - **Writable agents** (e.g. `coder`, `documenter`, `doc_generator`) are **always serialized** (one at a time) so file writes never collide
-- **ESC/abort** kills all spawned clones; results are aggregated and returned in a single response
+- **ESC/abort** kills all spawned clones (and the per-turn memory summarizer) ; results are aggregated and returned in a single response
 
 ### Subagent System
 
@@ -231,6 +231,7 @@ Subagents reply with structured signals. Route them appropriately:
 - **Image analysis** → Dispatch image_analyzer for visual content extraction
 - **Team selection** → `/agents-team` command
 - **Toggle agent team** → `Ctrl+Shift+E` or `/agents-team-toggle`
+- **Abort memory summarizer** → `Ctrl+Shift+M` (ESC only aborts streaming/bash; the memory summarizer runs in the idle gap between turns, so it gets its own key)
 - **Sidebar** → `Ctrl+Q` (Esc closes it)
 
 See `agent/AGENTS.md` for detailed subagent rules and interfaces.
