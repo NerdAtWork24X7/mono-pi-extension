@@ -19,6 +19,7 @@ export function isWorking(ap: AgentProc): boolean {
 /** Sidebar visibility state - module-level so it persists across re-renders */
 let sidebarVisible = false;
 let sidebarOverlayHandle: any = null;
+let sidebarCtx: AgentTeamContext | null = null;
 
 export function isSidebarVisible(): boolean {
 	return sidebarVisible;
@@ -32,12 +33,22 @@ export function toggleSidebar(ctx: AgentTeamContext) {
 	}
 }
 
-export function closeSidebar() {
+export function closeSidebar(ctx?: AgentTeamContext) {
 	sidebarVisible = false;
 	if (sidebarOverlayHandle) {
 		sidebarOverlayHandle.hide();
 		sidebarOverlayHandle = null;
 	}
+	// Sync the ESC->abort editor to the (possibly toggled) memory state now that
+	// the overlay has released focus. Swapping it inside the sidebar's input
+	// handler would call setEditorComponent->setFocus, which steals focus from the
+	// open overlay and dismisses it.
+	const syncCtx = ctx ?? sidebarCtx;
+	if (syncCtx?.wCtx) {
+		if (syncCtx.memoryManager) installMemoryEscEditor(syncCtx, syncCtx.wCtx);
+		else removeMemoryEscEditor(syncCtx.wCtx);
+	}
+	sidebarCtx = null;
 }
 
 /** Persist the `active` flag for a specific agent in the current team to teams.yaml */
@@ -73,6 +84,7 @@ function toggleSkillSet(set: Set<string>, allSkills: Skill[], sk: Skill) {
 export function openSidebar(ctx: AgentTeamContext) {
 	if (!ctx.wCtx) return;
 	sidebarVisible = true;
+	sidebarCtx = ctx;
 
 	const overlayWidth = 45;
 
@@ -412,7 +424,6 @@ export function openSidebar(ctx: AgentTeamContext) {
 								ctx.memoryManager = null;
 								ctx.memoryModel = "";
 								ctx.memoryFile = "";
-								removeMemoryEscEditor(ctx.wCtx);
 							} else {
 								// Enable — use preserved original model or read from teams.yaml
 								let modelToEnable = ctx.originalMemoryModel;
@@ -442,8 +453,7 @@ export function openSidebar(ctx: AgentTeamContext) {
 										},
 										handleEvent: makeHandleEvent(ctx),
 									});
-									installMemoryEscEditor(ctx, ctx.wCtx);
-								}
+							}
 							}
 							// Persist toggle to teams.yaml (preserve original value when disabling)
 							const saveTp = join(getAgentDir(), "agents", "teams.yaml");
@@ -721,14 +731,34 @@ export function initWidget(ctx: AgentTeamContext) {
 				const activeClones = [...ctx.batchClones].filter(isWorking);
 				const visibleProcs = [...ctx.procs.values()].filter(ap => !ctx.disabledAgents.has(ap.def.name.toLowerCase()));
 				const totalCount = visibleProcs.length + activeClones.length;
+				// Memory runs on its own subprocess, independent of the agent-team
+				// toggle and of whether any subagents are loaded. Count it as a slot
+				// so its card always renders — otherwise memory could be enabled yet
+				// invisible in the grid when the team is disabled / no agents show.
+				const slotCount = totalCount + (hasMemory ? 1 : 0);
 
-				if (!ctx.enabled) {
-					text.setText(theme.fg("dim", "Agent team disabled. /agents-team-toggle on"));
-					return text.render(width);
+				const boxPad = 4;
+				const innerW = width - boxPad;
+				const cols = Math.max(1, Math.min(ctx.gridCols, slotCount));
+				const cardGap = 1;
+				const colW = Math.floor((innerW - cardGap * (cols - 1)) / cols);
+
+				// Agent cards render only when the team is enabled; the memory card
+				// is appended whenever memory is active (independent of the team).
+				const cards: string[][] = [];
+				if (ctx.enabled) {
+					for (const ap of visibleProcs) cards.push(renderCard(ctx, ap, colW, theme));
+					for (const ap of activeClones) {
+						const label = displayName(ap.def.name) + (ap.runId ? " *" : "");
+						cards.push(renderCard(ctx, ap, colW, theme, label));
+					}
 				}
+				if (hasMemory) cards.push(renderMemoryCard(ctx, colW, theme));
 
-				if (!totalCount) {
-					const hint = "No agents. Add subagent to agent.yml files to agents/";
+				if (!cards.length) {
+					const hint = ctx.enabled
+						? "No agents. Add subagent to agent.yml files to agents/"
+						: "Agent team disabled. /agents-team-toggle on";
 					const hintVis = [...hint].length;
 					const hintLine =
 						theme.fg("border", "│   ") +
@@ -739,20 +769,6 @@ export function initWidget(ctx: AgentTeamContext) {
 					text.setText([topBorder, hintLine, bottomBorder].join("\n"));
 					return text.render(width);
 				}
-
-				const boxPad = 4;
-				const innerW = width - boxPad;
-				const cols = Math.min(ctx.gridCols, totalCount);
-				const cardGap = 1;
-				const colW = Math.floor((innerW - cardGap * (cols - 1)) / cols);
-
-				const cards: string[][] = [];
-				for (const ap of visibleProcs) cards.push(renderCard(ctx, ap, colW, theme));
-				for (const ap of activeClones) {
-					const label = displayName(ap.def.name) + (ap.runId ? " *" : "");
-					cards.push(renderCard(ctx, ap, colW, theme, label));
-				}
-				if (hasMemory) cards.push(renderMemoryCard(ctx, colW, theme));
 
 				const rows: string[][] = [];
 				for (let i = 0; i < cards.length; i += cols) {

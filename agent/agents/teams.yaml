@@ -11,8 +11,8 @@
 #
 # Top-level keys:
 #   memory_model:
-#       model: <provider>/<model>  - enables the per-turn project memory feature.
-#       active: true|false         - persistent on/off switch (sidebar toggle).
+#       model: <provider>/<model>  - summarizer model; memory runs only when active: true.
+#       active: true|false         - persistent on/off switch (must be true to run; sidebar toggle).
 #       A background subprocess summarizes each orchestrator turn and appends
 #       the result to <cwd>/.pi_memory/project_memory.md.
 

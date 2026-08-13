@@ -90,9 +90,9 @@ export class AgentTeam implements AgentTeamContext {
 	resizeHandler = () => this.handleTerminalResize();
 	orchestratorModel = ""; // model id from orchestrator's context
 
-	// Memory feature (only used when memoryModel is set in teams.yaml)
+	// Memory feature (only used when memoryModel is set AND active: true in teams.yaml)
 	memoryModel = "";
-	memoryActive = true;
+	memoryActive = false;
 	originalMemoryModel = ""; // preserved value for re-enabling after toggle off
 	memoryFile = "";
 	memoryDir = "";
@@ -259,7 +259,7 @@ export class AgentTeam implements AgentTeamContext {
 		this.teams = parsed.teams;
 		this.memoryModel = parsed.memoryModel || "";
 		this.originalMemoryModel = this.memoryModel;
-		this.memoryActive = parsed.memoryActive !== false;
+		this.memoryActive = parsed.memoryActive === true;
 
 		// Tear down any prior memory manager and (re)create if the model is set.
 		// When memoryModel is empty/undefined the feature is fully disabled:

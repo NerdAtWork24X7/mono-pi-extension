@@ -28,14 +28,14 @@ export function parseTeamsYaml(raw: string): ParsedTeams {
 		if (mmBlock) {
 			cur = "memory_model";
 			curMember = null;
-			memoryActive = true;
+			// Opt-in: enabled only by an explicit active: true below; no default-on.
 			continue;
 		}
 		const mm = line.match(/^memory_model:\s*(.+)$/);
 		if (mm) {
 			const v = mm[1].trim();
 			if (v) memoryModel = v;
-			memoryActive = true; // legacy flat form implies active
+			// Opt-in: inline `memory_model: <model>` alone does NOT enable memory.
 			cur = "";
 			curMember = null;
 			continue;
@@ -68,7 +68,7 @@ export function parseTeamsYaml(raw: string): ParsedTeams {
 		if (pm && cur === "memory_model" && !curMember) {
 			const key = pm[1].trim();
 			if (key === "model") memoryModel = pm[2].trim();
-			else if (key === "active") memoryActive = pm[2].trim().toLowerCase() !== "false";
+			else if (key === "active") memoryActive = pm[2].trim().toLowerCase() === "true";
 			continue;
 		}
 	}
@@ -323,15 +323,15 @@ export function saveTeamsYaml(filePath: string, data: ParsedTeams): void {
 	lines.push("#");
 	lines.push("# Top-level keys:");
 	lines.push("#   memory_model:");
-	lines.push("#       model: <provider>/<model>  - enables the per-turn project memory feature.");
-	lines.push("#       active: true|false         - persistent on/off switch (sidebar toggle).");
+	lines.push("#       model: <provider>/<model>  - summarizer model; memory runs only when active: true.");
+	lines.push("#       active: true|false         - persistent on/off switch (must be true to run; sidebar toggle).");
 	lines.push("#       A background subprocess summarizes each orchestrator turn and appends");
 	lines.push("#       the result to <cwd>/.pi_memory/project_memory.md.");
 	lines.push("");
 	if (data.memoryModel) {
 		lines.push("memory_model:");
 		lines.push(`  model: ${data.memoryModel}`);
-		lines.push(`  active: ${data.memoryActive === false ? "false" : "true"}`);
+		lines.push(`  active: ${data.memoryActive === true ? "true" : "false"}`);
 		lines.push("");
 	}
 	for (const [teamName, members] of Object.entries(data.teams)) {

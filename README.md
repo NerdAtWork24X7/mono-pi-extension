@@ -76,7 +76,7 @@ test_subagent_team:
 
 ### Memory Feature (Background Summarization)
 
-When `memory_model` is set in `teams.yaml`, the extension captures every turn's user input + assistant output and spawns a summarizer subprocess that updates `.pi_memory/project_memory.md`. The `memory_model.active: true|false` key is a persistent on/off switch (toggled from the sidebar). The memory file is reinjected into the orchestrator's system prompt on subsequent turns. Sections maintained: Design Decisions, Facts, User Taste, User Suggestions.
+When `memory_model` is configured with `active: true` in `teams.yaml`, the extension captures every turn's user input + assistant output and spawns a summarizer subprocess that updates `.pi_memory/project_memory.md`. The `memory_model.active` key is a persistent on/off switch (`active: true` required to run; toggled from the sidebar). Merely setting `model` does NOT enable memory — `active: true` must be present. The memory file is reinjected into the orchestrator's system prompt on subsequent turns. Sections maintained: Design Decisions, Facts, User Taste, User Suggestions.
 
 ### RPC Subprocess Model
 
