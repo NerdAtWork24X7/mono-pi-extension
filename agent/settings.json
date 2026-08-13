@@ -27,12 +27,12 @@
     "xiaomi-token-plan-ams/mimo-v2.5-pro",
     "xiaomi-token-plan-ams/mimo-v2.5",
     "openrouter/cohere/north-mini-code:free",
-    "tokenrouter/moonshotai/kimi-k3-free"
+    "kilo/tencent/hy3:free"
   ],
   "extensions": [
     "+extensions/custom-footer.ts",
     "+extensions/agent-team/index.ts",
-    "-extensions/web-fetch_crawl4ai.ts",
+    "-extensions/web_fetch_crawl4ai/index.ts",
     "+extensions/web-fetch.ts",
     "+extensions/browser.ts",
     "+extension/pi-scope.ts"

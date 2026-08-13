@@ -213,12 +213,27 @@ Subagents reply with structured signals. Route them appropriately:
 - `/agent/` - Agent definitions, skills, extensions, and team configuration
 - `/agent/agents/` - Agent `.md` definition files, `teams.yaml` team definitions
 - `/agent/extensions/agent-team/` - Agent team extension implementation (orchestrator)
-- `/agent/extensions/` - Extension modules (agent-team, browser, context7, custom-footer, herdr-agent-state, kilo, modelcost, pi-scope, TokenRouter, web-fetch, web-fetch_crawl4ai)
+- `/agent/extensions/` - Extension modules (agent-team, browser, context7, custom-footer, herdr-agent-state, kilo, modelcost, pi-scope, TokenRouter, web-fetch, web_fetch_crawl4ai)
 - `/agent/skills/` - Skill definitions (flet, pyside6, electron-scaffold, improve-codebase-architecture)
 - `/.pi/` - Project configuration
 - `~/.pi/agent-team-log/agent-sessions/` - Subagent session files (JSON/RPC state), cleaned after each dispatch; files older than 24 hours are purged
 - `~/.pi/agent-team-log/` - Combined session log files (chronological activity)
 - `/.pi_memory/` - Project memory file (per-turn background summarization)
+
+## Web Fetch (Crawl4AI) extension — standalone setup
+
+`agent/extensions/web_fetch_crawl4ai/index.ts` (+ `web-fetch_crawl4ai.py`) fetches pages with a
+single Chromium instance running multiple tabs via Crawl4AI's `AsyncWebCrawler.arun_many`.
+It is fully self-contained in its own folder: all Python dependencies live in
+`agent/extensions/web_fetch_crawl4ai/.venv` (no global `crwl` needed).
+
+```bash
+agent/extensions/web_fetch_crawl4ai/setup-web-fetch.sh   # creates .venv, pip installs requirements.txt, downloads Chromium
+```
+
+The Python interpreter is resolved at runtime as: `WEB_FETCH_PY_BIN` env → package `.venv/bin/python3`
+→ `crwl` shebang → `/home/alexa/wk/.venv/bin/python3`. Chromium is located via
+`PLAYWRIGHT_BROWSERS_PATH` (set in the environment; `playwright install chromium` reuses it).
 
 ## Quick Reference
 
