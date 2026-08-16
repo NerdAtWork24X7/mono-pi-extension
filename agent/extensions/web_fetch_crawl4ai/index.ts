@@ -303,7 +303,7 @@ export default function (pi: ExtensionAPI) {
 
 			// ── Mode 1: DuckDuckGo search → fetch top results ──
 			if (query) {
-				const maxResults = Math.min(Math.max(params.maxResults ?? 10, 1), 10);
+				const maxResults = Math.min(Math.max(params.maxResults ?? 5, 1), 5);
 				const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
 				try {
 					onUpdate?.({ content: [{ type: "text", text: `Searching DuckDuckGo for "${query}"...` }], details: { query, phase: "search" } });

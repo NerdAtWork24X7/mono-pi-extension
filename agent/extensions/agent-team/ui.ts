@@ -453,7 +453,7 @@ export function openSidebar(ctx: AgentTeamContext) {
 										},
 										handleEvent: makeHandleEvent(ctx),
 									});
-							}
+								}
 							}
 							// Persist toggle to teams.yaml (preserve original value when disabling)
 							const saveTp = join(getAgentDir(), "agents", "teams.yaml");
@@ -657,6 +657,14 @@ If subagent is not able to perform Task, refine the task into smaller chunks and
 		? "\n## Project AGENTS.md\n" + args.agentMd + "\n"
 		: "";
 
+	// Enabled orchestrator skills. filterSkills() returns [] when none are enabled,
+	// so the section is omitted entirely in that case.
+	const skillsSection = args.skills && args.skills.length
+		? "\n## Skills (enabled)\n" + args.skills
+			.map(s => "- **" + s.name + "**: " + (s.description || "(no description)"))
+			.join("\n") + "\n"
+		: "";
+
 	return {
 		systemPrompt: `## Identity
 You are the primary reasoning agent for a multi-agent team responsible for task decomposition, dispatching, verification against acceptance criteria, and synthesis. 
@@ -697,6 +705,7 @@ ${tableRows}
 10. Summarize as per the Output Contract.
 
 ${agentMdSection}
+${skillsSection}
 
 ## Notes
 - Always use \`${args.cwd}/tmp\` to generate any temporary files.
@@ -708,7 +717,8 @@ ${agentMdSection}
 - Don't offload thinking to subagents
 
 ## Output Contract
-Provide a concise summary of: (1) goal recap, (2) changes (file:line) or generated (abs paths), (3) verification status, and (4) open questions. No filler, no apologies, no restating prompt.
+Provide a concise summary of: (1) goal recap, (2) changes (file:line) or generated (abs paths), (3) verification status, and (4) open questions. 
+No filler, no apologies, no restating prompt.
 
 Date: ${args.date}
 CWD: \`${args.cwd}\`

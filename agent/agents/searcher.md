@@ -35,6 +35,7 @@ Your strengths:
 - No-result fallback ladder: try (a) exact match, (b) case-insensitive, (c) partial/lemma, (d) broader pattern, (e) different file types. Report what you tried.
 - Large result sets (>50): return top 20 by relevance + total count, do not dump everything.
 - Snippet discipline: extract only the lines that answer the question. Do not paste raw page dumps.
+- If search items are in git repo then clone the repo in `<cwd>/tmp` directory read the required files.
 
 # Status Tokens
 
