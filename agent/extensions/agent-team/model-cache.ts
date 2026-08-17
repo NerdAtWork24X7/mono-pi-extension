@@ -27,39 +27,39 @@ const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 
 function ensureCacheDir(): void {
-	mkdirSync(CACHE_DIR, { recursive: true, mode: DIR_MODE });
-	// mkdirSync's `mode` isn't reliably honoured for pre-existing directories
-	// (e.g. left over from before this change, or created with a wider
-	// process umask), so enforce it explicitly. Best-effort: unsupported on
-	// some platforms/filesystems.
-	try { chmodSync(CACHE_DIR, DIR_MODE); } catch { /* best effort */ }
+  mkdirSync(CACHE_DIR, { recursive: true, mode: DIR_MODE });
+  // mkdirSync's `mode` isn't reliably honoured for pre-existing directories
+  // (e.g. left over from before this change, or created with a wider
+  // process umask), so enforce it explicitly. Best-effort: unsupported on
+  // some platforms/filesystems.
+  try { chmodSync(CACHE_DIR, DIR_MODE); } catch { /* best effort */ }
 }
 
 interface CacheEnvelope<T> {
-	cachedAt: number;
-	data: T;
+  cachedAt: number;
+  data: T;
 }
 
 function cacheFile(key: string): string {
-	return join(CACHE_DIR, `${key}.json`);
+  return join(CACHE_DIR, `${key}.json`);
 }
 
 function readEnvelope<T>(key: string): CacheEnvelope<T> | null {
-	try {
-		if (!existsSync(cacheFile(key))) return null;
-		const env = JSON.parse(readFileSync(cacheFile(key), "utf-8")) as CacheEnvelope<T>;
-		if (env && typeof env.cachedAt === "number" && Array.isArray(env.data)) return env;
-	} catch {
-		/* missing / corrupted — treat as no cache */
-	}
-	return null;
+  try {
+    if (!existsSync(cacheFile(key))) return null;
+    const env = JSON.parse(readFileSync(cacheFile(key), "utf-8")) as CacheEnvelope<T>;
+    if (env && typeof env.cachedAt === "number" && Array.isArray(env.data)) return env;
+  } catch {
+    /* missing / corrupted — treat as no cache */
+  }
+  return null;
 }
 
 /** A model list is only usable when non-empty — caching an empty array would
  *  pin the provider to zero models for the whole TTL (e.g. a rate-limited
  *  upstream that momentarily returns `{ data: [] }`). */
 function isUsable(models: unknown[]): boolean {
-	return models.length > 0;
+  return models.length > 0;
 }
 
 /**
@@ -70,37 +70,37 @@ function isUsable(models: unknown[]): boolean {
  * when there is neither a usable cache nor a successful fetch.
  */
 export async function loadCachedModels<T>(
-	key: string,
-	fetchFn: () => Promise<T[]>,
-	opts?: { ttlMs?: number },
+  key: string,
+  fetchFn: () => Promise<T[]>,
+  opts?: { ttlMs?: number },
 ): Promise<T[]> {
-	const ttlMs = opts?.ttlMs ?? DEFAULT_TTL_MS;
+  const ttlMs = opts?.ttlMs ?? DEFAULT_TTL_MS;
 
-	const fresh = readEnvelope<T[]>(key);
-	if (fresh && isUsable(fresh.data) && Date.now() - fresh.cachedAt < ttlMs) return fresh.data;
+  const fresh = readEnvelope<T[]>(key);
+  if (fresh && isUsable(fresh.data) && Date.now() - fresh.cachedAt < ttlMs) return fresh.data;
 
-	try {
-		const data = await fetchFn();
-		// Write via temp file + rename so a concurrent reader (host + a
-		// subagent booting at the same time) never sees a torn file. The temp
-		// name is unique per call (pid + random suffix) so two writers racing
-		// on the same key — e.g. two host processes booting at once — never
-		// share a path and interleave writes into the same file; whichever
-		// rename lands last simply wins atomically instead of corrupting.
-		const tmp = `${cacheFile(key)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-		try {
-			ensureCacheDir();
-			writeFileSync(tmp, JSON.stringify({ cachedAt: Date.now(), data } satisfies CacheEnvelope<T[]>), { mode: FILE_MODE });
-			renameSync(tmp, cacheFile(key));
-		} catch {
-			/* cache write failure is non-fatal — but don't leave an orphaned
-			 * temp file sitting on disk forever if we got past the write. */
-			try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
-		}
-		return data;
-	} catch (err) {
-		const stale = readEnvelope<T[]>(key);
-		if (stale && isUsable(stale.data)) return stale.data;
-		throw err;
-	}
+  try {
+    const data = await fetchFn();
+    // Write via temp file + rename so a concurrent reader (host + a
+    // subagent booting at the same time) never sees a torn file. The temp
+    // name is unique per call (pid + random suffix) so two writers racing
+    // on the same key — e.g. two host processes booting at once — never
+    // share a path and interleave writes into the same file; whichever
+    // rename lands last simply wins atomically instead of corrupting.
+    const tmp = `${cacheFile(key)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+    try {
+      ensureCacheDir();
+      writeFileSync(tmp, JSON.stringify({ cachedAt: Date.now(), data } satisfies CacheEnvelope<T[]>), { mode: FILE_MODE });
+      renameSync(tmp, cacheFile(key));
+    } catch {
+      /* cache write failure is non-fatal — but don't leave an orphaned
+       * temp file sitting on disk forever if we got past the write. */
+      try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+    }
+    return data;
+  } catch (err) {
+    const stale = readEnvelope<T[]>(key);
+    if (stale && isUsable(stale.data)) return stale.data;
+    throw err;
+  }
 }

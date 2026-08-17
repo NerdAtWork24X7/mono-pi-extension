@@ -224,6 +224,8 @@ Subagents reply with structured signals. Route them appropriately:
 
 `agent/extensions/web_fetch_crawl4ai/index.ts` (+ `web-fetch_crawl4ai.py`) fetches pages with a
 single Chromium instance running multiple tabs via Crawl4AI's `AsyncWebCrawler.arun_many`.
+The Python runner stays alive between tool calls (idle-timeout, default 5 min), so the
+Python/Chromium startup cost is paid once per session instead of once per fetch.
 It is fully self-contained in its own folder: all Python dependencies live in
 `agent/extensions/web_fetch_crawl4ai/.venv` (no global `crwl` needed).
 
@@ -234,6 +236,11 @@ agent/extensions/web_fetch_crawl4ai/setup-web-fetch.sh   # creates .venv, pip in
 The Python interpreter is resolved at runtime as: `WEB_FETCH_PY_BIN` env → package `.venv/bin/python3`
 → `crwl` shebang → `/home/alexa/wk/.venv/bin/python3`. Chromium is located via
 `PLAYWRIGHT_BROWSERS_PATH` (set in the environment; `playwright install chromium` reuses it).
+
+Tuning knobs (env): `WEB_FETCH_CACHE_DIR`, `WEB_FETCH_CACHE_TTL_MS` (1h), `WEB_FETCH_CRAWL_TIMEOUT_MS` (60s,
+per batch), `WEB_FETCH_CONCURRENCY` (4 tabs), `WEB_FETCH_MAX_CHARS` (4000, per-page text cap),
+`WEB_FETCH_IDLE_MS` (300000; 0 disables the warm runner), `WEB_FETCH_PAGE_DELAY_S` (2, per-page settle
+delay — lower for faster but less thorough renders), `WEB_FETCH_SCAN_FULL_PAGE` (1; 0 skips full-page scrolling).
 
 ## Quick Reference
 
