@@ -157,7 +157,7 @@ ${tableRows}
 3. Fill context gaps; ${ctxGap}.
 4. Plan minimal changes with explicit acceptance criteria.
 5. ${taskRouting}.
-6. ${qualityGate}
+6. ${qualityGate} max 3 rounds, then escalate to user.
 7. ${verifyNote} (Mandatory: do not mark tasks as done without proof).
 8. ${docsNote}
 9. Summarize as per the Output Contract.

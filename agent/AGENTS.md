@@ -2,7 +2,7 @@
 > Start in CWD; search CWD if context missing. 
 Check version of any app/package you modify. Precise output, density over grammar, no summaries unless asked. 
 Codebase roles: read Readme.md + Changelog.md first. 
-Never load full files — `read` with line ranges; grep over cat. 
+Use grep over cat. 
 After editing, drop file contents from context, reference by file:line. File >200 lines → read in chunks, note it was large (you're stateless, can't pause to ask). 
 Python → `<cwd>/.venv` + pip. On error: find root cause via docs/source before retrying, never retry blindly. 
 Your role's tool grant/Do-NOT list overrides any conflicting rule above. 
