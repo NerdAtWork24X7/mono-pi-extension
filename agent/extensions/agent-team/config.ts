@@ -11,11 +11,9 @@ export interface ParsedTeams {
 }
 
 export function parseTeamsYaml(raw: string): ParsedTeams {
-  // Normalize Windows line endings (CRLF) and stray CR so the line-based
-  // regexes below match. parseAgentFile does the same; without this, a
-  // CRLF file makes the `team:` header fail to match (trailing \r) and
-  // member names/models capture a trailing \r.
-  raw = raw.replace(/\r\n?/g, "\n");
+  // Normalize Windows line endings (CRLF), stray CR, and UTF-8 BOM so the
+  // line-based regexes below match cleanly across platforms.
+  raw = raw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
   const teams: Record<string, TeamMember[]> = {};
   let memoryModel: string | undefined;
   let memoryActive: boolean | undefined;
@@ -81,8 +79,8 @@ export function parseTeamsYaml(raw: string): ParsedTeams {
 export function parseAgentFile(fp: string): AgentDef | null {
   try {
     let raw = readFileSync(fp, "utf-8");
-    raw = raw.replace(/\r\n/g, "\n"); // Normalize Windows line endings
-    const m = raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+    raw = raw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n"); // Normalize BOM and Windows line endings
+    const m = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
     if (!m) return null;
     const fm: Record<string, string> = {};
     for (const line of m[1].split("\n")) {
@@ -167,7 +165,8 @@ export interface Skill {
 
 /** Parse YAML frontmatter (very limited: just `name:` and `description:`) */
 function parseSkillFrontmatter(raw: string): { name: string; description: string } | null {
-  const m = raw.match(/^---\n([\s\S]*?)\n---/);
+  raw = raw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  const m = raw.match(/^---\s*\n([\s\S]*?)\n---\s*/);
   if (!m) return null;
   let name = "";
   let description = "";

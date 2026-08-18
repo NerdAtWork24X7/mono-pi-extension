@@ -263,12 +263,14 @@ export function openSidebar(ctx: AgentTeamContext) {
               // Switch to the selected team
               const newTeam = teamNames[teamIdx];
               if (newTeam && newTeam !== ctx.activeTeam) {
-                ctx.activateTeam(newTeam);
-                ctx.invalidate();
-                if (ctx.wCtx) {
-                  ctx.wCtx.ui.setStatus("agent-team", `Team: ${newTeam} (${ctx.procs.size})`);
-                  ctx.wCtx.ui.notify(`Switched to team: ${newTeam}`, "info");
-                }
+                void ctx.activateTeam(newTeam).then(() => {
+                  ctx.invalidate();
+                  if (ctx.wCtx) {
+                    ctx.wCtx.ui.setStatus("agent-team", `Team: ${newTeam} (${ctx.procs.size})`);
+                    ctx.wCtx.ui.notify(`Switched to team: ${newTeam}`, "info");
+                  }
+                  tui.requestRender();
+                });
               }
             } else if (section === "orch") {
               // Toggle orchestrator skill
