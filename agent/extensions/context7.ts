@@ -6,7 +6,7 @@ import { Type } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
 function parseSSE(text: string, id: number): any | undefined {
-  const lines = text.split("\n");
+  const lines = text.split(/\r?\n/);
   let dataBuffer = "";
   for (const line of lines) {
     if (line.startsWith("data: ")) {

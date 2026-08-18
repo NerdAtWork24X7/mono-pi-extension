@@ -284,7 +284,8 @@ class Runner {
 			this.buf += d.toString("utf-8");
 			let idx: number;
 			while ((idx = this.buf.indexOf("\n")) >= 0) {
-				const line = this.buf.slice(0, idx);
+				let line = this.buf.slice(0, idx);
+				if (line.endsWith("\r")) line = line.slice(0, -1);
 				this.buf = this.buf.slice(idx + 1);
 				this.onLine(line);
 			}

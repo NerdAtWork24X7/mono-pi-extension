@@ -100,7 +100,7 @@ export default function (pi: ExtensionAPI) {
           // ── Session meta ──
           const elapsed = theme.fg("dim", `⏱ ${formatElapsed(Date.now() - sessionStart)}`);
 
-          const parts = process.cwd().split("/");
+          const parts = process.cwd().split(/[/\\]/);
           const short = parts.length > 2 ? parts.slice(-2).join("/") : process.cwd();
           const cwdStr = theme.fg("muted", `⌂ ${short}`);
 

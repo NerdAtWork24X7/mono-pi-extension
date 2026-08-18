@@ -23,7 +23,7 @@
  */
 
 import { readFileSync, readdirSync, existsSync } from "fs";
-import { join } from "path";
+import { join, isAbsolute } from "path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 
 // ── Disabled-extension matching ─────────────────────────────────────────
@@ -125,7 +125,7 @@ export function scanExtensionPaths(cwd: string): string[] {
   const extEntries = (settings?.extensions as unknown[]) || [];
   for (const ext of extEntries) {
     if (typeof ext !== "string" || ext.startsWith("-")) continue; // not a string, or disabled
-    const resolved = ext.startsWith("/") ? ext : join(getAgentDir(), ext);
+    const resolved = isAbsolute(ext) ? ext : join(getAgentDir(), ext);
     if (existsSync(resolved)) add(resolved);
   }
 
