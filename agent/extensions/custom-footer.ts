@@ -12,6 +12,12 @@ import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth } from "@mariozechner/pi-tui";
 
+type PlanEntry = {
+  type: string;
+  customType?: string;
+  data?: { enabled: boolean; executing?: boolean; todos?: { completed: boolean }[] };
+};
+
 export default function (pi: ExtensionAPI) {
   let sessionStart = Date.now();
 
@@ -39,6 +45,10 @@ export default function (pi: ExtensionAPI) {
     return theme.fg(color, bar);
   }
 
+  // Static for the process lifetime — no need to re-split cwd on every render.
+  const cwdParts = process.cwd().split(/[/\\]/);
+  const cwdShort = cwdParts.length > 2 ? cwdParts.slice(-2).join("/") : process.cwd();
+
   pi.on("session_start", async (_event, ctx) => {
     sessionStart = Date.now();
 
@@ -46,21 +56,48 @@ export default function (pi: ExtensionAPI) {
       const unsub = footerData.onBranchChange(() => tui.requestRender());
       const timer = setInterval(() => tui.requestRender(), 30000);
 
-      return {
-        dispose() { unsub(); clearInterval(timer); },
-        invalidate() { },
-        render(width: number): string[] {
-          let input = 0, output = 0, cacheRead = 0, cacheWrite = 0, cost = 0;
-          for (const e of ctx.sessionManager.getBranch()) {
-            if (e.type === "message" && e.message.role === "assistant") {
-              const m = e.message as AssistantMessage;
-              input += m.usage.input;
-              output += m.usage.output;
-              cacheRead += m.usage.cacheRead;
-              cacheWrite += m.usage.cacheWrite;
-              cost += m.usage.cost.total;
-            }
+      // Token usage accumulates as the branch grows, so only scan entries added
+      // since the last render instead of re-walking the whole session each tick.
+      let stats = { count: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+
+      function currentStats() {
+        const branch = ctx.sessionManager.getBranch();
+        if (branch.length < stats.count) {
+          // Branch shrank (undo/checkpoint) — recompute from scratch.
+          stats = { count: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+        }
+        for (let i = stats.count; i < branch.length; i++) {
+          const e = branch[i];
+          if (e.type === "message" && e.message.role === "assistant") {
+            const m = e.message as AssistantMessage;
+            stats.input += m.usage.input;
+            stats.output += m.usage.output;
+            stats.cacheRead += m.usage.cacheRead;
+            stats.cacheWrite += m.usage.cacheWrite;
+            stats.cost += m.usage.cost.total;
           }
+        }
+        stats.count = branch.length;
+        return stats;
+      }
+
+      // Last matching plan-mode entry, without allocating a filtered array.
+      function lastPlanEntry(entries: PlanEntry[]): PlanEntry | undefined {
+        for (let i = entries.length - 1; i >= 0; i--) {
+          const e = entries[i];
+          if (e.type === "custom" && e.customType === "plan-mode") return e;
+        }
+        return undefined;
+      }
+
+      return {
+        dispose() {
+          unsub();
+          clearInterval(timer);
+        },
+        invalidate() {},
+        render(width: number): string[] {
+          const { input, output, cacheRead, cacheWrite, cost } = currentStats();
 
           const usage = ctx.getContextUsage();
           const ctxWindow = usage?.contextWindow ?? 0;
@@ -68,12 +105,22 @@ export default function (pi: ExtensionAPI) {
 
           // ── Model + thinking level ──
           const thinking = pi.getThinkingLevel();
-          const thinkColor = thinking === "high" ? "warning"
+          const thinkColor =
+            thinking === "high" ? "warning"
             : thinking === "medium" ? "accent"
-              : thinking === "low" ? "dim"
-                : "muted";
+            : thinking === "low" ? "dim"
+            : "muted";
           const modelId = ctx.model?.id || "no-model";
-          const modelBadge = theme.fg("accent", `◆ ${modelId}`) + " " + theme.fg(thinkColor, `● ${thinking}`);
+          const modelBadge =
+            theme.fg("accent", `◆ ${modelId}`) + " " + theme.fg(thinkColor, `● ${thinking}`);
+
+          // ── Configured context window + max tokens ──
+          const cfgCtx = ctx.model?.contextWindow ?? 0;
+          const cfgMax = ctx.model?.maxTokens ?? 0;
+          const modelCfg =
+            cfgCtx > 0 || cfgMax > 0
+              ? theme.fg("dim", `◧ ${cfgCtx > 0 ? fmt(cfgCtx) : "?"} ctx · ${cfgMax > 0 ? fmt(cfgMax) : "?"} max`)
+              : "";
 
           // ── Token stats ──
           const tokenParts: string[] = [
@@ -99,24 +146,20 @@ export default function (pi: ExtensionAPI) {
 
           // ── Session meta ──
           const elapsed = theme.fg("dim", `⏱ ${formatElapsed(Date.now() - sessionStart)}`);
-
-          const parts = process.cwd().split(/[/\\]/);
-          const short = parts.length > 2 ? parts.slice(-2).join("/") : process.cwd();
-          const cwdStr = theme.fg("muted", `⌂ ${short}`);
+          const cwdStr = theme.fg("muted", `⌂ ${cwdShort}`);
 
           const branch = footerData.getGitBranch();
           const branchStr = branch ? theme.fg("accent", `⎇ ${branch}`) : "";
 
           // ── Plan mode status ──
-          type PlanEntry = { type: string; customType?: string; data?: { enabled: boolean; executing?: boolean; todos?: { completed: boolean }[] } };
-          const allEntries = ctx.sessionManager.getEntries() as PlanEntry[];
-          const planEntry = allEntries.filter((e) => e.type === "custom" && e.customType === "plan-mode").pop();
+          const planEntry = lastPlanEntry(ctx.sessionManager.getEntries() as PlanEntry[]);
           const planEnabled = planEntry?.data?.enabled ?? false;
           const planExecuting = planEntry?.data?.executing ?? false;
           const planTodos = planEntry?.data?.todos ?? [];
           let planStr = "";
           if (planExecuting && planTodos.length > 0) {
-            const completed = planTodos.filter((t) => t.completed).length;
+            let completed = 0;
+            for (const t of planTodos) if (t.completed) completed++;
             planStr = theme.fg("accent", `📋 ${completed}/${planTodos.length}`);
           } else if (planEnabled) {
             planStr = theme.fg("warning", "PLAN");
@@ -125,6 +168,7 @@ export default function (pi: ExtensionAPI) {
           // ── Assemble with subtle separators ──
           const sep = theme.fg("dim", " · ");
           const sections: string[] = [modelBadge, tokenStr, costStr];
+          if (modelCfg) sections.push(modelCfg);
           if (contextStr) sections.push(contextStr);
           sections.push(elapsed, cwdStr);
           if (branchStr) sections.push(branchStr);

@@ -81,6 +81,8 @@ export class AgentTeam implements AgentTeamContext {
   orchestratorSkills = new Set<string>();
   /** Skill directory names available to subagents. Empty = none. */
   subagentSkills = new Set<string>();
+  /** Orchestrator tool denylist. Tools listed are hidden from the orchestrator. Empty = all tools shown. */
+  skipOrchestratorTools: string[] = [];
   private agentMutexes = new Map<string, Promise<unknown>>();
 
   cachedExtPaths: string[] = []; // resolved once per session_start
@@ -112,6 +114,7 @@ export class AgentTeam implements AgentTeamContext {
     this.disabledAgents = new Set(this.saved.disabledAgents ?? []);
     this.orchestratorSkills = new Set(this.saved.orchestratorSkills ?? []);
     this.subagentSkills = new Set(this.saved.subagentSkills ?? []);
+    this.skipOrchestratorTools = this.saved.skipOrchestratorTools ?? [];
 
     this.logger = new SessionLogger();
 
@@ -211,7 +214,20 @@ export class AgentTeam implements AgentTeamContext {
 
   // Persist current runtime state to disk
   persist() {
+    // Read the on-disk config so manual edits to keys the runtime doesn't
+    // track (and partial writes) survive. savePersistedConfig does a full
+    // file rewrite, so without this merge any user edit to skipOrchestratorTools
+    // (or other keys) gets clobbered by the stale construction-time snapshot.
+    const onDisk = loadPersistedConfig();
+    // skipOrchestratorTools has no runtime setter: it is only ever read from
+    // the file (constructor). An empty runtime value means "no change", so
+    // prefer the on-disk value instead of dropping the key (JSON.stringify
+    // omits undefined, which previously deleted a non-empty file entry).
+    const skipOrchestratorTools = this.skipOrchestratorTools.length
+      ? this.skipOrchestratorTools
+      : onDisk.skipOrchestratorTools;
     savePersistedConfig({
+      ...onDisk,
       activeTeam: this.activeTeam,
       gridCols: this.gridCols,
       enabled: this.enabled,
@@ -221,12 +237,20 @@ export class AgentTeam implements AgentTeamContext {
       disabledAgents: Array.from(this.disabledAgents),
       orchestratorSkills: Array.from(this.orchestratorSkills),
       subagentSkills: Array.from(this.subagentSkills),
+      skipOrchestratorTools,
     });
   }
 
   /** Active tool allowlist. Includes dispatch_agents when parallel dispatch is on. */
   activeToolList(): string[] {
-    const base = this.pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent" && n !== "dispatch_agents" && n !== "browser");
+    const all = this.pi.getAllTools().map(t => t.name);
+    // Start from full PI tool set, remove internal routing tools
+    let base = all.filter(n => n !== "dispatch_agent" && n !== "dispatch_agents");
+    // If skipOrchestratorTools is non-empty, exclude those tools (denylist)
+    if (this.skipOrchestratorTools.length) {
+      const block = new Set(this.skipOrchestratorTools.map(t => t.toLowerCase()));
+      base = base.filter(n => !block.has(n.toLowerCase()));
+    }
     if (this.parallelDispatch) base.unshift("dispatch_agents");
     base.unshift("dispatch_agent");
     return base;

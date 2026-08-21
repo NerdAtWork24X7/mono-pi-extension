@@ -10,10 +10,18 @@
     "doc_generator"
   ],
   "disabledAgents": [
-    "documenter",
-    "doc_generator",
-    "image_analyzer"
+    "coder"
   ],
-  "orchestratorSkills": [],
-  "subagentSkills": []
+  "orchestratorSkills": [
+    "graphify"
+  ],
+  "subagentSkills": [
+    "graphify"
+  ],
+  "skipOrchestratorTools": [
+    "context7-search",
+    "context7-query",
+    "browser",
+    "web-fetch"
+  ]
 }

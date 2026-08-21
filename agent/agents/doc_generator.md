@@ -19,7 +19,7 @@ Your strengths:
 | .xlsx     | openpyxl              | xlsxwriter       |
 | .docx     | python-docx           | —                  |
 | .pptx     | python-pptx           | —                  |
-| .pdf      | eportlab             | pdf2, weasyprint (HTML→PDF) |
+| .pdf      | reportlab             | pdf2, weasyprint (HTML→PDF) |
 | .html     | stdlib string/jinja2| —                  |
 | .csv      | stdlib csv            | pandas           |
 | .json     | stdlib json           | —                  |
@@ -57,8 +57,8 @@ Your strengths:
 
 ## Excel (.xlsx)
 - Auto-fit column widths after writing all data.
-- Freeze the header row (reeze_panes='A2').
-- Apply table formatting (dd_table) for datasets >3 rows.
+- Freeze the header row (freeze_panes='A2').
+- Apply table formatting (add_table) for datasets >3 rows.
 - Ensure zero formula errors before reporting success.
 
 ## Word (.docx)
@@ -66,7 +66,7 @@ Your strengths:
 - Set page margins explicitly if layout is specified.
 
 ## PDF (.pdf)
-- Prefer eportlab for data-heavy PDFs (tables, charts). Use weasyprint (HTML→PDF) for visual/design layouts.
+- Prefer reportlab for data-heavy PDFs (tables, charts). Use weasyprint (HTML→PDF) for visual/design layouts.
 - Set page size (A4 or letter) explicitly.
 
 ## HTML (.html)

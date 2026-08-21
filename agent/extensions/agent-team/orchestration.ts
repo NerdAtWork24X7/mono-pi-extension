@@ -26,7 +26,6 @@ const MAX_AUTO_COMPACTIONS = 2;
 
 // Map of event type → log message formatter for simple delegation
 const simpleLogEvents: Record<string, (ev: any) => string> = {
-  auto_retry_start: (ev) => `AUTO-RETRY attempt ${ev.attempt}/${ev.maxAttempts} (${ev.delayMs}ms)`,
   auto_retry_end: (ev) => `AUTO-RETRY ${ev.success ? "succeeded" : "failed"} (attempt ${ev.attempt})`,
 };
 
@@ -50,7 +49,9 @@ export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) 
 
   switch (ev.type) {
     case "response": return handleResponse(ctx, ap, ev);
+    case "message_start": return handleMessageStart(ctx, ap, ev);
     case "message_update": return handleMessageUpdate(ctx, ap, ev);
+    case "auto_retry_start": return handleAutoRetryStart(ctx, ap, ev);
     case "message_end": return handleMessageEnd(ctx, ap, ev);
     case "tool_execution_start": return handleToolStart(ctx, ap, ev);
     case "tool_execution_end": return handleToolEnd(ctx, ap, ev);
@@ -160,6 +161,26 @@ export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
  *  AgentProc interface unchanged and avoids cross-agent update suppression. */
 const lastStreamInvalidate = new WeakMap<AgentProc, number>();
 
+export function handleMessageStart(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
+  if (ev.message?.role !== "assistant") return;
+  // Mark where this attempt's streamed text begins so a mid-stream provider
+  // error followed by auto-retry (which re-streams the whole message from
+  // scratch) can roll back the failed attempt's lines instead of duplicating.
+  ap.streamLogIdx = ap.logLines.length;
+}
+
+/** Mid-stream provider error: pi drops the failed partial assistant message
+ *  and re-streams it from the beginning. Roll back the failed attempt's
+ *  streamed log lines and buffers so the retried stream isn't appended on
+ *  top of its own partial copy (which rendered the same text N times). */
+export function handleAutoRetryStart(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
+  ap.logLines.length = Math.min(ap.streamLogIdx, ap.logLines.length);
+  ap.streamLineBuf = "";
+  ap.currentMessageText = "";
+  ctx.logger.log(`AUTO-RETRY attempt ${ev.attempt}/${ev.maxAttempts} (${ev.delayMs}ms)`, ap);
+  ctx.invalidate();
+}
+
 export function handleMessageUpdate(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
   const delta = ev.assistantMessageEvent;
   if (delta?.type !== "text_delta") return;
@@ -203,7 +224,10 @@ export function handleMessageEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) 
     ap.tokensUsed += dispatchTokensUsed;
   }
   ctx.logger.flushStreamBuf(ap);
-  if (ap.currentMessageText.trim()) ap.lastAssistantText = ap.currentMessageText;
+  // Don't promote partial text from an errored/aborted stream — a following
+  // auto-retry re-streams the real message and would overwrite it anyway.
+  const stop = ev.message?.stopReason;
+  if (stop !== "error" && stop !== "aborted" && ap.currentMessageText.trim()) ap.lastAssistantText = ap.currentMessageText;
   ap.currentMessageText = "";
   ctx.invalidate();
 }

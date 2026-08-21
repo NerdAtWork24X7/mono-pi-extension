@@ -17,28 +17,28 @@
 #       the result to <cwd>/.pi_memory/project_memory.md.
 
 memory_model:
-  model: opencode/mimo-v2.5-free
-  active: true
+  model: xiaomi-token-plan-ams/mimo-v2.5
+  active: false
 
 subagent_team:
   - name: file_reader
-    model: opencode/deepseek-v4-flash-free
+    model: xiaomi-token-plan-ams/mimo-v2.5
   - name: searcher
-    model: opencode/deepseek-v4-flash-free
+    model: xiaomi-token-plan-ams/mimo-v2.5
   - name: coder
   - name: tester
-    model: opencode/deepseek-v4-flash-free
+    model: xiaomi-token-plan-ams/mimo-v2.5
   - name: documenter
-    model: opencode/deepseek-v4-flash-free
+    model: xiaomi-token-plan-ams/mimo-v2.5
     active: false
   - name: doc_generator
-    model: opencode/deepseek-v4-flash-free
+    model: xiaomi-token-plan-ams/mimo-v2.5
     active: false
   - name: image_analyzer
-    model: opencode/mimo-v2.5-free
+    model: xiaomi-token-plan-ams/mimo-v2.5
     active: false
   - name: harsh_critic
-    model: opencode/deepseek-v4-flash-free
+    model: xiaomi-token-plan-ams/mimo-v2.5-pro
 
 test_subagent_team:
   - name: coder

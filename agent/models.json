@@ -41,6 +41,49 @@
         }
       ]
     },
+   "cline-pass": {
+  "baseUrl": "https://api.cline.bot/api/v1",
+  "api": "openai-completions",
+  "apiKey": "cline-pass",
+  "models": [
+    {
+      "id": "cline-pass/glm-5.3",
+      "reasoning": true,
+      "contextWindow": 204800,
+      "maxTokens": 16384
+    },
+    {
+      "id": "cline-pass/qwen3.8-max",
+      "reasoning": true,
+      "contextWindow": 204800,
+      "maxTokens": 16384
+    },
+    {
+      "id": "cline-pass/deepseek-v4-pro",
+      "reasoning": true,
+      "contextWindow": 204800,
+      "maxTokens": 16384
+    },
+    {
+      "id": "cline-pass/deepseek-v4-flash",
+      "reasoning": true,
+      "contextWindow": 204800,
+      "maxTokens": 16384
+    },
+    {
+      "id": "cline-pass/kimi-k3",
+      "reasoning": true,
+      "contextWindow": 204800,
+      "maxTokens": 16384
+    },
+    {
+      "id": "cline-free/deepseek-v4-flash",
+      "reasoning": true,
+      "contextWindow": 204800,
+      "maxTokens": 16384
+    }
+  ]
+},
     "fcm": {
       "baseUrl": "http://localhost:19280/v1",
       "api": "openai-completions",

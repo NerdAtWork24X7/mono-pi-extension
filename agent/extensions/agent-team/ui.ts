@@ -75,7 +75,8 @@ export function buildSystemPrompt(args: {
 
   // if no subagents
   const subagents_header = (!enabled || enabled.length === 0) ? `` : `## Subagents
-Each subagent is stateless and cannot see history. Ensure each dispatch includes the task, acceptance criteria (1 line), all relevant paths/excerpts/errors/decisions, and expected return format.
+Each subagent is stateless and cannot see history; every dispatch starts cold (empty session, no prompt cache) and re-explores from scratch. Ensure each dispatch includes the task, acceptance criteria (1 line), exact file paths with line ranges, relevant excerpts/errors/decisions already in your context, and expected return format. Context you supply is exploration the subagent skips.
+Batch related edits to the same area into ONE dispatch to a writable agent. Writable dispatches serialize, so splitting one logical change across several small dispatches multiplies cold starts and queues them.
 If subagent is not able to perform Task, refine the task into smaller chunks and dispatch again.Maximum 2 retries else you perform the task yourself.
 
 | Subagent | Use for | Tools | Dispatch |

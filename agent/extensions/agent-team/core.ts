@@ -53,6 +53,7 @@ export interface AgentProc {
   lastPromptHash?: string;
   streamLineBuf: string;   // partial line buffer for streaming text box-wrapping
   logLines: string[];        // per-agent in-memory log ring buffer (rendered in the TUI widget, scaled per agent)
+  streamLogIdx: number;      // logLines index where the current assistant message's streamed text began (retry rollback mark)
   runId?: string;         // unique per concurrent run; suffixed into session/prompt files to avoid collisions
 }
 
@@ -87,6 +88,8 @@ export interface TeamConfig {
   orchestratorSkills?: string[];
   /** Skill directory names available to subagents. Empty = none enabled. */
   subagentSkills?: string[];
+  /** Orchestrator tool denylist. Tools listed are hidden from the orchestrator. Empty = all tools shown. */
+  skipOrchestratorTools?: string[];
 }
 
 /** Contract that the AgentTeam class satisfies structurally. All orchestration,
@@ -155,6 +158,8 @@ export interface AgentTeamContext {
   /** True when an agent's tool allowlist includes any destructive (file-mutating) tool. */
   destructiveTools: string[];
   /** Async read/write lock: read-only dispatches run concurrently; writable dispatches are exclusive. */
+  /** Orchestrator tool denylist. Tools listed are hidden from the orchestrator. Empty = all tools shown. */
+  skipOrchestratorTools: string[];
   dispatchLock: RwLock;
   /** Serialize dispatches to the SAME agent so its shared AgentProc state never collides. */
   serializeAgent: (name: string, fn: () => Promise<any>) => Promise<any>;
@@ -238,6 +243,7 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
     sessionFile: "", systemPromptFile: "", lastPromptHash: undefined,
     streamLineBuf: "",
     logLines: [],
+    streamLogIdx: 0,
   };
 }
 
@@ -260,6 +266,7 @@ export function resetForDispatch(ap: AgentProc) {
   ap.lastAssistantText = "";
   ap.stdoutBuf = "";
   ap.streamLineBuf = "";
+  ap.streamLogIdx = ap.logLines.length;
   ap.resolveDispatch = null;
   ap.autoCompacted = false;
   ap.compactionCount = 0;

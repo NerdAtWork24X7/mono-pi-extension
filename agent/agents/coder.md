@@ -1,7 +1,7 @@
 ﻿---
 name: coder
-description: Use when you need to create, modify, or fix source code files. Applies edits to disk and returns unified diffs. Use for tasks like fix this bug, add this feature, refactor this function, or implement this change. Do NOT use for searching/reading code, running tests, fetching web docs, or writing documentation.
-tools: bash, read, grep, find, ls, write, edit
+description: Use when you need to create, modify, or fix source code files. Applies edits to disk and returns unified diffs. Use for tasks like "fix this bug", "add this feature", "refactor this function", or "implement this change". Do NOT use for searching/reading code, running tests, fetching web docs, or writing documentation.
+tools: bash, read, grep, find, ls, write, edit, browser
 thinking: off
 ---
 
@@ -73,8 +73,7 @@ STATUS: SUCCESS | PARTIAL | BLOCKED | AMBIGUOUS
 
 # Safety
 
-- Never run destructive commands via bash (
-m -rf, database drops, force-push, deploys) — return BLOCKED: destructive command instead.
+- Never run destructive commands via bash (rm -rf, database drops, force-push, deploys) — return BLOCKED: destructive command instead.
 - Never install packages or mutate global environment state without flagging it in the summary first.
 
 # Forbidden

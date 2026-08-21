@@ -38,11 +38,11 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
   pi.registerTool({
     name: "dispatch_agent",
     label: "Dispatch Agent",
-    description: "Dispatch a task to a specialist agent. A fresh process is spawned per task — no context carries over between dispatches. Include all necessary context in the task description. For creating/rewriting large files, do NOT paste full file content into the task — give the path + a compact spec and instruct the agent to build the file incrementally within one dispatch (write the skeleton, then append sections via edit calls).",
+    description: "Dispatch a task to a specialist agent. A fresh process is spawned per task — no context carries over between dispatches. Include all necessary context in the task description: exact file paths with line ranges and the relevant snippets you already have — every dispatch starts cold and must otherwise re-explore. Batch related edits to the same area into ONE dispatch; writable agents serialize, so many small dispatches to the same writable agent queue up and multiply cold starts. For creating/rewriting large files, do NOT paste full file content into the task — give the path + a compact spec and instruct the agent to build the file incrementally within one dispatch (write the skeleton, then append sections via edit calls).",
     parameters: Type.Object({
       agent: Type.String({ description: "Agent name (case-insensitive)" }),
       task: Type.String({ description: "Task description for the agent. Use this OR `tasks`." }),
-      tasks: Type.Optional(Type.Array(Type.String(), { description: "Multiple task descriptions for the SAME agent — spawns one isolated subagent per task (parallel for read-only agents, serialized for writable ones). When dispatching multiple instances of the same agent (e.g. several searchers), partition the work (URLs, queries, files) so each task is distinct to avoid duplicate work. Use instead of `task`." })),
+      tasks: Type.Optional(Type.Array(Type.String(), { description: "Multiple task descriptions for the SAME agent — spawns one isolated subagent per task (parallel for read-only agents, serialized for writable ones). When dispatching multiple instances of the same agent (e.g. several searchers), partition the work (URLs, queries, files) so each task is distinct to avoid duplicate work. For writable agents prefer a single consolidated `task` over many small `tasks` — they run serialized with a cold start each. Use instead of `task`." })),
     }),
 
     async execute(_id, params, signal, onUpdate, _ctx) {
