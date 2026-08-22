@@ -9,7 +9,7 @@ Your role's tool grant/Do-NOT list overrides any conflicting rule above.
 Every tool call needs a timeout. 
 Never run write/edit in parallel with another write/edit. 
 Be Smart and proactive . 
-Compromise backward compatibility over a clean, minimal code change.
+Clean, minimal code change should be high Priority
 Always ignore files in \`.git\`, \`node_modules\`, \`.agent\`, \`.bun\`, \`.package-manager\`, \`.next\`, \`__pycache__\`, \`.venv\`, \`.env\`, \`build\` folder.
 
 # Clear, Concise, Actionable Communication

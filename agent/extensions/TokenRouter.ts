@@ -23,7 +23,7 @@ import { loadCachedModels } from "./agent-team/model-cache";
 // =============================================================================
 
 const TOKENROUTER_API_BASE = process.env.TOKENROUTER_URL || "https://api.tokenrouter.com/v1";
-const MODELS_API_BASE = process.env.TOKENROUTER_MODELS_URL || "https://open.palebluedot.ai/v1";
+const MODELS_API_BASE = process.env.TOKENROUTER_MODELS_URL || "https://openrouter.ai/api/v1";
 const MODELS_FETCH_TIMEOUT_MS = 10_000;
 
 // =============================================================================
@@ -51,8 +51,8 @@ interface OpenRouterModel {
 
 function parsePrice(price: string | null | undefined): number {
   if (!price) return 0;
-  const parsed = parseFloat(price);
-  if (isNaN(parsed)) return 0;
+  const parsed = Number(price);
+  if (!Number.isFinite(parsed)) return 0;
   // OpenRouter prices are per-token; Pi expects per-million-token
   return parsed * 1_000_000;
 }

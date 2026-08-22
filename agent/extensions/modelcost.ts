@@ -14,9 +14,11 @@
  * dependency on the tokenrouter provider.
  */
 
-import { DynamicBorder, keyHint, type ExtensionAPI, type Theme } from "@mariozechner/pi-coding-agent";
+import { DynamicBorder, keyHint, getAgentDir, type ExtensionAPI, type Theme } from "@mariozechner/pi-coding-agent";
 import type { Model } from "@mariozechner/pi-ai";
-import { Container, Input, Text, Spacer, fuzzyFilter, getKeybindings, type Component, type TUI } from "@mariozechner/pi-tui";
+import { Container, Input, Text, Spacer, fuzzyFilter, getKeybindings, matchesKey, Key, type Component, type TUI } from "@mariozechner/pi-tui";
+import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 
 function formatPrice(perMillion: number): string {
   if (perMillion === 0) return "free";
@@ -37,8 +39,10 @@ interface ModelCostSelectorOptions {
   theme: Theme;
   models: Model<any>[];
   currentModel: Model<any> | undefined;
+  scopedKeys?: Set<string>;
   initialSearch?: string;
   onSelect: (m: Model<any>) => void;
+  onAddToScope?: (m: Model<any>) => boolean | null;
   onCancel: () => void;
 }
 
@@ -53,6 +57,11 @@ class ModelCostSelector extends Container {
   private tui: TUI;
   private onSelectCb: (m: Model<any>) => void;
   private onCancelCb: () => void;
+  private selectedProviderIndex = -1;  // -1=All, -2=Free, 0..n=provider
+  private providers: string[] = [];
+  private providerText: Text;
+  private onAddToScopeCb?: (m: Model<any>) => boolean | null;
+  private scopedKeys: Set<string>;
 
   constructor(opts: ModelCostSelectorOptions) {
     super();
@@ -62,12 +71,20 @@ class ModelCostSelector extends Container {
     this.currentModel = opts.currentModel;
     this.onSelectCb = opts.onSelect;
     this.onCancelCb = opts.onCancel;
+    this.onAddToScopeCb = opts.onAddToScope;
+    this.scopedKeys = opts.scopedKeys ?? new Set();
+
+    this.providers = [...new Set(this.allModels.map((m) => m.provider))].sort();
 
     this.addChild(new DynamicBorder((s) => opts.theme.fg("border", s)));
     this.addChild(
       new Text(opts.theme.fg("accent", opts.theme.bold("Select Model by Cost")), 1, 0),
     );
     this.addChild(new Spacer(1));
+    this.providerText = new Text("", 1, 0);
+    this.addChild(this.providerText);
+    this.addChild(new Spacer(1));
+    this.updateProviderBar();
     this.addChild(new Text(opts.theme.fg("muted", "Filter:"), 1, 0));
     this.searchInput = new Input();
     if (opts.initialSearch) {
@@ -87,6 +104,12 @@ class ModelCostSelector extends Container {
     this.addChild(new Spacer(1));
 
     const hintLine =
+      opts.theme.fg("muted", "←→") +
+      " " +
+      opts.theme.fg("muted", "provider") +
+      " " +
+      opts.theme.fg("muted", "·") +
+      " " +
       keyHint("tui.select.up", "up") +
       " " +
       opts.theme.fg("muted", "·") +
@@ -99,7 +122,13 @@ class ModelCostSelector extends Container {
       " " +
       opts.theme.fg("muted", "·") +
       " " +
-      keyHint("tui.select.cancel", "cancel");
+      keyHint("tui.select.cancel", "cancel") +
+      " " +
+      opts.theme.fg("muted", "·") +
+      " " +
+      opts.theme.fg("muted", "ctrl+s") +
+      " " +
+      opts.theme.fg("muted", "scope");
     this.addChild(new Text(hintLine, 0, 0));
     this.addChild(new Spacer(1));
 
@@ -119,9 +148,20 @@ class ModelCostSelector extends Container {
   }
 
   private filterModels(query: string): void {
+    let models = this.allModels;
+    if (this.selectedProviderIndex === -2) {
+      models = models.filter((m) => m.cost.input === 0 && m.cost.output === 0);
+    } else if (this.selectedProviderIndex >= 0 && this.selectedProviderIndex < this.providers.length) {
+      const provider = this.providers[this.selectedProviderIndex];
+      models = models.filter((m) => m.provider === provider);
+    }
     this.filteredModels = query
-      ? fuzzyFilter(this.allModels, query, (m) => `${m.id} ${m.name} ${m.provider}`)
-      : this.allModels;
+      ? fuzzyFilter(models, query, (m) => `${m.id} ${m.name} ${m.provider}`)
+      : models;
+    this.filteredModels = [
+      ...this.filteredModels.filter((m) => this.scopedKeys.has(`${m.provider}/${m.id}`)),
+      ...this.filteredModels.filter((m) => !this.scopedKeys.has(`${m.provider}/${m.id}`)),
+    ];
     this.selectedIndex = 0;
     this.updateList();
   }
@@ -162,7 +202,13 @@ class ModelCostSelector extends Container {
         `${formatContextWindow(m.contextWindow)} ctx`,
       );
       const checkmark = isCurrent ? this.theme.fg("success", " ✓") : "";
-      const line = `${arrow}${name} ${provider}   ${inputPrice}  ${outputPrice}  ${ctx}${checkmark}`;
+      const scoped = this.scopedKeys.has(`${m.provider}/${m.id}`);
+      const scopeIcon = this.onAddToScopeCb
+        ? scoped
+          ? this.theme.fg("accent", " ✖")
+          : this.theme.fg("muted", " ✚")
+        : "";
+      const line = `${arrow}${name} ${provider}   ${inputPrice}  ${outputPrice}  ${ctx}${scopeIcon}${checkmark}`;
       this.listContainer.addChild(new Text(line, 0, 0));
     }
 
@@ -206,8 +252,62 @@ class ModelCostSelector extends Container {
     this.tui.requestRender();
   }
 
+  private updateProviderBar(): void {
+    const parts: string[] = [];
+    const allSelected = this.selectedProviderIndex === -1;
+    const freeSelected = this.selectedProviderIndex === -2;
+    parts.push(
+      allSelected
+        ? this.theme.fg("accent", this.theme.bold("[ All ]"))
+        : this.theme.fg("muted", "[ All ]"),
+    );
+    parts.push(
+      freeSelected
+        ? this.theme.fg("accent", this.theme.bold("[ Free ]"))
+        : this.theme.fg("muted", "[ Free ]"),
+    );
+    for (let i = 0; i < this.providers.length; i++) {
+      const selected = i === this.selectedProviderIndex;
+      parts.push(
+        selected
+          ? this.theme.fg("accent", this.theme.bold(`[ ${this.providers[i]} ]`))
+          : this.theme.fg("muted", `[ ${this.providers[i]} ]`),
+      );
+    }
+    this.providerText.setText(parts.join(" "));
+    this.tui.requestRender();
+  }
+
   handleInput(keyData: string): void {
     const kb = getKeybindings();
+    if (matchesKey(keyData, Key.right)) {
+      if (this.selectedProviderIndex >= this.providers.length - 1) {
+        this.selectedProviderIndex = -1;
+      } else if (this.selectedProviderIndex === -1) {
+        this.selectedProviderIndex = -2;
+      } else if (this.selectedProviderIndex === -2) {
+        this.selectedProviderIndex = 0;
+      } else {
+        this.selectedProviderIndex++;
+      }
+      this.updateProviderBar();
+      this.filterModels(this.searchInput.getValue());
+      return;
+    }
+    if (matchesKey(keyData, Key.left)) {
+      if (this.selectedProviderIndex === -1) {
+        this.selectedProviderIndex = this.providers.length - 1;
+      } else if (this.selectedProviderIndex === -2) {
+        this.selectedProviderIndex = -1;
+      } else if (this.selectedProviderIndex === 0) {
+        this.selectedProviderIndex = -2;
+      } else {
+        this.selectedProviderIndex--;
+      }
+      this.updateProviderBar();
+      this.filterModels(this.searchInput.getValue());
+      return;
+    }
     if (kb.matches(keyData, "tui.select.up")) {
       if (this.filteredModels.length === 0) return;
       this.selectedIndex =
@@ -235,9 +335,130 @@ class ModelCostSelector extends Container {
       this.onCancelCb();
       return;
     }
+    if (matchesKey(keyData, Key.ctrl("s")) && this.onAddToScopeCb) {
+      const selected = this.filteredModels[this.selectedIndex];
+      if (selected) {
+        const result = this.onAddToScopeCb(selected);
+        if (result === null) return;
+        const key = `${selected.provider}/${selected.id}`;
+        if (result) {
+          this.scopedKeys.add(key);
+        } else {
+          this.scopedKeys.delete(key);
+        }
+        this.updateList();
+      }
+      return;
+    }
     this.searchInput.handleInput(keyData);
     this.filterModels(this.searchInput.getValue());
   }
+}
+
+function globToRegex(pattern: string): RegExp {
+  let re = "";
+  let i = 0;
+  while (i < pattern.length) {
+    const ch = pattern[i];
+    if (ch === "*") {
+      if (pattern[i + 1] === "*") {
+        // ** — match everything including /
+        re += ".*";
+        i++;
+      } else {
+        // * — match anything except /
+        re += "[^/]*";
+      }
+    } else if (ch === "?") {
+      re += "[^/]";
+    } else if (ch === "[") {
+      const end = pattern.indexOf("]", i);
+      if (end === -1) {
+        re += "\\[";
+      } else {
+        re += pattern.substring(i, end + 1);
+        i = end;
+      }
+    } else if (ch === "." || ch === "(" || ch === ")" || ch === "+" || ch === "^" || ch === "$" || ch === "|" || ch === "\\" || ch === "{" || ch === "}") {
+      re += "\\" + ch;
+    } else {
+      re += ch;
+    }
+    i++;
+  }
+  return new RegExp("^" + re + "$", "i");
+}
+
+function resolveScopeSync(
+  patterns: string[],
+  models: Model<any>[],
+): { model: Model<any>; thinkingLevel?: string }[] {
+  const scoped: { model: Model<any>; thinkingLevel?: string }[] = [];
+  const validLevels = ["low", "medium", "high", "minimal", "xhigh"];
+
+  for (const pattern of patterns) {
+    let globPattern = pattern;
+    let thinkingLevel: string | undefined;
+    const colonIdx = pattern.lastIndexOf(":");
+    if (colonIdx > 0) {
+      const suffix = pattern.substring(colonIdx + 1);
+      if (validLevels.includes(suffix)) {
+        thinkingLevel = suffix;
+        globPattern = pattern.substring(0, colonIdx);
+      }
+    }
+
+    // Exact match: provider/id or bare id
+    const slashIdx = globPattern.indexOf("/");
+    let exactMatch: Model<any> | undefined;
+    if (slashIdx > 0) {
+      const provider = globPattern.substring(0, slashIdx);
+      const id = globPattern.substring(slashIdx + 1);
+      exactMatch = models.find(
+        (m) => m.provider === provider && m.id === id,
+      );
+    }
+    if (!exactMatch) {
+      const lower = globPattern.toLowerCase();
+      exactMatch = models.find((m) => m.id.toLowerCase() === lower);
+    }
+
+    if (exactMatch) {
+      if (
+        !scoped.find(
+          (s) =>
+            s.model.provider === exactMatch!.provider &&
+            s.model.id === exactMatch!.id,
+        )
+      ) {
+        scoped.push({ model: exactMatch, thinkingLevel });
+      }
+      continue;
+    }
+
+    // Glob matching
+    const hasGlob =
+      globPattern.includes("*") ||
+      globPattern.includes("?") ||
+      globPattern.includes("[");
+    if (hasGlob) {
+      const regex = globToRegex(globPattern);
+      for (const m of models) {
+        const fullId = `${m.provider}/${m.id}`;
+        if (regex.test(fullId) || regex.test(m.id)) {
+          if (
+            !scoped.find(
+              (s) =>
+                s.model.provider === m.provider && s.model.id === m.id,
+            )
+          ) {
+            scoped.push({ model: m, thinkingLevel });
+          }
+        }
+      }
+    }
+  }
+  return scoped;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -270,6 +491,72 @@ export default function (pi: ExtensionAPI) {
         if (ok) ctx.ui.notify(`Model: ${directMatch.id}`, "info");
         return;
       }
+
+      const addToScope = (model: Model<any>): boolean | null => {
+        const key = `${model.provider}/${model.id}`;
+        const settingsPath = join(getAgentDir(), "settings.json");
+        let settings: any = {};
+        if (existsSync(settingsPath)) {
+          try {
+            settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+          } catch { /* ignore */ }
+        }
+        const enabledModels: string[] = settings.enabledModels ?? [];
+        const idx = enabledModels.indexOf(key);
+        let added: boolean;
+        if (idx >= 0) {
+          enabledModels.splice(idx, 1);
+          added = false;
+        } else {
+          enabledModels.push(key);
+          added = true;
+        }
+        settings.enabledModels = enabledModels;
+        try {
+          writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+        } catch {
+          return null;
+        }
+        syncScope();
+        return added;
+      };
+      const buildScopedSet = (): Set<string> => {
+        const settingsPath = join(getAgentDir(), "settings.json");
+        if (!existsSync(settingsPath)) return new Set();
+        try {
+          const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+          return new Set<string>(settings.enabledModels ?? []);
+        } catch {
+          return new Set();
+        }
+      };
+
+      const syncScope = (): void => {
+        const live =
+          ctx.scopedModels as unknown as {
+            model: Model<any>;
+            thinkingLevel?: string;
+          }[];
+        const settingsPath = join(getAgentDir(), "settings.json");
+        let patterns: string[] = [];
+        if (existsSync(settingsPath)) {
+          try {
+            const settings = JSON.parse(
+              readFileSync(settingsPath, "utf8"),
+            );
+            patterns = settings.enabledModels ?? [];
+          } catch {
+            /* ignore */
+          }
+        }
+        const resolved = resolveScopeSync(patterns, allModels);
+        live.splice(0, live.length, ...resolved);
+      };
+
+      // Apply scope from settings immediately (in case changed externally
+      // or not yet applied for this session)
+      syncScope();
+
       // We use setWidget + onTerminalInput (rather than ctx.ui.custom) so the
       // selector renders in the "belowEditor" slot — between the input box and
       // the footer — instead of as a centered overlay modal.
@@ -296,8 +583,10 @@ export default function (pi: ExtensionAPI) {
               theme,
               models: allModels,
               currentModel: ctx.model,
+              scopedKeys: buildScopedSet(),
               initialSearch: searchTerm || undefined,
               onSelect: (m) => finish(m),
+              onAddToScope: (m) => addToScope(m),
               onCancel: () => finish(null),
             });
             // TUI focus isn't routed to below-editor widgets, so set the
@@ -314,11 +603,11 @@ export default function (pi: ExtensionAPI) {
           if (selector) selector.handleInput(data);
           return { consume: true };
         });
-      });
-      if (selected) {
+      });      if (selected) {
         const ok = await pi.setModel(selected);
         if (ok) ctx.ui.notify(`Model: ${selected.id}`, "info");
       }
     },
   });
 }
+
