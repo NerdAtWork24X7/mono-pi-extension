@@ -77,6 +77,7 @@ export function buildSystemPrompt(args: {
   const subagents_header = (!enabled || enabled.length === 0) ? `` : `## Subagents
 Each subagent is stateless and cannot see history; every dispatch starts cold (empty session, no prompt cache) and re-explores from scratch. Ensure each dispatch includes the task, acceptance criteria (1 line), exact file paths with line ranges, relevant excerpts/errors/decisions already in your context, and expected return format.
 Batch related edits to the same area into ONE dispatch to a writable agent. Writable dispatches serialize, so splitting one logical change across several small dispatches multiplies cold starts which reduces speed and increases token usage.
+If subagent reports edit-tool errors ("Could not find the exact text"), give it the exact file content it needs as context — never paste paragraphs of surrounding code, just the precise 5-10 line window around the change site with exact indentation.
 If subagent is not able to perform Task, refine the task into smaller chunks and dispatch again.Maximum 2 retries else you perform the task yourself.
 
 | Subagent | Use for | Tools | Dispatch |
@@ -168,6 +169,7 @@ ${skillsSection}
 
 ## Notes
 - Always use \`${args.cwd}/tmp\` to generate temporary files.
+- Edit tool: it requires an exact byte-for-byte match of oldString. Before editing a file, re-read the target lines — never rely on memory. If you get "Could not find the exact text", re-read the file, compare your oldString against what's on disk, and retry. After 3 failures, read the whole file and use write_file instead. When editing large files (>300 lines), prefer write_file over chained edit calls.
 
 
 ## Forbidden

@@ -144,7 +144,9 @@ export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
     const resultText =
       typeof ev.data === "string" ? ev.data
         : (ev.data?.result?.text ?? ev.data?.text ?? ev.data?.content ?? "");
-    if (resultText && !ap.lastAssistantText) ap.lastAssistantText = String(resultText);
+    // Always accept the latest response text — multi-turn subagents may have
+    // earlier message_end events that set lastAssistantText with stale content.
+    if (resultText) ap.lastAssistantText = String(resultText);
   }
 
   if (!ev.success && ap.status === "running" && ap.resolveDispatch) {
@@ -293,6 +295,11 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
     || ap.currentMessageText.trim()
     || ap.collectedText.trim()
     || "(no output)";
+
+  if (output === "(no output)") {
+    ctx.logger.logErrorBox(ap, "EMPTY RESPONSE",
+      `lastAssistant:${ap.lastAssistantText ? "yes" : "no"} curMsg:${ap.currentMessageText.length}c collected:${ap.collectedText.length}c`);
+  }
 
   ctx.logger.logDoneBox(ap, Math.round(ap.elapsed / 1000), ap.toolCount);
   ap.status = "done";
