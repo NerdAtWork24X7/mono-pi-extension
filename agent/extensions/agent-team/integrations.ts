@@ -16,16 +16,36 @@ function capOutput(out: string): string {
 /** Format batch results as markdown sections joined by "---". `includeAgent`
  *  adds the agent name to the section header (dispatch_agents spans multiple
  *  agents; dispatch_agent's multi-task mode always reports one). Sets
- *  `anyFail` when any result exited non-zero. Shared by both dispatch tools. */
+ *  `anyFail` when any result exited non-zero. Shared by both dispatch tools.
+ *
+ *  Individual outputs are capped at MAX_RESPONSE_LENGTH, but when many
+ *  subagents run in parallel the combined text can still be N× that limit.
+ *  An overall cap (with a clear truncation marker) prevents the downstream
+ *  orchestrator from receiving a silently-truncated result. */
 function formatBatchParts(results: BatchTaskResult[], includeAgent: boolean): { text: string; anyFail: boolean } {
   let anyFail = false;
-  const parts = results.map(res => {
+
+  // Build parts one at a time, tracking total size so we can stop before
+  // the combined output exceeds the cap. Always include at least the first
+  // result; subsequent results are added only if there is headroom.
+  let combined = "";
+  let included = 0;
+  for (const res of results) {
     if (res.code !== 0) anyFail = true;
     const status = res.code === 0 ? "done" : "error";
     const header = includeAgent ? `### ${res.agent}\n${res.task}` : `### ${res.task}`;
-    return `${header}\n→ ${status} (${Math.round(res.elapsed / 1000)}s)\n\n${capOutput(res.output)}`;
-  });
-  return { text: parts.join("\n\n---\n\n"), anyFail };
+    const part = `${header}\n→ ${status} (${Math.round(res.elapsed / 1000)}s)\n\n${capOutput(res.output)}`;
+    const separator = included > 0 ? "\n\n---\n\n" : "";
+    if (combined.length + separator.length + part.length > MAX_RESPONSE_LENGTH && included > 0) {
+      const remaining = results.length - included;
+      combined += `\n\n---\n\n… [${remaining} more result(s) truncated — combined output exceeded ${MAX_RESPONSE_LENGTH} chars]`;
+      break;
+    }
+    combined += separator + part;
+    included++;
+  }
+
+  return { text: combined, anyFail };
 }
 
 /** Get agent display info: [name][model] tag */

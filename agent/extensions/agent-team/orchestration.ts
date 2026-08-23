@@ -16,7 +16,7 @@ const SPAWN_READY_TIMEOUT_MS = 15_000;
  *  thrashing when a subagent emits many rapid text_delta events. */
 const STREAM_INVALIDATE_THROTTLE_MS = 100;
 
-export const MAX_RESPONSE_LENGTH = 60000; // Subagent tool-result cap. Keep the marker string in dispatch_agent in sync.
+export const MAX_RESPONSE_LENGTH = 600000; // Subagent tool-result cap. Keep the marker string in dispatch_agent in sync.
 export const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
 /** Auto-compactions tolerated within one dispatch before aborting as
  *  TASK_TOO_LARGE. Compactions are allowed to complete — the subagent keeps
@@ -189,11 +189,17 @@ export function handleMessageUpdate(ctx: AgentTeamContext, ap: AgentProc, ev: an
   const chunk = delta.delta || "";
   ap.collectedText += chunk;
   ap.currentMessageText += chunk;
-  // Cap collectedText to prevent unbounded memory growth during long streams.
-  // The lastAssistantText (set on message_end) is the authoritative output;
-  // collectedText is only a fallback for process-close edge cases.
+  // Cap collectedText and currentMessageText to prevent unbounded memory
+  // growth during long streams. lastAssistantText (set on message_end) is
+  // the authoritative output; collectedText is only a fallback for
+  // process-close edge cases. currentMessageText feeds lastAssistantText
+  // so it must be capped too, otherwise a single subagent can produce an
+  // enormous output that overflows the combined batch result downstream.
   if (ap.collectedText.length > MAX_COLLECTED_TEXT) {
     ap.collectedText = ap.collectedText.slice(-MAX_COLLECTED_TEXT);
+  }
+  if (ap.currentMessageText.length > MAX_COLLECTED_TEXT) {
+    ap.currentMessageText = ap.currentMessageText.slice(-MAX_COLLECTED_TEXT);
   }
   ctx.logger.logStreamingText(ap, chunk);
   const lastNl = chunk.lastIndexOf("\n");
