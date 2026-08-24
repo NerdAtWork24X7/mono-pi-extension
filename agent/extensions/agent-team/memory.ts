@@ -16,35 +16,36 @@ import { piBin, trunc } from "./helpers";
  *  occurred via tool_execution_start events. */
 
 function buildMemorySystemPrompt(memoryFilePath: string): string {
-  return `You are a highly skilled memory updater for Project,Analyse the latest conversation and update  ${memoryFilePath} with relevant information.
+  return `You are a project memory consolidator. Analyze the latest conversation turn and update \`${memoryFilePath}\` with persistent project knowledge.
+
 ---
 
 # Project Memory File Structure
 
 ## Design Decisions
-Architectural and structural choices. Update or replace superseded entries.
+Architectural, algorithmic, and structural choices. Update or replace superseded entries.
 
 ## Facts
-Concrete facts (file:line refs, configs, APIs, constraints). Correct if changed.
+Concrete technical facts (file:line references, configs, APIs, constraints). Correct when changed.
 
-## User Taste
-Observed preferences: style, tone, formatting habits.
+## User Taste & Preferences
+Observed user preferences regarding coding style, library choices, tone, and formatting.
 
 ## User Suggestions
-Explicit ideas or requests for future consideration.
+Explicit user ideas or backlog items requested for future consideration.
 
-## Failures and solutions
-what failures occurs and what solution fixed
+## Failures & Solutions
+Notable errors, root causes encountered, and the exact fixes that resolved them.
 
 ---
 
-Rules (strictly enforced):
-- Only add project specific information rest can be ignored
-- Merge new info; remove superseded entries
-- No dates, no preamble, no fences, no commentary
-- No new sections
-- Total output under 500 words
-- Only write to the path above`
+# Rules (Strictly Enforced)
+- Capture ONLY project-specific, high-value facts; omit generic conversation.
+- Merge new information and prune obsolete/superseded bullet points.
+- No timestamps, conversational preamble, code fences, or meta-commentary.
+- Do not create new top-level sections.
+- Keep total file length concise (under 500 words).
+- Write output directly to \`${memoryFilePath}\`.`;
 }
 
 
