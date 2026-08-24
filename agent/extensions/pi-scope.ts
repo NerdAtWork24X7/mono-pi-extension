@@ -693,7 +693,7 @@ export default function (pi: ExtensionAPI) {
       // Loud, single-line warning. Server will 401 every POST otherwise.
       try {
         ctx.ui?.notify?.(
-          `� Pi Scope: no auth token — set OBS_AUTH_TOKEN env or --obs-token to match the server.`,,
+          `� Pi Scope: no auth token — set OBS_AUTH_TOKEN env or --obs-token to match the server.`,
           "warning",
         );
       } catch { /* hasUI may be false */ }
@@ -706,10 +706,10 @@ export default function (pi: ExtensionAPI) {
       const connected = await probeServer(serverUrl);
       try {
         if (connected) {
-          ctx.ui?.notify?.(`� Pi Scope: connected to ${serverUrl}`, "info");;
+          ctx.ui?.notify?.(`� Pi Scope: connected to ${serverUrl}`, "info");
         } else {
           ctx.ui?.notify?.(
-            `� Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`,,
+            `� Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`,
             "warning",
           );
         }
@@ -732,28 +732,14 @@ export default function (pi: ExtensionAPI) {
     // 6. Log boot
     logObs("obs boot", { serverUrl, pool, tags, agentName: name });
 
-    // 7. Emit session_start event
-    const startPayload: SessionStartPayload = {
-      reason: event.reason,
-      pi_version: (pi as any).version || undefined,
-      previous_session_file: event.previousSessionFile,
-    };
-    queue.push(createEventEnvelope("session_start", startPayload, sessionInfo));
+
   });
 
   // ━━ before_agent_start (agent_start) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // Emits only the turn's prompt + images_count (+ session ids). llm_request is
   // the sole system-prompt record, so agent_start carries no system-prompt data.
-  pi.on("before_agent_start", async (event, _ctx) => {
-    if (!queue || !sessionInfo) return;
-    const payload: AgentStartPayload = {
-      prompt: event.prompt ?? "",
-      images_count: event.images ? event.images.length : 0,
-      session_id: sessionInfo.sessionId,
-      session_file: sessionInfo.sessionFile,
-      turn_index: activeTurnIndex ?? undefined,
-    };
-    queue.push(createEventEnvelope("agent_start", payload, sessionInfo));
+  pi.on("before_agent_start", async (_event, _ctx) => {
+    // Suppressed — not logged to scope server.
   });
 
 
@@ -1166,14 +1152,9 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ━━ session_shutdown ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  pi.on("session_shutdown", async (event, _ctx) => {
-    if (!queue || !sessionInfo) return;
-
-    const shutdownPayload: SessionShutdownPayload = {
-      reason: event.reason,
-    };
-    queue.push(createEventEnvelope("session_shutdown", shutdownPayload, sessionInfo));
-
+  pi.on("session_shutdown", async (_event, _ctx) => {
+    // Suppressed — not logged to scope server.
+    if (!queue) return;
     await queue.stop();
   });
 }

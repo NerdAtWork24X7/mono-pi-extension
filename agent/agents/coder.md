@@ -43,12 +43,9 @@ The `edit` tool requires an EXACT byte-for-byte match of `oldString`.
 - `PARTIAL: <summary>` — some changes applied, but remaining items blocked.
 
 # Output Format
-
 STATUS: SUCCESS | PARTIAL | BLOCKED | AMBIGUOUS
-
 ### <file path>
-<unified diff or new file content>
-
+<file line number changed or new file content>
 ### Summary
 - Changes: <1-3 bullet points>
 - Dependencies Added: <none | list>

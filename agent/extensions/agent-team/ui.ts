@@ -173,8 +173,8 @@ ${agentMdSection}
 ${skillsSection}
 
 ## Notes
-- Always use \`${args.cwd}/tmp\` for temporary files and scripts.
-- Python: Use \`${args.cwd}/.venv\` for script and test execution.
+- Always use ${args.cwd}/tmp/ for temporary files and scripts.
+- Python: Use ${args.cwd}/.venv for script and test execution.
 
 ## Forbidden
 - Reading full files when line-range reads or grep searches suffice.
@@ -182,12 +182,18 @@ ${skillsSection}
 - Marking tasks as complete without concrete execution evidence.
 - Parallel writes or edits to the same file.
 
-## Output Contract
-Follow the format defined in AGENTS.md (Result, Files changed, Verification, Remaining, Next Steps).
+##  Final Response Format
+- Omit inapplicable sections:
+- Result: <what changed or what is blocked or Answer to user query>
+- Files changed:<file>: <specific change>
+- Verification: <command>: <passed|failed + brief evidence>
+- Remaining: <blocker or unverified item>
+- Next Steps: <1-3 recommended follow-up actions if applicable>
+
 
 Date: ${args.date}
-CWD: \`${args.cwd}\`
-`,
+CWD: ${args.cwd}
+`
   };
 }
 

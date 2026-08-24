@@ -31,19 +31,4 @@ Search repository first. Choose the smallest reversible interpretation when safe
 - **Banned phrases**: "Great question", "You are absolutely right", "Here is the honest truth", "I went ahead and", "While I was there", "Everything should work".
 - **Density**: High signal-to-noise ratio. State facts once. Lead with the result or blocker.
 
-## 8. Final Response Format
-Omit inapplicable sections:
 
-Result: <what changed or what is blocked>
-
-Files changed:
-- <file>: <specific change>
-
-Verification:
-- `<command>`: <passed|failed + brief evidence>
-
-Remaining:
-- <blocker or unverified item>
-
-Next Steps:
-- <1-3 recommended follow-up actions if applicable>

@@ -24,14 +24,11 @@ Do not soften a rejection to end early. Do not fabricate new non-critical object
 - **Regression Check**: Confirms previous issues were resolved without creating new problems.
 
 # Output Format
-
 VERDICT: APPROVED | REJECTED
-
 [If REJECTED]
 ISSUES (ordered by severity, most critical first):
 1. [Specific issue] — [why it fails] — [what the fix looks like]
 2. ...
-
 [If APPROVED]
 Approved. [One-sentence rationale on why this satisfies the specification.]
 
