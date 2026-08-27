@@ -62,7 +62,7 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
     parameters: Type.Object({
       agent: Type.String({ description: "Agent name (case-insensitive)" }),
       task: Type.String({ description: "Task description for the agent. Use this OR `tasks`." }),
-      tasks: Type.Optional(Type.Array(Type.String(), { description: "Multiple task descriptions for the SAME agent — spawns one isolated subagent per task (parallel for read-only agents, serialized for writable ones). When dispatching multiple instances of the same agent (e.g. several searchers), partition the work (URLs, queries, files) so each task is distinct to avoid duplicate work. For writable agents prefer a single consolidated `task` over many small `tasks` — they run serialized with a cold start each. Use instead of `task`." })),
+      tasks: Type.Optional(Type.Array(Type.String(), { description: "Multiple task descriptions for the SAME agent — spawns one isolated subagent per task (parallel for read-only agents, serialized for writable ones). When dispatching multiple instances of the same agent partition the work (URLs, queries, files) so each task is distinct to avoid duplicate work. For writable agents prefer a single consolidated `task` over many small `tasks` — they run serialized with a cold start each. Use instead of `task`." })),
     }),
 
     async execute(_id, params, signal, onUpdate, _ctx) {
@@ -217,12 +217,10 @@ export function registerDispatchAgentsTool(pi: ExtensionAPI, team: AgentTeamCont
     label: "Dispatch Agents (parallel, read-only)",
     description:
       "Dispatch multiple READ-ONLY subagents in parallel and return their combined results. " +
-      "Every agent in `tasks` must be read-only (its tool allowlist must NOT contain write/edit/doc_generator) — " +
-      "writable agents (coder, documenter, doc_generator, searcher, tester, image_analyzer, etc.) must be dispatched " +
-      "one-at-a-time via dispatch_agent and are never run in parallel. Batch independent read-only lookups " +
-      "(e.g. file_reader) here instead of calling dispatch_agent repeatedly. " +
-      "When dispatching multiple searchers/web lookups in parallel, split the URLs/queries into disjoint subsets " +
-      "so each subagent gets a distinct, non-overlapping assignment and no URL is fetched twice.",
+      "Every agent in `tasks` must be read-only (its tool allowlist must NOT include file-mutating tools). " +
+      "Writable agents must be dispatched one-at-a-time via dispatch_agent and are never run in parallel. " +
+      "Batch independent read-only lookups here instead of calling dispatch_agent repeatedly. " +
+      "Split overlapping work across agents so each subagent gets distinct, non-overlapping assignments and no resource is processed twice.",
     parameters: Type.Object({
       tasks: Type.Array(
         Type.Object({

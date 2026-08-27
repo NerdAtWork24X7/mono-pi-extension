@@ -135,12 +135,11 @@ export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
     ctx.invalidate();
     if (ap.readyResolve) { ap.readyResolve(ev.success === true); ap.readyResolve = null; }
   }
-  // Capture a successful response's result text as a fallback completion
-  // payload. Some hosts return the final answer only in the `response`
-  // event (not via message streaming). Resolution still happens on
-  // agent_end (fix 1) or process close (fix 2); this only enriches the
-  // captured text those paths return.
-  if (ev.success && ap.status === "running") {
+  // Capture successful response text even when the host emits `response`
+  // after `agent_end` has transitioned the proc to `done`. Bash/tool-heavy
+  // turns are especially likely to expose this ordering. Keeping the latest
+  // payload also gives the close fallback a complete result.
+  if (ev.success && (ap.status === "running" || ap.status === "done")) {
     const resultText =
       typeof ev.data === "string" ? ev.data
         : (ev.data?.result?.text ?? ev.data?.text ?? ev.data?.content ?? "");
@@ -311,9 +310,12 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
   ap.status = "done";
   ap.lastWork = extractLastLine(output);
 
+  // Keep the captured output until the dispatch promise has resolved and the
+  // process close handler has had a chance to drain trailing stdout. Clearing
+  // these fields here loses the final answer when bash causes response/close
+  // events to arrive immediately after agent_end.
   ap.collectedText = "";
   ap.currentMessageText = "";
-  ap.lastAssistantText = "";
 
   ctx.invalidate();
 
@@ -325,6 +327,8 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
   }
 
   ctx.resolveIfPending(ap, output, 0);
+  // `lastAssistantText` is deliberately cleared by the next dispatch reset,
+  // not before the child has finished flushing its final RPC events.
 }
 
 export function autoRespondUI(ap: AgentProc, ev: any) {

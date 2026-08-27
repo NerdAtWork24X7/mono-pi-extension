@@ -72,7 +72,7 @@ export class AgentTeam implements AgentTeamContext {
   enabled = true;
   parallelDispatch = true;
   maxParallel = 5;
-  destructiveTools: string[] = ["write", "edit", "doc_generator"];
+  destructiveTools: string[] = ["write", "edit"];
   dispatchLock: RwLock = new RwLock();
   batchClones = new Set<AgentProc>();
   /** Set of agent names that are temporarily disabled by the user */
@@ -110,7 +110,7 @@ export class AgentTeam implements AgentTeamContext {
     this.enabled = this.saved.enabled ?? true;
     this.parallelDispatch = this.saved.parallelDispatch ?? true;
     this.maxParallel = this.saved.maxParallel ?? 5;
-    this.destructiveTools = this.saved.destructiveTools ?? ["write", "edit", "doc_generator"];
+    this.destructiveTools = this.saved.destructiveTools ?? ["write", "edit"];
     this.disabledAgents = new Set(this.saved.disabledAgents ?? []);
     this.orchestratorSkills = new Set(this.saved.orchestratorSkills ?? []);
     this.subagentSkills = new Set(this.saved.subagentSkills ?? []);
