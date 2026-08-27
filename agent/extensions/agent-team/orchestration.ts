@@ -44,7 +44,10 @@ export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) 
   let ev: any;
   try { ev = JSON.parse(line); } catch { return; }
 
-  if (ap.status === "running") {
+  // Completion events can arrive after `agent_end` has marked the proc done.
+  // Keep refreshing activity while the child is still owned by this dispatch;
+  // otherwise a final response/close gap can look like a stuck worker.
+  if (ap.status === "running" || ap.status === "done") {
     ap.lastActivity = Date.now();
     ap.resetPongTimeout?.();
   }
@@ -287,7 +290,14 @@ export function handleToolStart(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
 }
 
 export function handleToolEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
-  ctx.logger.logToolEnd(ap, ev.toolName, !ev.isError, ev.durationMs);
+  const isError = ev.isError === true || typeof ev.error === "string";
+  ctx.logger.logToolEnd(ap, ev.toolName, !isError, ev.durationMs);
+  if (isError && (ev.error || ev.result)) {
+    const detail = typeof ev.error === "string"
+      ? ev.error
+      : typeof ev.result === "string" ? ev.result : JSON.stringify(ev.result);
+    ctx.logger.logErrorBox(ap, "TOOL ERROR", `${ev.toolName}: ${detail}`);
+  }
   // The ✓/✗ + duration update rewrites the tool-start line in place; make
   // sure the TUI repaints it instead of waiting for the next event.
   ctx.invalidate();
@@ -300,7 +310,7 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
   clearInterval(ap.timer);
   ctx.logger.flushStreamBuf(ap);
 
-  const output = ap.lastAssistantText
+  const output = ap.lastAssistantText.trim()
     || ap.currentMessageText.trim()
     || ap.collectedText.trim()
     || "(no output)";
@@ -859,7 +869,7 @@ export class ProcessManager {
         // don't log a scary PROCESS EXIT box and don't overwrite the
         // TASK_TOO_LARGE signal that was already resolved.
         if (!ap.autoCompacted) {
-          const captured = ap.lastAssistantText || ap.currentMessageText.trim() || ap.collectedText.trim();
+          const captured = ap.lastAssistantText.trim() || ap.currentMessageText.trim() || ap.collectedText.trim();
           if (code !== 0 && !captured) {
             ctx.logger.logErrorBox(ap, "PROCESS EXIT", exitDetail);
           }

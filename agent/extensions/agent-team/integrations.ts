@@ -58,7 +58,7 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
   pi.registerTool({
     name: "dispatch_agent",
     label: "Dispatch Agent",
-    description: "Dispatch a task to a specialist agent. A fresh process is spawned per task — no context carries over between dispatches. Include all necessary context in the task description: exact file paths with line ranges and the relevant snippets you already have — every dispatch starts cold and must otherwise re-explore. Batch related edits to the same area into ONE dispatch; writable agents serialize, so many small dispatches to the same writable agent queue up and multiply cold starts. For creating/rewriting large files, do NOT paste full file content into the task — give the path + a compact spec and instruct the agent to build the file incrementally within one dispatch (write the skeleton, then append sections via edit calls).",
+    description: "Delegate one independent task to a specialist in a fresh isolated process. The worker sees no orchestrator context, other workers, or unsaved reasoning, so include objective, scope, relevant paths/symbols and snippets, constraints, acceptance criteria, and an explicit output format with status, evidence, errors, and uncertainty. Use one consolidated dispatch for related writable edits; never overlap writes. For large generated files, provide a path and specification rather than pasting the entire file.",
     parameters: Type.Object({
       agent: Type.String({ description: "Agent name (case-insensitive)" }),
       task: Type.String({ description: "Task description for the agent. Use this OR `tasks`." }),
@@ -216,11 +216,10 @@ export function registerDispatchAgentsTool(pi: ExtensionAPI, team: AgentTeamCont
     name: "dispatch_agents",
     label: "Dispatch Agents (parallel, read-only)",
     description:
-      "Dispatch multiple READ-ONLY subagents in parallel and return their combined results. " +
-      "Every agent in `tasks` must be read-only (its tool allowlist must NOT include file-mutating tools). " +
-      "Writable agents must be dispatched one-at-a-time via dispatch_agent and are never run in parallel. " +
-      "Batch independent read-only lookups here instead of calling dispatch_agent repeatedly. " +
-      "Split overlapping work across agents so each subagent gets distinct, non-overlapping assignments and no resource is processed twice.",
+      "Run independent READ-ONLY tasks concurrently and return every result labeled by agent and task. " +
+      "Each task must have a distinct non-overlapping scope and include objective, context, acceptance criteria, and output/evidence requirements. " +
+      "Only read-only agents are allowed; writable agents must use dispatch_agent and must never overlap file mutations. " +
+      "Treat non-zero exits, timeouts, empty/malformed output, and BLOCKED results as failures surfaced to the orchestrator.",
     parameters: Type.Object({
       tasks: Type.Array(
         Type.Object({
