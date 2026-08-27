@@ -301,6 +301,13 @@ export function initWidget(ctx: AgentTeamContext) {
 
 const LOG_PANEL_LINES = 6; // max log lines shown per agent panel
 
+/** Present the logical order of a bounded log without changing the hot-path
+ *  append representation used by SessionLogger. */
+function orderedLogLines(ap: AgentProc): string[] {
+  if (!ap.logLines?.length || !ap.logHead) return ap.logLines || [];
+  return [...ap.logLines.slice(ap.logHead), ...ap.logLines.slice(0, ap.logHead)];
+}
+
 /** Build the per-agent log grid rendered beneath the status cards. Each column
  *  is one agent (team member + active parallel clone + memory), its lines pulled
  *  from that agent's in-memory ring buffer. The grid scales: more swapped agents
@@ -310,12 +317,12 @@ export function renderLogGrid(ctx: AgentTeamContext, innerW: number, theme: any)
   for (const ap of ctx.procs.values()) {
     if (!isWorking(ap)) continue;
     if (ctx.disabledAgents.has(ap.def.name.toLowerCase())) continue;
-    slots.push({ label: displayName(ap.def.name), lines: ap.logLines || [], accent: true });
+    slots.push({ label: displayName(ap.def.name), lines: orderedLogLines(ap), accent: true });
   }
   for (const ap of ctx.batchClones) {
     if (!isWorking(ap)) continue;
     const label = displayName(ap.def.name) + (ap.runId ? " *" : "");
-    slots.push({ label, lines: ap.logLines || [], accent: false });
+    slots.push({ label, lines: orderedLogLines(ap), accent: false });
   }
   if (ctx.memoryManager && ctx.memoryManager.memoryLogAgent
     && ["recording", "summarizing"].includes(ctx.memoryManager.snapshot.status)) {

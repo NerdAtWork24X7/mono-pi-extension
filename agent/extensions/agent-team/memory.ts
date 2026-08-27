@@ -269,7 +269,8 @@ export class MemoryManager {
       await new Promise((r) => setTimeout(r, 50));
     }
     if (this.currentSub) {
-      try { this.currentSub.proc.kill("SIGKILL"); } catch { }
+      try { this.currentSub.proc.stdin?.end(); } catch { }
+      try { this.currentSub.kill("SIGKILL"); } catch { }
       this.currentSub = null;
     }
   }
@@ -430,6 +431,7 @@ export class MemoryManager {
         if (settleTimer) { clearTimeout(settleTimer); settleTimer = undefined; }
         if (hardTimer) { clearTimeout(hardTimer); hardTimer = undefined; }
         if (abortCleanup) { abortCleanup(); abortCleanup = undefined; }
+        try { sub.proc.stdin?.end(); } catch { }
         try { sub.kill(); } catch { }
         fn();
       };

@@ -53,6 +53,7 @@ export interface AgentProc {
   lastPromptHash?: string;
   streamLineBuf: string;   // partial line buffer for streaming text box-wrapping
   logLines: string[];        // per-agent in-memory log ring buffer (rendered in the TUI widget, scaled per agent)
+  logHead: number;            // index of the oldest logical ring-buffer entry
   streamLogIdx: number;      // logLines index where the current assistant message's streamed text began (retry rollback mark)
   runId?: string;         // unique per concurrent run; suffixed into session/prompt files to avoid collisions
 }
@@ -243,6 +244,7 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
     sessionFile: "", systemPromptFile: "", lastPromptHash: undefined,
     streamLineBuf: "",
     logLines: [],
+    logHead: 0,
     streamLogIdx: 0,
   };
 }
@@ -299,12 +301,8 @@ export interface BatchDispatchResult {
 /** Classify an agent as writable (can mutate files → serialized) vs read-only
  *  (parallel) by inspecting its tool allowlist against `destructiveTools`. */
 export function isWritable(def: AgentDef, destructiveTools: string[]): boolean {
-  const set = new Set(destructiveTools.map(s => s.trim().toLowerCase()).filter(Boolean));
-  return def.tools
-    .split(",")
-    .map(s => s.trim().toLowerCase())
-    .filter(Boolean)
-    .some(t => set.has(t));
+  const destructive = new Set(destructiveTools.map(s => s.trim().toLowerCase()).filter(Boolean));
+  return def.tools.split(",").some(tool => destructive.has(tool.trim().toLowerCase()));
 }
 
 /** Async reader/writer lock.
@@ -443,9 +441,16 @@ export class SessionLogger {
   /** Append a line to the owning agent's ring buffer. The widget boxes these
    *  at the actual widget width, so lines are stored RAW (no border) here. */
   private push(ap: AgentProc, s: string) {
+    const value = sanitizeLine(s);
     const buf = ap.logLines;
-    buf.push(sanitizeLine(s));
-    if (buf.length > LOG_RING_MAX) buf.shift();
+    if (buf.length < LOG_RING_MAX) {
+      buf.push(value);
+      return;
+    }
+    // Keep the public array shape for the renderer, but overwrite the oldest
+    // slot instead of shifting/splicing on every streamed line.
+    buf[ap.logHead] = value;
+    ap.logHead = (ap.logHead + 1) % LOG_RING_MAX;
   }
 
   // ── Low-level write helpers ──
@@ -559,15 +564,16 @@ export interface RpcSubprocessOpts {
   onError: (err: Error) => void;
   /** Called when the child emits 'close'. Fires at most once. */
   onClose: (code: number | null, signal: NodeJS.Signals | null) => void;
+  /** Called for non-empty stderr lines. Routed only to this subprocess owner. */
+  onStderr?: (line: string) => void;
 }
 
 export interface RpcSubprocess {
   proc: ChildProcess;
-  /**
-   * Send a signal (default SIGTERM) and schedule a SIGKILL 2s later as a
-   * backstop. Idempotent — only the first call has effect.
-   */
+  /** Send a signal and terminate the owned process. Idempotent. */
   kill: (signal?: NodeJS.Signals) => void;
+  /** True once kill() has been requested. */
+  killed: boolean;
 }
 
 export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
@@ -580,15 +586,20 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
 
   let settled = false;
   let killed = false;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const fireError = (err: Error) => {
-    if (settled) return;
+  const settle = () => {
+    if (settled) return false;
     settled = true;
+    if (killTimer) { clearTimeout(killTimer); killTimer = undefined; }
+    return true;
+  };
+  const fireError = (err: Error) => {
+    if (!settle()) return;
     opts.onError(err);
   };
   const fireClose = (code: number | null, signal: NodeJS.Signals | null) => {
-    if (settled) return;
-    settled = true;
+    if (!settle()) return;
     opts.onClose(code, signal);
   };
 
@@ -599,6 +610,7 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
   // truncated line and reset — the consumer can then decide what to do.
   const MAX_LINE_BUF = 1 << 20; // 1 MiB
   let stdoutBuf = "";
+  let stdoutEnded = false;
   // Emit one complete (or, at EOF, final partial) line. The completion
   // event (agent_end / final response) is often the LAST thing on stdout
   // and may not be newline-terminated; flushing only on "\n" silently
@@ -627,13 +639,30 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
   });
   // Drain trailing partial line when the stream ends (no trailing \n).
   proc.stdout!.on("end", () => {
+    stdoutEnded = true;
     if (stdoutBuf.length > 0) emitLine(stdoutBuf);
     stdoutBuf = "";
   });
 
   proc.stderr!.setEncoding("utf-8");
+  let stderrBuf = "";
+  const emitStderr = (line: string) => {
+    if (line.endsWith("\r")) line = line.slice(0, -1);
+    if (!line.trim()) return;
+    opts.onStderr?.(line);
+    if (!opts.onStderr && opts.owner) opts.logger.logBoxed(line, opts.owner);
+  };
   proc.stderr!.on("data", (d: string) => {
-    for (const line of d.split("\n")) if (line.trim() && opts.owner) opts.logger.logBoxed(line, opts.owner);
+    stderrBuf += d;
+    let nl: number;
+    while ((nl = stderrBuf.indexOf("\n")) >= 0) {
+      emitStderr(stderrBuf.slice(0, nl));
+      stderrBuf = stderrBuf.slice(nl + 1);
+    }
+  });
+  proc.stderr!.on("end", () => {
+    if (stderrBuf) emitStderr(stderrBuf);
+    stderrBuf = "";
   });
 
   proc.on("error", (err) => {
@@ -641,21 +670,30 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
   });
 
   proc.on("close", (code, signal) => {
-    // Backstop: deliver any final buffered line (e.g. agent_end) even if
-    // 'end' didn't fire before 'close'.
-    if (stdoutBuf.length > 0) emitLine(stdoutBuf);
+    // Backstop: deliver any final buffered line only if stdout did not already
+    // flush it on 'end'. This keeps completion delivery exactly-once.
+    if (!stdoutEnded && stdoutBuf.length > 0) emitLine(stdoutBuf);
     stdoutBuf = "";
+    if (stderrBuf.length > 0) emitStderr(stderrBuf);
+    stderrBuf = "";
     fireClose(code, signal);
   });
 
   return {
     proc,
+    get killed() { return killed; },
     kill: (signal: NodeJS.Signals = "SIGTERM") => {
       if (killed) return;
       killed = true;
+      try { proc.stdin?.end(); } catch { }
+      try { proc.stdout?.resume(); } catch { }
+      try { proc.stderr?.resume(); } catch { }
       try { proc.kill(signal); } catch { }
-      setTimeout(() => {
-        try { proc.kill("SIGKILL"); } catch { }
+      killTimer = setTimeout(() => {
+        killTimer = undefined;
+        if (!settled) {
+          try { proc.kill("SIGKILL"); } catch { }
+        }
       }, 2000);
     },
   };

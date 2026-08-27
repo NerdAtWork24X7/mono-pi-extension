@@ -29,6 +29,8 @@ const simpleLogEvents: Record<string, (ev: any) => string> = {
   auto_retry_end: (ev) => `AUTO-RETRY ${ev.success ? "succeeded" : "failed"} (attempt ${ev.attempt})`,
 };
 
+const UI_FIRE_AND_FORGET = new Set(["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"]);
+
 /** Build the signal returned to the orchestrator when a subagent's context
  *  genuinely cannot be managed — repeated auto-compactions or a compaction
  *  that was aborted. The `TASK_TOO_LARGE:` prefix must stay first: the
@@ -175,7 +177,9 @@ export function handleMessageStart(ctx: AgentTeamContext, ap: AgentProc, ev: any
  *  streamed log lines and buffers so the retried stream isn't appended on
  *  top of its own partial copy (which rendered the same text N times). */
 export function handleAutoRetryStart(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
-  ap.logLines.length = Math.min(ap.streamLogIdx, ap.logLines.length);
+  // Retry rollback is only meaningful before the ring wraps. Once wrapped,
+  // the logical index no longer maps directly to the physical array.
+  if (ap.logHead === 0) ap.logLines.length = Math.min(ap.streamLogIdx, ap.logLines.length);
   ap.streamLineBuf = "";
   ap.currentMessageText = "";
   ctx.logger.log(`AUTO-RETRY attempt ${ev.attempt}/${ev.maxAttempts} (${ev.delayMs}ms)`, ap);
@@ -326,6 +330,9 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
     );
   }
 
+  // Resolve from agent_end, but leave the captured final text intact until
+  // the close fallback has had a chance to run. This is safe because
+  // resolveIfPending clears the callback exactly once.
   ctx.resolveIfPending(ap, output, 0);
   // `lastAssistantText` is deliberately cleared by the next dispatch reset,
   // not before the child has finished flushing its final RPC events.
@@ -338,7 +345,7 @@ export function autoRespondUI(ap: AgentProc, ev: any) {
   const { id, method } = ev;
 
   // Fire-and-forget methods
-  if (["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"].includes(method)) return;
+  if (UI_FIRE_AND_FORGET.has(method)) return;
 
   // Dialog methods: auto-respond
   let resp: any;
@@ -402,7 +409,9 @@ export async function runAgent(
   }
 
   if (!ap.ready || !ap.proc) {
-    return { output: `${displayName(ap.def.name)} not ready.`, code: 1, elapsed: 0 };
+    const output = `${displayName(ap.def.name)} failed readiness: process exited or did not answer the readiness probe.`;
+    ctx.logger.logErrorBox(ap, "NOT READY", output);
+    return { output, code: 1, elapsed: 0 };
   }
 
   // Start dispatch
@@ -467,7 +476,10 @@ export async function runAgent(
 
   const result = await new Promise<{ output: string; code: number; elapsed: number }>((resolve) => {
     ap.resolveDispatch = (output, code) => {
-      // Clear timeout immediately to prevent race with normal completion
+      // Clear timeout immediately to prevent race with normal completion.
+      // Keep the resolver installed until the subprocess close handler has
+      // drained trailing stdout; late response/agent_end events can otherwise
+      // be lost between resolution and process teardown.
       if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
       resolve({ output, code, elapsed: ap.elapsed });
     };
@@ -528,6 +540,7 @@ async function runClonePool(
   signal?: AbortSignal,
 ): Promise<BatchTaskResult[]> {
   const results: BatchTaskResult[] = new Array(specs.length);
+  const maxWorkers = Math.max(1, Math.min(max, specs.length));
   const clones: AgentProc[] = [];
   const onAbort = () => { for (const clone of clones) killActiveClone(ctx, clone); };
   signal?.addEventListener("abort", onAbort);
@@ -546,7 +559,8 @@ async function runClonePool(
         const r = await runAgent(ctx, clone, spec.task);
         results[idx] = { agent: spec.agent, task: spec.task, output: r.output, code: r.code, elapsed: r.elapsed, error: null };
       } catch (e: any) {
-        const msg = String(e?.message || e);
+        const msg = `${spec.agent} failed: ${String(e?.message || e)}`;
+        ctx.logger.logErrorBox(clone, "DISPATCH ERROR", msg);
         results[idx] = { agent: spec.agent, task: spec.task, output: msg, code: 1, elapsed: 0, error: msg };
       } finally {
         ctx.batchClones.delete(clone);
@@ -556,7 +570,7 @@ async function runClonePool(
       let i: number;
       while ((i = cursor++) < specs.length) await runOne(i);
     };
-    await Promise.all(Array.from({ length: Math.max(1, Math.min(max, specs.length)) }, worker));
+    await Promise.all(Array.from({ length: maxWorkers }, worker));
     return results;
   } finally {
     signal?.removeEventListener("abort", onAbort);
@@ -702,17 +716,22 @@ export class ProcessManager {
   }
 
   killProc(ap: AgentProc, immediate = false) {
-    this.resolveIfPending(ap, ap.status === "running" || ap.status === "starting" ? "Process killed" : "", 1);
-    if (ap.procRef) {
-      if (immediate) {
-        try { ap.procRef.proc.kill("SIGKILL"); } catch { }
-      } else {
-        // sub.kill() sends SIGTERM and schedules a 2s SIGKILL backstop
-        ap.procRef.kill("SIGTERM");
-      }
-      ap.procRef = null;
-    }
+    const wasActive = ap.status === "running" || ap.status === "starting";
+    // Detach ownership before closing streams. Late events from this child are
+    // rejected by the stale-process guard and cannot affect a replacement.
+    const procRef = ap.procRef;
+    ap.procRef = null;
     ap.proc = null;
+    this.resolveIfPending(ap, wasActive ? "Process killed" : "", 1);
+    if (procRef) {
+      // Each child owns its own stdin. End only this pipe; never touch the
+      // orchestrator stdin or any other subagent's streams.
+      try { procRef.proc.stdin?.end(); } catch { }
+      try {
+        if (immediate) procRef.proc.kill("SIGKILL");
+        else procRef.kill("SIGTERM");
+      } catch { }
+    }
     this.cleanSystemPrompt(ap);
     ap.status = "dead";
     ap.ready = false;
@@ -804,31 +823,55 @@ export class ProcessManager {
       args,
       logger: ctx.logger,
       owner: ap,
+      onStderr: (line) => {
+        // Keep stderr owned by this exact subprocess. Never write it to the
+        // orchestrator's process streams or another agent's logger.
+        ctx.logger.logBoxed(line, ap);
+      },
       onLine: (line) => {
         if (ap.proc !== sub.proc) return; // stale process guard
         ctx.handleEvent(ap, line);
       },
       onError: (err) => {
         if (ap.proc !== sub.proc) return; // stale process guard
-        ctx.logger.logErrorBox(ap, "PROCESS ERROR", err.message);
+        const detail = `${displayName(ap.def.name)} subprocess error: ${err.message}`;
+        ctx.logger.logErrorBox(ap, "PROCESS ERROR", detail);
         ap.status = "error";
-        ap.lastWork = `Error: ${err.message}`;
-        this.resolveIfPending(ap, `Process error: ${err.message}`, 1);
+        ap.lastWork = detail;
+        // A spawn error can happen before the dispatch promise is installed;
+        // reject the readiness wait as well as the active task handoff.
         ap.proc = null;
         ap.procRef = null;
+        ap.readyResolve?.(false);
+        ap.readyResolve = null;
+        this.resolveIfPending(ap, detail, 1);
       },
-      onClose: (code) => {
+      onClose: (code, signal) => {
         if (ap.proc !== sub.proc) return; // stale process guard
+        const exitDetail = signal
+          ? `${displayName(ap.def.name)} subprocess terminated by ${signal}`
+          : `${displayName(ap.def.name)} subprocess exited with code ${code ?? "unknown"}`;
+        // Detach this child before cleanup so callbacks from its streams cannot
+        // be mistaken for events from a later process using the same AgentProc.
+        ap.proc = null;
+        ap.procRef = null;
         // If we intentionally killed the subagent because it auto-compacted,
         // don't log a scary PROCESS EXIT box and don't overwrite the
         // TASK_TOO_LARGE signal that was already resolved.
         if (!ap.autoCompacted) {
-          ctx.logger.logErrorBox(ap, `PROCESS EXIT code=${code}`, "");
           const captured = ap.lastAssistantText || ap.currentMessageText.trim() || ap.collectedText.trim();
-          this.resolveIfPending(ap, captured || `Process exited with code ${code}`, code === 0 ? 0 : 1);
+          if (code !== 0 && !captured) {
+            ctx.logger.logErrorBox(ap, "PROCESS EXIT", exitDetail);
+          }
+          if (code === 0 && !captured) {
+            ctx.logger.logErrorBox(ap, "EMPTY RESPONSE", exitDetail);
+          }
+          // A clean RPC child exit is a successful completion even when pi
+          // omitted agent_end. This is the important fallback for parallel
+          // clones: resolve only after stdout has been fully drained.
+          this.resolveIfPending(ap, captured || (code === 0 ? "(no output)" : exitDetail), code === 0 ? 0 : 1);
         }
-        ap.proc = null;
-        ap.procRef = null;
+        // stdin is already owned and closed by the RPC wrapper/kill path.
         ap.status = "dead";
         ap.ready = false;
         clearTimers(ap);
@@ -855,6 +898,10 @@ export class ProcessManager {
 
       ap.readyResolve = (success: boolean) => {
         if (ap.readyTimeout) { clearTimeout(ap.readyTimeout); ap.readyTimeout = undefined; }
+        if (!success) {
+          const detail = `${displayName(ap.def.name)} readiness probe failed`;
+          ctx.logger.logErrorBox(ap, "READY FAILED", detail);
+        }
         resolve(success);
       }
 
