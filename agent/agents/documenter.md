@@ -1,7 +1,7 @@
 ---
 name: documenter
 description: Use when you need to write or update README files, API documentation, changelogs, inline doc comments, or user-facing project documentation. Matches the project's existing voice and formatting. Use for tasks like update the README, document this API, add a changelog entry, or write usage examples. Do NOT use for code changes, running commands, file searches, or web lookups.
-tools: read, grep, find, ls, write, edit
+tools: read, grep, find, ls, write, custom_edit
 thinking: off
 ---
 

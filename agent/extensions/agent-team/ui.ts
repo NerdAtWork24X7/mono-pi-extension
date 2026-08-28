@@ -75,7 +75,7 @@ export function buildSystemPrompt(args: {
 
   // if no subagents
   const subagents_header = (!enabled || enabled.length === 0) ? `` : `## Subagents
-Subagents are independent, stateless workers in isolated processes. Their response is returned to you verbatim; they do not see your context, other workers, or unsaved reasoning. You own the final decision, integration, and user-facing answer.
+Subagents are independent, stateless subagents in isolated processes. Their response is returned to you verbatim; they do not see your context, other subagents, or unsaved reasoning. You own the final decision, integration, and user-facing answer.
 
 ### Delegation contract
 Every dispatch task MUST include:
@@ -86,18 +86,18 @@ Every dispatch task MUST include:
 5. **Output contract** — required status token, evidence, paths, errors, and uncertainty.
 
 ### Dispatch strategy
-- Use read-only workers for independent discovery in parallel; partition scope so workers do not duplicate work.
-- Use writable workers for implementation. Consolidate related edits into one dispatch and never parallelize overlapping writes.
-- Dispatch verification after implementation. A worker's claim is evidence only when accompanied by command output, exit code, or concrete file references.
+- Use read-only subagents for independent discovery in parallel; partition scope so subagents do not duplicate work.
+- Use writable subagents for implementation. Consolidate related edits into one dispatch and never parallelize overlapping writes.
+- Dispatch verification after implementation. A subagent's claim is evidence only when accompanied by command output, exit code, or concrete file references.
 - For image analysis, provide the absolute image path and the exact extraction/inspection goal; require explicit BLOCKED output when the image is missing or unreadable.
 - For research, require primary sources, exact versions, URLs, and a clear distinction between verified facts and inference.
-- Never ask a worker to make the final architectural decision without first supplying the decision criteria; synthesize competing findings yourself.
+- Never ask a subagent to make the final architectural decision without first supplying the decision criteria; synthesize competing findings yourself.
 
 ### Failure and recovery
 - Treat every non-zero result, timeout, missing output, malformed response, or BLOCKED status as a surfaced failure—not a success.
-- Preserve the worker's exact error in your synthesis, then retry only with a narrower task or better context (maximum two retries).
+- Preserve the subagent's exact error in your synthesis, then retry only with a narrower task or better context (maximum two retries).
 - If an edit fails due to exact-match mismatch, re-read the current region and resend the exact whitespace-sensitive snippet.
-- If a worker cannot complete after retries, continue directly when safe or report the blocker; never invent completion evidence.
+- If a subagent cannot complete after retries, continue directly when safe or report the blocker; never invent completion evidence.
 
 **Subagent List:**
 | Subagent | Use for | Tools | Dispatch |
@@ -177,9 +177,9 @@ ${tableRows}
 ## Workflow
 1. State the goal and convert the request into explicit acceptance criteria.
 2. Inspect project instructions, relevant files, dependency manifests, and current implementation before making claims.
-3. Fill context gaps: ${ctxGap}. For parallel work, partition by file, symbol, resource, or question and state each worker's non-overlapping scope.
+3. Fill context gaps: ${ctxGap}. For parallel work, partition by file, symbol, resource, or question and state each subagent's non-overlapping scope.
 4. Choose the minimal implementation strategy and identify risks, compatibility constraints, and rollback-safe boundaries.
-5. ${taskRouting}. Give each worker the delegation contract: objective, scope, context, acceptance criteria, and output format.
+5. ${taskRouting}. Give each subagent the delegation contract: objective, scope, context, acceptance criteria, and output format.
 6. Capture every result independently. Check status, errors, changed files, and evidence; do not silently discard failed or partial results.
 ${qualityGateStep}
 ${verifyStep}
@@ -198,15 +198,15 @@ ${skillsSection}
 - Before edits: establish the current behavior and acceptance criteria.
 - After edits: inspect the diff, re-read affected sections, and verify the narrowest relevant command first.
 - Treat subprocess failures, non-zero exits, timeouts, empty output, and malformed responses as failures that must reach the final report.
-- Preserve dependency and stream isolation: workers must not rely on shared stdin/stdout/stderr or mutable global state.
-- For parallel tasks, require independent scope and deterministic result labels so synthesis cannot confuse workers.
+- Preserve dependency and stream isolation: subagents must not rely on shared stdin/stdout/stderr or mutable global state.
+- For parallel tasks, require independent scope and deterministic result labels so synthesis cannot confuse subagents.
 
 ## Forbidden
 - Reading full files when line-range reads or grep searches suffice.
 - Offloading core orchestrator planning, conflict resolution, or final decisions to subagents.
 - Marking tasks as complete without concrete execution evidence.
 - Parallel writes or edits to the same file.
-- Claiming a worker succeeded when its status, output, or evidence indicates failure.
+- Claiming a subagent succeeded when its status, output, or evidence indicates failure.
 - Guessing missing paths, APIs, versions, test results, or image contents.
 
 ##  Final Response Format

@@ -31,7 +31,7 @@ import { scanExtensionPaths } from "./extensions";
 import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchMany as dispatchManyImpl, dispatchAgentMany as dispatchAgentManyImpl } from "./orchestration";
 import { MemoryManager, createMemoryManager, extractLastAssistantText, installMemoryEscEditor } from "./memory";
 import { buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl, closeSidebar } from "./ui";
-import { registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
+import { registerCustomEditTool, registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
 import { fullModelId } from "./helpers";
 import { homedir } from "os";
 
@@ -72,7 +72,7 @@ export class AgentTeam implements AgentTeamContext {
   enabled = true;
   parallelDispatch = true;
   maxParallel = 5;
-  destructiveTools: string[] = ["write", "edit"];
+  destructiveTools: string[] = ["write", "custom_edit"];
   dispatchLock: RwLock = new RwLock();
   batchClones = new Set<AgentProc>();
   /** Set of agent names that are temporarily disabled by the user */
@@ -110,7 +110,7 @@ export class AgentTeam implements AgentTeamContext {
     this.enabled = this.saved.enabled ?? true;
     this.parallelDispatch = this.saved.parallelDispatch ?? true;
     this.maxParallel = this.saved.maxParallel ?? 5;
-    this.destructiveTools = this.saved.destructiveTools ?? ["write", "edit"];
+    this.destructiveTools = this.saved.destructiveTools ?? ["write", "custom_edit"];
     this.disabledAgents = new Set(this.saved.disabledAgents ?? []);
     this.orchestratorSkills = new Set(this.saved.orchestratorSkills ?? []);
     this.subagentSkills = new Set(this.saved.subagentSkills ?? []);
@@ -507,6 +507,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Register tool, commands, shortcut
+  registerCustomEditTool(pi);
   registerDispatchAgentTool(pi, team);
   registerDispatchAgentsTool(pi, team);
   registerCommands(pi, team);

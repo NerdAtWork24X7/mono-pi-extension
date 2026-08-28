@@ -125,6 +125,8 @@ interface ToolCallPayload {
   tool_name: string;
   args: Record<string, any>;
   args_truncated: boolean;
+  args_valid?: boolean;
+  validation_error?: string;
 }
 
 interface ToolResultPayload {
@@ -248,6 +250,29 @@ async function probeServer(url: string): Promise<boolean> {
   } finally {
     clearTimeout(timer);
   }
+}
+
+function validateToolArgs(tool: any, args: Record<string, any>): string | undefined {
+  const schema = tool?.parameters || tool?.inputSchema;
+  if (!schema || typeof schema !== "object") return undefined;
+
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const properties = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
+  const missing = required.filter((key: string) => args?.[key] === undefined || args?.[key] === null);
+  if (missing.length) return `Missing required argument(s): ${missing.join(", ")}`;
+
+  for (const [key, definition] of Object.entries(properties) as Array<[string, any]>) {
+    const value = args?.[key];
+    if (value === undefined || value === null || !definition?.type) continue;
+    const valid = definition.type === "string" ? typeof value === "string"
+      : definition.type === "boolean" ? typeof value === "boolean"
+      : definition.type === "number" || definition.type === "integer" ? typeof value === "number"
+      : definition.type === "array" ? Array.isArray(value)
+      : definition.type === "object" ? typeof value === "object" && !Array.isArray(value)
+      : true;
+    if (!valid) return `Invalid argument type for ${key}: expected ${definition.type}`;
+  }
+  return undefined;
 }
 
 function truncateArgs(args: Record<string, any>): { args: Record<string, any>; truncated: boolean } {
@@ -1058,30 +1083,55 @@ export default function (pi: ExtensionAPI) {
   pi.on("tool_call", async (event, _ctx) => {
     if (!queue || !sessionInfo) return;
     const { args, truncated } = truncateArgs(event.input || {});
+    const tool = pi.getAllTools().find(t => t.name === event.toolName);
+    const validation_error = validateToolArgs(tool, args);
     const payload: ToolCallPayload = {
       tool_call_id: event.toolCallId,
       tool_name: event.toolName,
       args,
       args_truncated: truncated,
+      args_valid: !validation_error,
+      validation_error,
     };
     queue.push(createEventEnvelope("tool_call", payload, sessionInfo));
   });
 
-  // ━━ tool_result (do NOT modify) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ━━ tool_result ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   pi.on("tool_result", async (event, _ctx) => {
     if (!queue || !sessionInfo) return;
     let content_text = "";
     if (Array.isArray(event.content)) {
       for (const block of event.content) {
-        if (block.type === "text") {
+        if (typeof block === "string") {
+          content_text += block + "\n";
+        } else if (block?.type === "text") {
           content_text += (block.text || "") + "\n";
+        } else if (block?.type === "error") {
+          content_text += (block.error || block.message || block.text || "") + "\n";
         }
       }
     } else if (typeof event.content === "string") {
       content_text = event.content;
+    } else if (event.content && typeof event.content === "object") {
+      content_text = event.content.error || event.content.message || JSON.stringify(event.content);
     }
 
-    const tr = truncateToBytes(content_text.trim(), MAX_RESULT_BYTES);
+    // Pi versions/tools may expose the failure on `error`, `errorMessage`, or
+    // nested details instead of (or in addition to) isError. Preserve it in
+    // the event body so Scope can render failed tool executions reliably.
+    const eventError = event.error || event.errorMessage || event.details?.error || event.details?.message;
+    if (eventError && !content_text.trim()) {
+      content_text = typeof eventError === "string" ? eventError : JSON.stringify(eventError);
+    }
+    const normalizedContent = content_text.trim();
+    // Some tools return validation failures as ordinary text without setting
+    // Pi's isError flag (for example: "custom_edit requires path..."). Treat
+    // explicit validation/error wording as a failed result so Scope can render
+    // it as an error instead of a successful tool call.
+    const contentLooksLikeError = /(?:^|\\b)(?:error|failed|failure|requires\\s+.+(?:and|,)|invalid\\b|unable\\s+to|cannot\\s+|couldn['’]t\\s+)/i.test(normalizedContent);
+    const is_error = event.isError === true || !!event.error || !!event.errorMessage || !!event.details?.error || contentLooksLikeError;
+
+    const tr = truncateToBytes(normalizedContent, MAX_RESULT_BYTES);
 
     // Stash the last tool result text so agent_end can use it as a fallback
     // when the subagent's final assistant message is tool-call-only.
@@ -1095,6 +1145,8 @@ export default function (pi: ExtensionAPI) {
       if ("exit_code" in event.details) details_summary.exit_code = event.details.exit_code;
       if ("cancelled" in event.details) details_summary.cancelled = event.details.cancelled;
       if ("truncated" in event.details) details_summary.truncated = event.details.truncated;
+      if ("error" in event.details) details_summary.error = event.details.error;
+      if ("message" in event.details && !details_summary.error) details_summary.message = event.details.message;
     }
 
     const payload: ToolResultPayload = {
@@ -1102,7 +1154,7 @@ export default function (pi: ExtensionAPI) {
       tool_name: event.toolName,
       content_text: tr.text,
       content_truncated: tr.truncated,
-      is_error: event.isError === true,
+      is_error,
       details_summary,
     };
     queue.push(createEventEnvelope("tool_result", payload, sessionInfo));

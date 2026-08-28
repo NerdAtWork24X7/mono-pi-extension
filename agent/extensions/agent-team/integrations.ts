@@ -3,10 +3,104 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text, type AutocompleteItem } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
+import { existsSync, readFileSync, writeFileSync } from "fs";
+import { resolve } from "path";
 import type { AgentTeamContext, BatchTaskResult } from "./core";
 import { displayName, shortModel } from "./core";
 import { MAX_RESPONSE_LENGTH } from "./orchestration";
 import { toggleSidebar } from "./ui";
+
+/** Build a side-by-side diff string for display in the TUI.
+ *  Shows old (red/error) on left, new (green/success) on right,
+ *  each line truncated to MAX_SIDE chars. Uses raw ANSI codes since
+ *  Text() only evaluates theme.fg() at construction time but expects
+ *  already-formatted spans for side-by-side layout. */
+function sideBySideDiff(oldText: string, newText: string, theme: any): string {
+  const MAX_SIDE = 50;
+  const oldLines = oldText.split("\n");
+  const newLines = newText.split("\n");
+  const maxRows = Math.max(oldLines.length, newLines.length);
+  const pad = (s: string, len: number) => s.length > len ? s.slice(0, len - 1) + "…" : s.padEnd(len);
+  const parts: string[] = [];
+  for (let i = 0; i < maxRows; i++) {
+    const o = i < oldLines.length ? oldLines[i] : "";
+    const n = i < newLines.length ? newLines[i] : "";
+    const left = theme.fg("error", pad(o, MAX_SIDE));
+    const right = theme.fg("success", pad(n, MAX_SIDE));
+    parts.push(left + theme.fg("dim", " │ ") + right);
+  }
+  return parts.join("\n");
+}
+
+/** DeepSeek-friendly replacement for Pi's strict exact-match edit tool. */
+export function registerCustomEditTool(pi: ExtensionAPI) {
+  pi.registerTool({
+    name: "custom_edit",
+    label: "Custom Edit",
+    description: "Safely replace text in a file. Accepts path/file, oldString/old_text/search, and newString/new_text/replace aliases.",
+    parameters: Type.Object({
+      path: Type.Optional(Type.String()), file: Type.Optional(Type.String()),
+      oldString: Type.Optional(Type.String()), old_text: Type.Optional(Type.String()), search: Type.Optional(Type.String()),
+      newString: Type.Optional(Type.String()), new_text: Type.Optional(Type.String()), replace: Type.Optional(Type.String()),
+      replaceAll: Type.Optional(Type.Boolean()),
+    }),
+    async execute(_id, params) {
+      const input = params as Record<string, unknown>;
+      const filePath = typeof input.path === "string" ? input.path : input.file;
+      const oldText = typeof input.oldString === "string" ? input.oldString : typeof input.old_text === "string" ? input.old_text : input.search;
+      const newText = typeof input.newString === "string" ? input.newString : typeof input.new_text === "string" ? input.new_text : input.replace;
+      if (typeof filePath !== "string" || typeof oldText !== "string" || typeof newText !== "string") return { content: [{ type: "text", text: "custom_edit requires path, oldString, and newString (aliases accepted)." }], details: { ok: false, filePath, oldText, newText } };
+      const absolutePath = resolve(filePath);
+      if (!existsSync(absolutePath)) return { content: [{ type: "text", text: `File not found: ${filePath}` }], details: { ok: false, filePath, oldText, newText } };
+      try {
+        const content = readFileSync(absolutePath, "utf8");
+        const matches = oldText ? content.split(oldText).length - 1 : 0;
+        if (matches === 0) return { content: [{ type: "text", text: `No match found in ${filePath}; re-read and retry.` }], details: { ok: false, matches: 0, filePath, oldText, newText } };
+        if (matches > 1 && input.replaceAll !== true) return { content: [{ type: "text", text: `Found ${matches} matches; provide a more specific search or set replaceAll=true.` }], details: { ok: false, matches, filePath, oldText, newText } };
+        const updated = input.replaceAll === true ? content.split(oldText).join(newText) : content.replace(oldText, newText);
+        writeFileSync(absolutePath, updated);
+        return { content: [{ type: "text", text: `Updated ${filePath}.` }], details: { ok: true, matches, filePath, oldText, newText } };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return { content: [{ type: "text", text: `Edit failed for ${filePath}: ${message}` }], details: { ok: false, error: message, filePath, oldText, newText } };
+      }
+    },
+    renderCall(args, theme) {
+      const a = (args as any);
+      const fp = a.path || a.file || "?";
+      const t = a.oldString || a.old_text || a.search || "";
+      return new Text(
+        theme.fg("toolTitle", theme.bold("custom_edit ")) +
+        theme.fg("accent", `${fp} - `) +
+        theme.fg("muted", `${t.slice(0, 60)}${t.length > 60 ? "…" : ""}`),
+        0, 0,
+      );
+    },
+    renderResult(result, options, theme) {
+      const d = result.details as any;
+      if (!d) return new Text((result.content[0] as any)?.text || "", 0, 0);
+      if (options.isPartial) {
+        return new Text(theme.fg("accent", "custom_edit - editing..."), 0, 0);
+      }
+      if (d.ok !== true) {
+        const msg = (result.content[0] as any)?.text || "Edit failed";
+        return new Text(theme.fg("error", "✗ ") + theme.fg("muted", msg), 0, 0);
+      }
+      // Success — build side-by-side diff
+      const fp = d.filePath || "?";
+      const oldText = d.oldText || "";
+      const newText = d.newText || "";
+      const header = theme.fg("success", "✓ ") + theme.fg("accent", fp);
+      const diff = sideBySideDiff(oldText, newText, theme);
+      if (options.expanded) {
+        return new Text(header + "\n" + diff, 0, 0);
+      }
+      // Collapsed: show header + first changed line pair
+      const firstLine = diff.split("\n")[0] || "";
+      return new Text(header + "\n" + "  " + firstLine, 0, 0);
+    },
+  });
+}
 
 /** Truncate a subagent output to the tool-result cap (keeps the tail). */
 function capOutput(out: string): string {

@@ -6,7 +6,7 @@
   "maxParallel": 5,
   "destructiveTools": [
     "write",
-    "edit",
+    "custom_edit",
     "doc_generator"
   ],
   "disabledAgents": [

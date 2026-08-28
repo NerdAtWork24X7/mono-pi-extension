@@ -1,7 +1,7 @@
 ---
 name: doc_generator
 description: Use when you need to produce a file — Excel (.xlsx), PDF (.pdf), Word (.docx), PowerPoint (.pptx), HTML (.html), CSV (.csv), JSON (.json), or any other structured document/data export format. Writes and executes a Python script that generates the file on disk and returns its path. Use for tasks like generate a report, export this data to Excel, create a PDF invoice, or produce an HTML summary. Do NOT use for code changes unrelated to document generation, file searches, web lookups, or writing project documentation.
-tools: bash, read, write, edit
+tools: bash, read, write, custom_edit
 thinking: off
 ---
 

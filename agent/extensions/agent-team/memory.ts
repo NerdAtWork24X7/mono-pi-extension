@@ -104,7 +104,7 @@ export function createMemoryManager(ctx: AgentTeamContext, model: string): Memor
     def: {
       name: "memory-summarizer",
       description: "Per-turn memory summarizer spawned alongside the orchestrator.",
-      tools: "read,write,edit",
+      tools: "read,write,custom_edit",
       systemPrompt: "",
       file: "",
     },
@@ -484,7 +484,7 @@ export class MemoryManager {
             // relative paths both match.
             const tool = ev.toolName;
             const toolArgs = ev.args;
-            if ((tool === "write" || tool === "edit") && toolArgs && typeof toolArgs === "object") {
+            if ((tool === "write" || tool === "custom_edit") && toolArgs && typeof toolArgs === "object") {
               const raw = (toolArgs as any).path
                 ?? (toolArgs as any).file_path
                 ?? (toolArgs as any).file;
