@@ -9,3 +9,7 @@ package-lock.json
 package.json
 ﻿agent/cookie
 tmp/
+
+agent/extensions/obscura/obscura
+agent/extensions/obscura/obscura-worker
+
