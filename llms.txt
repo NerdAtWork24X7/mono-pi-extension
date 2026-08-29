@@ -1,0 +1,24 @@
+# Mono Pi Extension
+
+> A subagent-orchestrator extension for the `pi-coding-agent` (Kilo/PI) coding agent. A frontier-model orchestrator delegates well-scoped work to specialized subagents that run in isolated `pi --mode rpc` processes on low-cost/free models, behind a built-in `harsh_critic` quality gate and persistent project memory.
+
+## Documentation
+
+- [README.md](README.md): User guide — what it is, how it differs from other multi-agent frameworks, advantages, quick start, commands, and project structure. Start here.
+- [agent/AGENTS.md](agent/AGENTS.md): Operating rules, scope, error handling, and safety constraints for the orchestrator and subagents.
+- [agent/agents/teams.yaml](agent/agents/teams.yaml): Team definitions and per-agent model overrides (including the `memory_model` switch).
+- [agent/settings.json](agent/settings.json): `pi-coding-agent` configuration — enabled extensions, models, theme, and packages.
+- [agent/models.json](agent/models.json): Configured model providers (OpenRouter, Cloudflare, NVIDIA, Cline, local) and model IDs.
+
+## Source
+
+- [agent/extensions/agent-team/](agent/extensions/agent-team/): Core orchestrator extension (TypeScript) — lifecycle hooks, process manager, RPC dispatch, memory, UI, integrations.
+- [agent/agents/](agent/agents/): Per-subagent `.md` definitions (coder, tester, searcher, file_reader, documenter, doc_generator, image_analyzer, harsh_critic).
+- [agent/extensions/web_fetch_crawl4ai/](agent/extensions/web_fetch_crawl4ai/): Persistent-Chromium web fetch (Crawl4AI) with `setup-web-fetch.sh`.
+- [agent/extensions/](agent/extensions/): Other extensions — browser, context7, modelcost, pi-scope, TokenRouter, custom-footer, herdr-agent-state, kilo.
+- [agent/skills/](agent/skills/): Reusable skills (flet, pyside6, electron-scaffold, improve-codebase-architecture).
+
+## Optional
+
+- [.pi_memory/](.pi_memory/): Generated per-turn project-memory summaries (Design Decisions, Facts, User Taste, User Suggestions).
+- [package.json](package.json): Dev/runtime dependencies (TypeScript, Playwright).
