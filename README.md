@@ -17,7 +17,7 @@ Most "multi-agent" setups on the internet do one of two things: (a) run every ag
 | 3 | **A structural quality gate** | `harsh_critic` reviews every worker deliverable and loops *revise → critique → revise* until `VERDICT: APPROVED` — **before** anything is tested or shipped. Quality control is built into the workflow, not left to chance. |
 | 4 | **Persistent project memory** | A background summarizer distills each turn into `.pi_memory/project_memory.md` (Design Decisions, Facts, User Taste, User Suggestions); the orchestrator's system prompt points to that file every turn so it can read accumulated context when relevant. The agent "remembers" across sessions without bloating the live context. |
 | 5 | **Runtime team switching + parallel fan-out** | Define teams in YAML, switch them live with `/agents-team`, and fan one agent across many tasks — read-only agents run in parallel, writable ones serialize automatically. |
-| 6 | **Batteries included** | Web fetching via a single persistent Chromium instance (Crawl4AI), Context7 docs lookup, token routing / cost tracking, browser automation, code-scope, and more — all shipped as extensions. |
+| 6 | **Batteries included** | Web fetching via Obscura (Rust headless browser — fast startup, low memory) and Crawl4AI (persistent Chromium), Context7 docs lookup, token routing / cost tracking, browser automation, code-scope, and more — all shipped as extensions. |
 | 7 | **It's an extension, not a new runtime** | It layers on top of `pi-coding-agent`. You keep the agent's existing tools, shortcuts, and UX, and gain orchestration. |
 
 ---
@@ -54,13 +54,13 @@ Mono Pi is enabled as a `pi-coding-agent` extension. The relevant switches live 
 ```jsonc
 "extensions": [
   "+extensions/agent-team/index.ts",   // the orchestrator
-  "+extensions/web-fetch.ts",
+  "+extensions/obscura/index.ts",      // web fetch via Obscura headless browser
   "+extensions/browser.ts"
   // ...
 ]
 ```
 
-1. **Enable the extension** — make sure `+extensions/agent-team/index.ts` is present in `agent/settings.json` → `extensions`.
+1. **Enable the extension** — make sure `+extensions/agent-team/index.ts` and `+extensions/obscura/index.ts` are present in `agent/settings.json` → `extensions`. The Obscura web-fetch tool needs its headless-browser binary; see [Obscura web-fetch (binary setup)](#obscura-web-fetch-binary-setup).
 2. **Define your team** — edit `agent/agents/teams.yaml`. Assign cheap/free models to grunt agents and leave `coder` / orchestration on the frontier model:
 
    ```yaml
@@ -79,6 +79,20 @@ Mono Pi is enabled as a `pi-coding-agent` extension. The relevant switches live 
 4. **Use it** — start `pi-coding-agent` and drive the team with slash commands (below).
 
 > Models shown are examples. The free/frontier models available to you are listed in `agent/settings.json` → `enabledModels` and `agent/models.json`.
+
+---
+
+## Obscura web-fetch (binary setup)
+
+The web-fetch tool uses **Obscura**, a Rust-based headless browser (V8 JavaScript, ~85 ms startup, ~30 MB memory) that renders JS-heavy pages with better stealth than Chromium. The Obscura executables (`obscura`, `obscura-worker`) are **git-ignored** because they exceed GitHub's 100 MB file limit, so the compressed tarballs (`obscura.tar.gz`, `obscura-worker.tar.gz`) are committed in their place.
+
+After cloning, extract the binaries once:
+
+```bash
+agent/extensions/obscura/setup.sh
+```
+
+This unpacks the tarballs next to `agent/extensions/obscura/index.ts` and makes the binaries executable. Re-run with `--force` to re-extract. To use a system-installed Obscura instead, set `OBSCURA_BIN` to its path.
 
 ---
 
@@ -138,6 +152,7 @@ agent/
     *.md                   # Per-subagent definitions (frontmatter + prompt)
   extensions/
     agent-team/            # Core orchestrator extension (TypeScript source)
+    obscura/              # Web-fetch via Obscura headless browser (setup.sh extracts binaries)
     web_fetch_crawl4ai/    # Persistent-Chromium web fetch (setup-web-fetch.sh)
     browser.ts, context7.ts, modelcost.ts, pi-scope.ts, TokenRouter.ts, ...
   skills/                  # Reusable skills (flet, pyside6, electron-scaffold, ...)
