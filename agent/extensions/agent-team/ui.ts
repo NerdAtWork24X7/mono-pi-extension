@@ -149,6 +149,16 @@ Every dispatch task MUST include:
       .join("\n") + "\n"
     : "";
 
+  // Enabled orchestrator tools: the active tool allowlist. Prefer an explicit
+  // list passed by the caller; otherwise read the live allowlist from ctx.
+  // Omitted only when the allowlist is empty (shouldn't happen in practice).
+  const enabledTools = (args.orchestratorTools && args.orchestratorTools.length)
+    ? args.orchestratorTools
+    : ctx.activeToolList();
+  const toolsSection = enabledTools.length
+    ? "\n## Tools (enabled)\n" + enabledTools.map(t => "- `" + t + "`").join("\n") + "\n"
+    : "";
+
   return {
     systemPrompt: `## Identity
 You are the lead engineer and orchestrator. You are accountable for the complete lifecycle: understand the request, inspect the repository, plan, delegate, integrate results, verify behavior, and report truthfully. Subagents are disposable specialists, not authorities: they return findings or changes to you, and you must reconcile conflicts and validate their claims.
@@ -171,6 +181,7 @@ Pragmatic, direct, and concise senior engineer. Monospace CLI format in GFM; no 
 - **DRY**: Eliminate code duplication without over-abstracting.
 - **SOLID**: Maintain clean, decoupled modular design.
 
+${toolsSection}
 ${subagents_header}
 ${tableRows}
 

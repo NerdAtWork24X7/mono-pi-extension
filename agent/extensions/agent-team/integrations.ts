@@ -419,16 +419,18 @@ export function registerCustomEditTool(pi: ExtensionAPI) {
     description: "Safely replace text in a file. Accepts path/file, oldString/old_text/search, and newString/new_text/replace aliases.",
     parameters: Type.Object({
       path: Type.Optional(Type.String()), file: Type.Optional(Type.String()),
-      oldString: Type.Optional(Type.String()), old_text: Type.Optional(Type.String()), search: Type.Optional(Type.String()),
-      newString: Type.Optional(Type.String()), new_text: Type.Optional(Type.String()), replace: Type.Optional(Type.String()),
+      oldString: Type.Optional(Type.String()), old_string: Type.Optional(Type.String()), old_text: Type.Optional(Type.String()), search: Type.Optional(Type.String()),
+      newString: Type.Optional(Type.String()), new_string: Type.Optional(Type.String()), new_text: Type.Optional(Type.String()), replace: Type.Optional(Type.String()),
       replaceAll: Type.Optional(Type.Boolean()),
     }),
     async execute(_id, params) {
       const input = params as Record<string, unknown>;
       const filePath = typeof input.path === "string" ? input.path : input.file;
-      const oldText = typeof input.oldString === "string" ? input.oldString : typeof input.old_text === "string" ? input.old_text : input.search;
-      const newText = typeof input.newString === "string" ? input.newString : typeof input.new_text === "string" ? input.new_text : input.replace;
-      if (typeof filePath !== "string" || typeof oldText !== "string" || typeof newText !== "string") throw new Error("custom_edit requires path, oldString, and newString (aliases accepted).");
+      const oldText = typeof input.oldString === "string" ? input.oldString : typeof input.old_string === "string" ? input.old_string : typeof input.old_text === "string" ? input.old_text : input.search;
+      const newText = typeof input.newString === "string" ? input.newString : typeof input.new_string === "string" ? input.new_string : typeof input.new_text === "string" ? input.new_text : input.replace;
+      if (typeof filePath !== "string" || typeof oldText !== "string" || typeof newText !== "string") {
+        throw new Error("custom_edit requires path, oldString, and newString (aliases accepted).");
+      }
       const absolutePath = resolve(filePath);
       if (!existsSync(absolutePath)) throw new Error(`File not found: ${filePath}`);
       if (!statSync(absolutePath).isFile()) throw new Error(`Not a regular file: ${filePath}`);
@@ -467,7 +469,7 @@ export function registerCustomEditTool(pi: ExtensionAPI) {
       const a = (args as any);
       const fp = a.path || a.file || "?";
       // Flatten newlines so multi-line oldString values can't break the header layout.
-      const t = String(a.oldString || a.old_text || a.search || "").replace(/\r/g, "").replace(/\n/g, "⏎");
+      const t = String(a.oldString || a.old_string || a.old_text || a.search || "").replace(/\r/g, "").replace(/\n/g, "⏎");
       return new Text(
         theme.fg("toolTitle", theme.bold("custom_edit ")) +
         theme.fg("accent", `${fp} - `) +

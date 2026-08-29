@@ -436,6 +436,7 @@ export default function (pi: ExtensionAPI) {
       memory: team.memoryManager ? { file: team.memoryFile } : null,
       agentMd: team.agentMdCache,
       skills: filterSkills(team.skillsCache, team.orchestratorSkills),
+      orchestratorTools: team.activeToolList(),
     });
   });
 

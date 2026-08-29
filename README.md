@@ -25,7 +25,7 @@ The Agent Team extension (`agent/extensions/agent-team/`) is a TypeScript plugin
 ### Lifecycle
 
 1. **Session start** - Load agent definitions only (NO spawning) (`.md` files from `agent/agents/`, `.pi/agents/`, `.claude/agents/`), parse `teams.yaml`, initialize process registry, create combined session log pane
-2. **Before agent start** - Override system prompt: inject agent catalog (available agents + their descriptions), project memory content (if enabled), AGENTS.md rules, and enabled skills
+2. **Before agent start** - Override system prompt: inject agent catalog (available agents + their descriptions), project memory content (if enabled), AGENTS.md rules, enabled skills, and a catalogue of the orchestrator's enabled tools (active tool allowlist)
 3. **Dispatch** - Tool call `dispatch_agent(agent, task)` triggers a fresh `pi --mode rpc` subprocess spawn, readiness probe (get_state), task injection via JSON stdin, streaming RPC event handling (response, message_update, message_end, tool_execution, agent_end), 10-min activity timeout, session log recording — or `dispatch_agent(agent, tasks: [...])` to fan out the same agent across many tasks in isolated subprocesses.
 4. **Agent end** - Cleanup: kill subprocess (SIGTERM + 2s SIGKILL backstop), wipe session files, log done box with elapsed time/tool count. If memory feature enabled: trigger background summarization of the turn
 5. **Session end** - Cleanup any residual subprocesses: persist config, await memory idle, kill leftover processes, close session log, kill terminal pane
