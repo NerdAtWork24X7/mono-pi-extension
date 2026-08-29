@@ -1,9 +1,9 @@
 {
-  "lastChangelogVersion": "0.84.0",
+  "lastChangelogVersion": "0.84.4",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
-  "defaultProvider": "opencode",
-  "defaultModel": "deepseek-v4-flash-free",
+  "defaultProvider": "kilo",
+  "defaultModel": "tencent/hy3:free",
   "defaultThinkingLevel": "high",
   "packages": [
     "npm:@juicesharp/rpiv-ask-user-question",
@@ -19,21 +19,24 @@
   "theme": "cyberpunk",
   "hideThinkingBlock": false,
   "skills": [
-    "-skills/electron-scaffold/SKILL.md"
+    "+skills/electron-scaffold/SKILL.md",
+    "-skills/flet/SKILL.md",
+    "-skills/pyside6/SKILL.md",
+    "-skills/improve-codebase-architecture/SKILL.md"
   ],
   "enabledModels": [
-    "opencode/big-pickle",
-    "opencode/deepseek-v4-flash-free",
-    "xiaomi-token-plan-ams/mimo-v2.5-pro",
-    "xiaomi-token-plan-ams/mimo-v2.5",
-    "openrouter/cohere/north-mini-code:free",
+    "cline-pass/cline-pass/kimi-k3",
+    "cline-pass/cline-pass/deepseek-v4-flash",
+    "cline-pass/cline-pass/deepseek-v4-pro",
+    "cline-pass/cline-pass/qwen3.8-max",
+    "cline-pass/cline-pass/glm-5.3",
     "kilo/tencent/hy3:free"
   ],
   "extensions": [
     "+extensions/custom-footer.ts",
     "+extensions/agent-team/index.ts",
-    "-extensions/web_fetch_crawl4ai/index.ts",
-    "+extensions/web-fetch.ts",
+    "+extensions/web_fetch_crawl4ai/index.ts",
+    "-extensions/web-fetch.ts",
     "+extensions/browser.ts",
     "+extension/pi-scope.ts"
   ],

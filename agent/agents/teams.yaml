@@ -18,7 +18,7 @@
 
 memory_model:
   model: xiaomi-token-plan-ams/mimo-v2.5
-  active: false
+  active: true
 
 subagent_team:
   - name: file_reader
@@ -26,6 +26,7 @@ subagent_team:
   - name: searcher
     model: xiaomi-token-plan-ams/mimo-v2.5
   - name: coder
+    active: false
   - name: tester
     model: xiaomi-token-plan-ams/mimo-v2.5
   - name: documenter
@@ -36,9 +37,9 @@ subagent_team:
     active: false
   - name: image_analyzer
     model: xiaomi-token-plan-ams/mimo-v2.5
-    active: false
   - name: harsh_critic
     model: xiaomi-token-plan-ams/mimo-v2.5-pro
+    active: false
 
 test_subagent_team:
   - name: coder
