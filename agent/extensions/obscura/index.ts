@@ -20,6 +20,9 @@
  *   WEB_FETCH_CACHE_TTL_MS    — cache TTL in ms (default 1 hour)
  *   WEB_FETCH_FETCH_TIMEOUT_MS — per-fetch timeout in ms (default 30s)
  *   WEB_FETCH_MAX_CHARS       — per-page text cap (default 4000)
+ *   WEB_FETCH_STEALTH         — stealth mode: consistent Windows-Chrome TLS/HTTP
+ *                               fingerprint + tracker blocking (default on; set 0/off to disable)
+ *   WEB_FETCH_PROXY           — default proxy URL (e.g. http://user:pass@host:port or socks5://host:port)
  */
 
 import { createHash } from "crypto";
@@ -63,9 +66,17 @@ function envMs(name: string, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+function envBool(name: string, fallback: boolean): boolean {
+  const v = process.env[name];
+  if (v === undefined) return fallback;
+  return !/^(0|false|no|off)$/i.test(v.trim());
+}
+
 const CACHE_TTL_MS = envMs("WEB_FETCH_CACHE_TTL_MS", 3_600_000);   // 1 hour
 const FETCH_TIMEOUT_MS = envMs("WEB_FETCH_FETCH_TIMEOUT_MS", 30_000); // 30s
 const MAX_RESULT_CHARS = envMs("WEB_FETCH_MAX_CHARS", 4000);       // per-page cap
+const STEALTH_DEFAULT = envBool("WEB_FETCH_STEALTH", true);        // stealth on by default
+const PROXY_DEFAULT = (process.env.WEB_FETCH_PROXY ?? "").trim();  // default proxy ("" = direct)
 const MAX_CACHE_ENTRIES = 2000;
 const MEM_CACHE_MAX = 100;
 const MEM_CACHE_MAX_ENTRY = 512 * 1024; // big raw HTML stays disk-only
@@ -148,10 +159,11 @@ function setupCookieStorageDir(cookiesJson: string): string {
 const CACHE_NAMESPACE = "obscura";
 const memCache = new Map<string, { t: number; text: string }>();
 
-function cacheKey(url: string, dump: string, cookieHash?: string): string {
-  return cookieHash
-    ? `${CACHE_NAMESPACE}:${url}:${dump}:c${cookieHash}`
-    : `${CACHE_NAMESPACE}:${url}:${dump}`;
+function cacheKey(url: string, dump: string, cookieHash?: string, stealth?: boolean, proxyHash?: string): string {
+  let key = `${CACHE_NAMESPACE}:${url}:${dump}:${stealth ? "s1" : "s0"}`;
+  if (cookieHash) key += `:c${cookieHash}`;
+  if (proxyHash) key += `:p${proxyHash}`;
+  return key;
 }
 
 function cachePath(key: string): string {
@@ -229,10 +241,18 @@ function maybePrune(force = false): void {
 
 // ── Obscura fetch wrapper ──────────────────────────────────────────────────
 
-function obscuraFetch(url: string, dump: string, storageDir?: string): Promise<string> {
+interface FetchOptions {
+  storageDir?: string;
+  stealth?: boolean;
+  proxy?: string;
+}
+
+function obscuraFetch(url: string, dump: string, opts: FetchOptions = {}): Promise<string> {
   return new Promise((resolvePromise, rejectPromise) => {
     const args = ["fetch", url, "--dump", dump, "--quiet"];
-    if (storageDir) args.push("--storage-dir", storageDir);
+    if (opts.stealth) args.push("--stealth");
+    if (opts.proxy) args.push("--proxy", opts.proxy);
+    if (opts.storageDir) args.push("--storage-dir", opts.storageDir);
     const child = execFile(
       OBSCURA_BIN,
       args,
@@ -260,13 +280,22 @@ function obscuraFetch(url: string, dump: string, storageDir?: string): Promise<s
   });
 }
 
-// Cache the fetch-dump pair. Accepts cookie context for key isolation and storage.
-async function fetchWithCache(url: string, dump: string, cookieHashVal?: string, storageDir?: string): Promise<string> {
-  const key = cacheKey(url, dump, cookieHashVal);
+// Cache the fetch-dump pair. Accepts cookie context for key isolation and storage;
+// stealth/proxy shape both the request identity and the cache key.
+async function fetchWithCache(
+  url: string,
+  dump: string,
+  cookieHashVal?: string,
+  storageDir?: string,
+  stealth?: boolean,
+  proxy?: string,
+): Promise<string> {
+  const proxyHashVal = proxy ? cookieHash(proxy) : undefined;
+  const key = cacheKey(url, dump, cookieHashVal, stealth, proxyHashVal);
   const cached = getCache(key);
   if (cached !== null) return cached;
 
-  const text = await obscuraFetch(url, dump, storageDir);
+  const text = await obscuraFetch(url, dump, { storageDir, stealth, proxy });
   setCache(key, text);
   // Background prune — fire and forget
   setImmediate(() => maybePrune());
@@ -319,7 +348,10 @@ export default function (pi: ExtensionAPI) {
     description:
       "Fetch a web page (Markdown/text/HTML via Obscura headless browser engine). " +
       "If 'query' is given, run a DuckDuckGo search and fetch the top results; " +
-      "otherwise fetch 'url' directly. Supports JavaScript-rendered pages.",
+      "otherwise fetch 'url' directly. Supports JavaScript-rendered pages. " +
+      "Stealth mode (real Chrome TLS/HTTP fingerprint + tracker blocking) is on by default " +
+      "to bypass anti-bot protection; set stealth=false to disable. Optional 'proxy' routes " +
+      "the request through a proxy (http/socks5).",
     parameters: Type.Object({
       url: Type.Optional(
         Type.String({ description: "URL to fetch. Omit if using query.", default: "" }),
@@ -339,11 +371,27 @@ export default function (pi: ExtensionAPI) {
           default: 5,
         }),
       ),
+      stealth: Type.Optional(
+        Type.Boolean({
+          description:
+            "Stealth mode: consistent Windows-Chrome TLS fingerprint + tracker blocking. " +
+            "Default true (env WEB_FETCH_STEALTH). Use for sites with bot detection (e.g. Cloudflare).",
+          default: true,
+        }),
+      ),
+      proxy: Type.Optional(
+        Type.String({
+          description:
+            "Proxy URL for this fetch, e.g. http://user:pass@host:port or socks5://host:port. " +
+            "Default from env WEB_FETCH_PROXY (empty = direct).",
+          default: "",
+        }),
+      ),
     }),
 
     async execute(
       _toolCallId: unknown,
-      params: { url?: string; raw?: boolean; query?: string; maxResults?: number },
+      params: { url?: string; raw?: boolean; query?: string; maxResults?: number; stealth?: boolean; proxy?: string },
     ) {
       const raw = params.raw ?? false;
       const query = params.query?.trim() ?? "";
@@ -351,6 +399,10 @@ export default function (pi: ExtensionAPI) {
       if (!query && !url) {
         return errRes("Error: provide either 'url' or 'query' parameter.");
       }
+
+      // ── Stealth & proxy resolution (param overrides env default) ──
+      const stealth = params.stealth ?? STEALTH_DEFAULT;
+      const proxy = (params.proxy?.trim() ?? "") || PROXY_DEFAULT || undefined;
 
       // ── Cookie setup (auto-load from ~/.pi/agent/cookie) ──────
       const cookiesJson = loadAgentCookies();
@@ -365,6 +417,8 @@ export default function (pi: ExtensionAPI) {
       const details: Record<string, any> = {
         urlsFetched: 0,
         urlsFailed: 0,
+        stealth,
+        ...(proxy ? { proxy } : {}),
         ...(cookieHashVal ? { cookiesHash: cookieHashVal } : {}),
       };
       const sections: string[] = [];
@@ -377,7 +431,7 @@ export default function (pi: ExtensionAPI) {
         details.searchUrl = searchUrl;
 
         try {
-          const searchHtml = await fetchWithCache(searchUrl, "html", cookieHashVal, storageDir);
+          const searchHtml = await fetchWithCache(searchUrl, "html", cookieHashVal, storageDir, stealth, proxy);
           const resultUrls = extractUrlsFromDDGHTML(searchHtml, maxResults);
 
           if (resultUrls.length === 0) {
@@ -392,7 +446,7 @@ export default function (pi: ExtensionAPI) {
 
             for (const ru of resultUrls) {
               try {
-                const text = await fetchWithCache(ru, dump, cookieHashVal, storageDir);
+                const text = await fetchWithCache(ru, dump, cookieHashVal, storageDir, stealth, proxy);
                 const label = raw ? `Raw: ${ru}` : ru;
                 if (text) {
                   sections.push(`## ${label}\n\n${text.slice(0, MAX_RESULT_CHARS)}`);
@@ -417,7 +471,7 @@ export default function (pi: ExtensionAPI) {
       if (url) {
         details.url = url;
         try {
-          const text = await fetchWithCache(url, dump, cookieHashVal, storageDir);
+          const text = await fetchWithCache(url, dump, cookieHashVal, storageDir, stealth, proxy);
           const label = raw ? `Raw HTML: ${url}` : url;
           sections.push(`## ${label}\n\n${text.slice(0, MAX_RESULT_CHARS)}`);
           details.urlsFetched = (details.urlsFetched as number) + 1;
