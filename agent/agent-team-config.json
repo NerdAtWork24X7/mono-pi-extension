@@ -6,6 +6,8 @@
   "maxParallel": 5,
   "destructiveTools": [
     "write",
+    "custom_write",
+    "edit",
     "custom_edit",
     "doc_generator"
   ],
@@ -22,6 +24,10 @@
     "context7-search",
     "context7-query",
     "browser",
-    "web-fetch"
+    "web-fetch",
+    "edit",
+    "write",
+    "read",
+    "powershell"
   ]
 }

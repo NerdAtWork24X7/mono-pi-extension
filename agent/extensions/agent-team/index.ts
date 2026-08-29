@@ -31,7 +31,7 @@ import { scanExtensionPaths } from "./extensions";
 import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchMany as dispatchManyImpl, dispatchAgentMany as dispatchAgentManyImpl } from "./orchestration";
 import { MemoryManager, createMemoryManager, extractLastAssistantText, installMemoryEscEditor } from "./memory";
 import { buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl, closeSidebar } from "./ui";
-import { registerCustomEditTool, registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
+import { registerCustomReadTool, registerCustomWriteTool, registerCustomEditTool, registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
 import { fullModelId } from "./helpers";
 import { homedir } from "os";
 
@@ -72,7 +72,7 @@ export class AgentTeam implements AgentTeamContext {
   enabled = true;
   parallelDispatch = true;
   maxParallel = 5;
-  destructiveTools: string[] = ["write", "custom_edit"];
+  destructiveTools: string[] = ["custom_edit", "custom_write"];
   dispatchLock: RwLock = new RwLock();
   batchClones = new Set<AgentProc>();
   /** Set of agent names that are temporarily disabled by the user */
@@ -506,7 +506,9 @@ export default function (pi: ExtensionAPI) {
     if (team.wCtx?.ui?.setHeader) team.wCtx.ui.setHeader(undefined);
   });
 
-  // Register tool, commands, shortcut
+  // Register tools, commands, shortcut
+  registerCustomReadTool(pi);
+  registerCustomWriteTool(pi);
   registerCustomEditTool(pi);
   registerDispatchAgentTool(pi, team);
   registerDispatchAgentsTool(pi, team);
