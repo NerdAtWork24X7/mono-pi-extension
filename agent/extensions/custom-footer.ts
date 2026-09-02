@@ -11,12 +11,25 @@
 import type { AssistantMessage } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { truncateToWidth } from "@mariozechner/pi-tui";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
 
 type PlanEntry = {
   type: string;
   customType?: string;
   data?: { enabled: boolean; executing?: boolean; todos?: { completed: boolean }[] };
 };
+
+type GoUsageWindow = { goCost: number }; // $ of opencode-go usage in the window
+type GoUsage = { h5: GoUsageWindow; wk: GoUsageWindow; mo: GoUsageWindow };
+type GoUsagePct = { h5: number; wk: number; mo: number };
+
+// opencode.go dashboard metric: $ consumed / $ rolling-window limit
+// ($12 / 5h, $30 / week, $60 / month). The website percentage is dollar-based,
+// not a token share — so it can only be reproduced via the live endpoint.
+const GO_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
+const GO_USAGE_TTL = 60_000; // refresh the API at most once a minute
+const GO_LIMITS: Record<"h5" | "wk" | "mo", number> = { h5: 12, wk: 30, mo: 60 };
 
 export default function (pi: ExtensionAPI) {
   let sessionStart = Date.now();
@@ -54,7 +67,10 @@ export default function (pi: ExtensionAPI) {
 
     ctx.ui.setFooter((tui, theme, footerData) => {
       const unsub = footerData.onBranchChange(() => tui.requestRender());
-      const timer = setInterval(() => tui.requestRender(), 30000);
+      const timer = setInterval(() => {
+        void refreshGoApiUsage();
+        tui.requestRender();
+      }, 30000);
 
       // Token usage accumulates as the branch grows, so only scan entries added
       // since the last render instead of re-walking the whole session each tick.
@@ -81,6 +97,142 @@ export default function (pi: ExtensionAPI) {
         return stats;
       }
 
+      // ── opencode-go usage: % of the rolling $ limit (mirrors the website) ─
+      // The OpenCode Go dashboard reports usage as *dollar* percent of rolling
+      // window limits ($12/5h, $30/wk, $60/mo) — not a token share relative to
+      // other providers, so the old go-tokens/total-tokens boxes never matched
+      // the site. Primary source here is the same live endpoint the website
+      // uses: GET https://opencode.ai/zen/go/v1/usage (Bearer <opencode-go
+      // key>), returning rolling/weekly/monthly percent for the account. If
+      // that fetch fails (offline / no key / endpoint change), fall back to the
+      // same metric computed locally: sum per-message *cost* of provider
+      // "opencode-go" from the session files and divide by the window limits.
+      // Per-file results are cached by mtime; renders only re-scan changed/new
+      // session files (files untouched for >30 days contribute 0 and are
+      // skipped outright).
+      const goUsageCache = new Map<string, { mtimeMs: number } & GoUsage>();
+      let goApiUsage: GoUsagePct | null = null; // values from the live endpoint
+      let goApiFetchedAt = 0;
+      let goApiKey: string | undefined;
+
+      function newWindow(): GoUsageWindow {
+        return { goCost: 0 };
+      }
+
+      async function refreshGoApiUsage() {
+        if (ctx.model?.provider !== "opencode-go") return; // section hidden
+        const now = Date.now();
+        if (now - goApiFetchedAt < GO_USAGE_TTL) return;
+        goApiFetchedAt = now; // re-attempt after the TTL even on failure
+        try {
+          if (!goApiKey) {
+            goApiKey = await ctx.modelRegistry?.getApiKeyForProvider("opencode-go");
+          }
+          if (!goApiKey) return;
+          const res = await fetch(GO_USAGE_URL, { headers: { Authorization: `Bearer ${goApiKey}` } });
+          if (!res.ok) return;
+          const data = await res.json();
+          const u = data?.usage;
+          if (u) {
+            goApiUsage = {
+              h5: Number(u.rolling?.percent ?? -1),
+              wk: Number(u.weekly?.percent ?? -1),
+              mo: Number(u.monthly?.percent ?? -1),
+            };
+            tui.requestRender();
+          }
+        } catch {
+          // Keep last known values; retry after the TTL.
+        }
+      }
+
+      function opencodeGoUsage(now: number): GoUsage {
+        const h5t = now - 5 * 3600 * 1000;
+        const wkt = now - 7 * 24 * 3600 * 1000;
+        const mot = now - 30 * 24 * 3600 * 1000;
+        const total: GoUsage = { h5: newWindow(), wk: newWindow(), mo: newWindow() };
+        const bump = (win: GoUsageWindow, cost: number) => {
+          win.goCost += cost;
+        };
+        const merge = (target: GoUsage, src: GoUsage) => {
+          for (const k of ["h5", "wk", "mo"] as const) {
+            target[k].goCost += src[k].goCost;
+          }
+        };
+        let root: string;
+        try {
+          root = join(ctx.sessionManager.getSessionDir(), "..");
+        } catch {
+          return total;
+        }
+        let projects: string[];
+        try {
+          projects = readdirSync(root);
+        } catch {
+          return total;
+        }
+        for (const proj of projects) {
+          const dir = join(root, proj);
+          let files: string[];
+          try {
+            files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+          } catch {
+            continue; // not a project dir
+          }
+          for (const file of files) {
+            const path = join(dir, file);
+            let st;
+            try {
+              st = statSync(path);
+            } catch {
+              continue;
+            }
+            if (st.mtimeMs < mot) continue; // all messages older than 30 days
+            const cached = goUsageCache.get(path);
+            if (cached && cached.mtimeMs === st.mtimeMs) {
+              merge(total, cached);
+              continue;
+            }
+            const agg: GoUsage = { h5: newWindow(), wk: newWindow(), mo: newWindow() };
+            let text: string;
+            try {
+              text = readFileSync(path, "utf8");
+            } catch {
+              continue;
+            }
+            for (const line of text.split("\n")) {
+              if (!line) continue;
+              let entry: any;
+              try {
+                entry = JSON.parse(line);
+              } catch {
+                continue;
+              }
+              if (entry?.type !== "message" || entry.message?.role !== "assistant") continue;
+              if (entry.message?.provider !== "opencode-go") continue;
+              const rawTs = entry.timestamp ?? entry.message?.timestamp;
+              const ts = typeof rawTs === "number" ? rawTs : Date.parse(rawTs);
+              if (!ts) continue;
+              const cost = entry.message?.usage?.cost?.total;
+              if (!cost || cost <= 0) continue;
+              if (ts >= h5t) {
+                bump(agg.h5, cost);
+                bump(agg.wk, cost);
+                bump(agg.mo, cost);
+              } else if (ts >= wkt) {
+                bump(agg.wk, cost);
+                bump(agg.mo, cost);
+              } else if (ts >= mot) {
+                bump(agg.mo, cost);
+              }
+            }
+            goUsageCache.set(path, { mtimeMs: st.mtimeMs, h5: agg.h5, wk: agg.wk, mo: agg.mo });
+            merge(total, agg);
+          }
+        }
+        return total;
+      }
+
       // Last matching plan-mode entry, without allocating a filtered array.
       function lastPlanEntry(entries: PlanEntry[]): PlanEntry | undefined {
         for (let i = entries.length - 1; i >= 0; i--) {
@@ -89,6 +241,10 @@ export default function (pi: ExtensionAPI) {
         }
         return undefined;
       }
+
+      // First fetch — runs after the go-usage state above is initialized;
+      // the render falls back to local $ sums until the response arrives.
+      void refreshGoApiUsage();
 
       return {
         dispose() {
@@ -135,7 +291,7 @@ export default function (pi: ExtensionAPI) {
           const tokenStr = tokenParts.join("  ");
 
           // ── Cost ──
-          const costStr = theme.fg("warning", `$${cost.toFixed(2)}`);
+          const costStr = theme.fg("warning", "$" + cost.toFixed(2));
 
           // ── Context usage mini-bar ──
           let contextStr = "";
@@ -165,7 +321,7 @@ export default function (pi: ExtensionAPI) {
             planStr = theme.fg("warning", "PLAN");
           }
 
-          // ── Assemble with subtle separators ──
+          // ── Row 1: model, tokens, cost, context, meta ──
           const sep = theme.fg("dim", " · ");
           const sections: string[] = [modelBadge, tokenStr, costStr];
           if (modelCfg) sections.push(modelCfg);
@@ -174,9 +330,52 @@ export default function (pi: ExtensionAPI) {
           if (branchStr) sections.push(branchStr);
           if (planStr) sections.push(planStr);
 
-          const line = theme.fg("accent", "▌ ") + sections.join(sep);
+          const line1 = theme.fg("accent", "▌ ") + sections.join(sep);
 
-          return [truncateToWidth(line, width)];
+          // ── Row 2: model provider + per-token pricing ──
+          const provider = ctx.model?.provider ?? "?";
+          const providerBadge = theme.fg("accent", `◈ ${provider}`);
+          const mCost = ctx.model?.cost;
+          let pricingStr = "";
+          if (mCost) {
+            const priceIn = mCost.input === 0 ? "free" : "$" + mCost.input.toFixed(2) + "/M";
+            const priceOut = mCost.output === 0 ? "free" : "$" + mCost.output.toFixed(2) + "/M";
+            pricingStr = `${theme.fg("dim", `in ${priceIn}`)} ${theme.fg("text", `out ${priceOut}`)}`;
+            if (mCost.cacheRead) {
+              pricingStr += " " + theme.fg("success", "↺ $" + mCost.cacheRead.toFixed(2) + "/M");
+            }
+          }
+          // ── opencode-go usage — % of rolling $ limit (matches website) ──
+          // Only shown when the active provider is opencode-go; otherwise the
+          // rolling $ limits don't apply to the current account/model.
+          let usageStr = "";
+          if (provider === "opencode-go") {
+            const fallbackGo = opencodeGoUsage(Date.now()); // local $ sums (API offline)
+            const pctFor = (key: "h5" | "wk" | "mo"): number => {
+              if (goApiUsage && goApiUsage[key] >= 0) return goApiUsage[key];
+              const win = fallbackGo[key];
+              return win.goCost > 0 ? Math.min(100, (win.goCost / GO_LIMITS[key]) * 100) : 0;
+            };
+            const pctBox = (label: string, key: "h5" | "wk" | "mo") => {
+              const pct = pctFor(key);
+              const color = pct > 75 ? "error" : pct > 50 ? "warning" : "success";
+              const filled = Math.min(4, Math.round((pct / 100) * 4));
+              const bar = "█".repeat(filled) + "░".repeat(4 - filled);
+              return `${theme.fg("dim", label)} [${theme.fg(color, bar)} ${theme.fg(color, `${pct.toFixed(0)}%`)}]`;
+            };
+            usageStr = [
+              theme.fg("dim", "go"),
+              pctBox("5h", "h5"),
+              pctBox("wk", "wk"),
+              pctBox("mo", "mo"),
+            ].join("  ");
+          }
+
+          const line2 =
+            theme.fg("accent", "▌ ") +
+            [providerBadge, pricingStr, usageStr].filter(Boolean).join(` ${sep} `);
+
+          return [truncateToWidth(line1, width), truncateToWidth(line2, width)];
         },
       };
     });

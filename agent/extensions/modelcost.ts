@@ -67,7 +67,9 @@ class ModelCostSelector extends Container {
     super();
     this.tui = opts.tui;
     this.theme = opts.theme;
-    this.allModels = opts.models;
+    this.allModels = [...opts.models].sort(
+      (a, b) => a.cost.input + a.cost.output - (b.cost.input + b.cost.output),
+    );
     this.currentModel = opts.currentModel;
     this.onSelectCb = opts.onSelect;
     this.onCancelCb = opts.onCancel;
