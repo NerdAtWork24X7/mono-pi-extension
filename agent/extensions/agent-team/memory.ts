@@ -11,48 +11,62 @@ import { loadTeamsYaml, saveTeamsYaml, teamsYamlPath } from "./config";
 import { makeHandleEvent } from "./orchestration";
 import { piBin, trunc } from "./helpers";
 
-/** Tight system prompt for the memory updater subprocess. The LLM is the
- *  sole writer of the memory file; the host only observes that a write
- *  occurred via tool_execution_start events. */
+/** Persistent memory categories, each written to its own file under the
+ *  memory dir (replaces the former single project_memory.md). Stable names so
+ *  write-detection and the orchestrator prompt stay aligned. */
+export const MEMORY_CATEGORIES = [
+  { key: "folder_structure", file: "folder_structure.md", heading: "Folder Structure" },
+  { key: "architecture", file: "architecture.md", heading: "Architecture" },
+  { key: "design_decisions", file: "design_decisions.md", heading: "Design Decisions" },
+  { key: "facts", file: "facts.md", heading: "Facts" },
+  { key: "user_taste_preferences", file: "user_taste_preferences.md", heading: "User Taste & Preferences" },
+  { key: "user_suggestions", file: "user_suggestions.md", heading: "User Suggestions" },
+  { key: "failures_solutions", file: "failures_solutions.md", heading: "Failures & Solutions" },
+] as const;
 
-function buildMemorySystemPrompt(memoryFilePath: string): string {
-  return `You are a project memory consolidator. Analyze the latest conversation turn and update \`${memoryFilePath}\` with persistent project knowledge.
+/** Full paths of every per-category memory file under `memoryDir`. */
+export function memoryFilePaths(memoryDir: string): string[] {
+  return MEMORY_CATEGORIES.map((c) => join(memoryDir, c.file));
+}
+
+/** Memory files with their heading, for the orchestrator prompt and prompt-build. */
+export function memoryFiles(memoryDir: string): Array<{ path: string; heading: string }> {
+  return MEMORY_CATEGORIES.map((c) => ({ path: join(memoryDir, c.file), heading: c.heading }));
+}
+
+/** Tight system prompt for the memory updater subprocess. The LLM is the
+ *  sole writer of the per-category memory files; the host only observes that
+ *  a write occurred via tool_execution_start events. */
+
+function buildMemorySystemPrompt(memoryDir: string): string {
+  const files = memoryFiles(memoryDir)
+    .map((f) => `- \`${f.path}\` - **${f.heading}**`)
+    .join("\n");
+  return `You are a project memory consolidator. Analyze the latest conversation turn and update the project memory files under \`${memoryDir}\` with persistent project knowledge.
 
 ---
 
-# Project Memory File Structure
+# Project Memory Files (one per category)
 
-## Design Decisions
-Architectural, algorithmic, and structural choices. Update or replace superseded entries.
-
-## Facts
-Concrete technical facts (file:line references, configs, APIs, constraints). Correct when changed.
-
-## User Taste & Preferences
-Observed user preferences regarding coding style, library choices, tone, and formatting.
-
-## User Suggestions
-Explicit user ideas or backlog items requested for future consideration.
-
-## Failures & Solutions
-Notable errors, root causes encountered, and the exact fixes that resolved them.
+${files}
 
 ---
 
 # Rules (Strictly Enforced)
 - Capture ONLY project-specific, high-value facts; omit generic conversation.
-- Merge new information and prune obsolete/superseded bullet points.
+- Put each category in its own file above (folder layout -> Folder Structure, etc.); do not merge everything into one file.
+- Merge new information and prune obsolete/superseded bullet points in each file.
 - No timestamps, conversational preamble, code fences, or meta-commentary.
-- Do not create new top-level sections.
-- Keep total file length concise (under 500 words).
-- Write output directly to \`${memoryFilePath}\`.`;
+- Do not create new files or new top-level sections.
+- Keep each file concise (under 300 words).
+- Write output directly to the matching file(s); write at least one file when there is anything new.`;
 }
 
 
 /** Max idle time (no stdout line) before the memory subprocess is aborted. */
 const IDLE_TIMEOUT_MS = 60_000;
 
-/** After the memory file is detected written, give the LLM a short grace
+/** After a memory file is detected written, give the LLM a short grace
  *  period to finalize, then treat the run as complete. Without this the
  *  subprocess can write the file yet keep streaming (never emitting
  *  `agent_end`), leaving MemoryState stuck at "summarizing" and the in-TUI
@@ -93,10 +107,9 @@ export function extractLastAssistantText(messages: any[]): string {
  *  (session load) and the sidebar toggle so construction can't drift. */
 export function createMemoryManager(ctx: AgentTeamContext, model: string): MemoryManager {
   mkdirSync(ctx.memoryDir, { recursive: true });
-  ctx.memoryFile = join(ctx.memoryDir, "project_memory.md");
   return new MemoryManager({
     model,
-    memoryFile: ctx.memoryFile,
+    memoryDir: ctx.memoryDir,
     sessionDir: ctx.sessionDir,
     logger: ctx.logger,
     invalidate: () => ctx.invalidate(),
@@ -104,7 +117,7 @@ export function createMemoryManager(ctx: AgentTeamContext, model: string): Memor
     def: {
       name: "memory-summarizer",
       description: "Per-turn memory summarizer spawned alongside the orchestrator.",
-      tools: "read,write,custom_edit",
+      tools: "read,write,edit",
       systemPrompt: "",
       file: "",
     },
@@ -122,7 +135,6 @@ export function toggleMemory(ctx: AgentTeamContext): void {
     try { void ctx.memoryManager.awaitIdle(0); } catch { }
     ctx.memoryManager = null;
     ctx.memoryModel = "";
-    ctx.memoryFile = "";
   } else {
     // Enable — use preserved original model or read from teams.yaml
     const model = ctx.originalMemoryModel || loadTeamsYaml(teamsYamlPath()).memoryModel || "";
@@ -143,12 +155,15 @@ export function toggleMemory(ctx: AgentTeamContext): void {
 /**
  * Per-turn background memory updater. Owns a single `pi --mode rpc`
  * subprocess lifetime. The LLM uses the read/write/edit tools to maintain
- * the project memory file; the host only detects whether the file was
+ * the per-category memory files; the host only detects whether one was
  * written by observing tool_execution_start events.
  */
 export class MemoryManager {
   private model: string;
-  private memoryFile: string;
+  private memoryDir: string;
+  /** Absolute path of every per-category memory file (for write detection). */
+  private memoryFilePaths: string[];
+  private memoryFileSet: Set<string>;
   private sessionDir: string;
   private logger: SessionLogger;
   private invalidate: () => void;
@@ -176,7 +191,7 @@ export class MemoryManager {
 
   constructor(opts: {
     model: string;
-    memoryFile: string;
+    memoryDir: string;
     sessionDir: string;
     logger: SessionLogger;
     invalidate: () => void;
@@ -185,7 +200,9 @@ export class MemoryManager {
     handleEvent: (ap: AgentProc, line: string) => void;
   }) {
     this.model = opts.model;
-    this.memoryFile = opts.memoryFile;
+    this.memoryDir = opts.memoryDir;
+    this.memoryFilePaths = memoryFilePaths(this.memoryDir);
+    this.memoryFileSet = new Set(this.memoryFilePaths);
     this.sessionDir = opts.sessionDir;
     this.logger = opts.logger;
     this.invalidate = opts.invalidate;
@@ -344,7 +361,7 @@ export class MemoryManager {
 
   private writeSystemPromptFile() {
     this.currentSystemPromptFile = join(this.sessionDir, `memory-system-prompt-${Date.now()}.txt`);
-    writeFileSync(this.currentSystemPromptFile, buildMemorySystemPrompt(this.memoryFile));
+    writeFileSync(this.currentSystemPromptFile, buildMemorySystemPrompt(this.memoryDir));
   }
 
   private cleanupSessionFiles() {
@@ -361,12 +378,14 @@ export class MemoryManager {
   private runSubprocess(signal?: AbortSignal): Promise<{ wroteFile: boolean }> {
     this.writeSystemPromptFile();
 
-    // Snapshot the memory file's mtime so we can fall back to it
+    // Snapshot each memory file's mtime so we can fall back to it
     // when the LLM writes via a tool call we couldn't attribute
     // (e.g. relative path, symlink, or arg under a key we don't
     // recognise). File may not exist yet — treat as 0.
-    let preMtime = 0;
-    try { preMtime = statSync(this.memoryFile).mtimeMs; } catch { /* file may not exist yet */ }
+    const preMtimes = new Map<string, number>();
+    for (const p of this.memoryFilePaths) {
+      try { preMtimes.set(p, statSync(p).mtimeMs); } catch { /* file may not exist yet */ }
+    }
 
     // Split provider from model on first "/" (matches process.ts pattern)
     const { provider, model: modelName } = parseModelId(this.model);
@@ -406,12 +425,12 @@ export class MemoryManager {
     const bin = piBin();
 
     const mtimeAdvanced = () => {
-      try {
-        const post = statSync(this.memoryFile).mtimeMs;
-        return post > preMtime;
-      } catch {
-        return false;
+      for (const p of this.memoryFilePaths) {
+        try {
+          if (statSync(p).mtimeMs > (preMtimes.get(p) ?? 0)) return true;
+        } catch { /* file may not exist */ }
       }
+      return false;
     };
 
     return new Promise<{ wroteFile: boolean }>((resolve, reject) => {
@@ -478,7 +497,7 @@ export class MemoryManager {
               }
             }
           } else if (ev.type === "tool_execution_start") {
-            // Detect a write/edit targeting the memory file path. The
+            // Detect a write/edit targeting one of the memory file paths. The
             // built-in `write` tool accepts `path` or `file_path`;
             // `edit` uses `path`. Resolve against cwd so absolute and
             // relative paths both match.
@@ -490,9 +509,9 @@ export class MemoryManager {
                 ?? (toolArgs as any).file;
               if (typeof raw === "string" && raw.length > 0) {
                 const target = resolvePath(raw);
-                if (target === this.memoryFile) {
+                if (this.memoryFileSet.has(target)) {
                   fileWritten = true;
-                  // The LLM's only job is to update this file; once it has,
+                  // The LLM's only job is to update these files; once it has,
                   // the meaningful work is done. Let it finalize briefly,
                   // then complete the run so the log grid hides.
                   if (!settleTimer) {

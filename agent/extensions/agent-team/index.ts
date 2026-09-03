@@ -29,7 +29,7 @@ import { displayName, shortModel, SessionLogger, RwLock, filterSkills } from "./
 import { loadPersistedConfig, savePersistedConfig, scanAgents, loadTeamsYaml, discoverEnabledSkills, loadAgentMd, teamsYamlPath } from "./config";
 import { scanExtensionPaths } from "./extensions";
 import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchMany as dispatchManyImpl, dispatchAgentMany as dispatchAgentManyImpl } from "./orchestration";
-import { MemoryManager, createMemoryManager, extractLastAssistantText, installMemoryEscEditor } from "./memory";
+import { MemoryManager, createMemoryManager, extractLastAssistantText, installMemoryEscEditor, memoryFiles } from "./memory";
 import { buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl, closeSidebar } from "./ui";
 import { registerCustomReadTool, registerCustomWriteTool, registerCustomEditTool, registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
 import { fullModelId } from "./helpers";
@@ -96,7 +96,6 @@ export class AgentTeam implements AgentTeamContext {
   memoryModel = "";
   memoryActive = false;
   originalMemoryModel = ""; // preserved value for re-enabling after toggle off
-  memoryFile = "";
   memoryDir = "";
   memoryManager: MemoryManager | null = null;
 
@@ -268,7 +267,6 @@ export class AgentTeam implements AgentTeamContext {
 
     this.sessionDir = join(homedir(), ".pi", "agent-team-log", "agent-sessions");
     this.memoryDir = join(cwd, ".pi_memory");
-    this.memoryFile = "";
     mkdirSync(this.sessionDir, { recursive: true });
     void cleanupOldSessionFiles(this.sessionDir); // fire-and-forget async cleanup
 
@@ -433,7 +431,7 @@ export default function (pi: ExtensionAPI) {
       ctx: team,
       date: new Date().toISOString().split("T")[0],
       cwd: process.cwd(),
-      memory: team.memoryManager ? { file: team.memoryFile } : null,
+      memory: team.memoryManager ? { dir: team.memoryDir, files: memoryFiles(team.memoryDir) } : null,
       agentMd: team.agentMdCache,
       skills: filterSkills(team.skillsCache, team.orchestratorSkills),
       orchestratorTools: team.activeToolList(),

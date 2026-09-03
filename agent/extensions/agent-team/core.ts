@@ -133,7 +133,6 @@ export interface AgentTeamContext {
   gridCols: number;
   memoryManager: any; // MemoryManager | null (typed in memory.ts; elided here to avoid circular import)
   memoryModel: string;
-  memoryFile: string;
   memoryDir: string;
   originalMemoryModel: string; // preserved value for re-enabling after toggle off
   memoryActive: boolean; // persisted on/off switch from teams.yaml memory_model.active

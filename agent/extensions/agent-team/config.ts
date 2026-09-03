@@ -324,8 +324,8 @@ export function saveTeamsYaml(filePath: string, data: ParsedTeams): void {
   lines.push("#   memory_model:");
   lines.push("#       model: <provider>/<model>  - summarizer model; memory runs only when active: true.");
   lines.push("#       active: true|false         - persistent on/off switch (must be true to run; sidebar toggle).");
-  lines.push("#       A background subprocess summarizes each orchestrator turn and appends");
-  lines.push("#       the result to <cwd>/.pi_memory/project_memory.md.");
+  lines.push("#       A background subprocess summarizes each orchestrator turn and writes");
+  lines.push("#       per-category files under <cwd>/.pi_memory/.");
   lines.push("");
   if (data.memoryModel) {
     lines.push("memory_model:");

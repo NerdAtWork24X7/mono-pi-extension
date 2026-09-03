@@ -13,8 +13,8 @@
 #   memory_model:
 #       model: <provider>/<model>  - summarizer model; memory runs only when active: true.
 #       active: true|false         - persistent on/off switch (must be true to run; sidebar toggle).
-#       A background subprocess summarizes each orchestrator turn and appends
-#       the result to <cwd>/.pi_memory/project_memory.md.
+#       A background subprocess summarizes each orchestrator turn and writes
+#       per-category files under <cwd>/.pi_memory/.
 
 memory_model:
   model: xiaomi-token-plan-ams/mimo-v2.5
