@@ -463,6 +463,26 @@ function resolveScopeSync(
   return scoped;
 }
 
+/** Persist `defaultProvider`/`defaultModel` to the global settings file so a
+ *  model selected in the selector survives an app restart. pi-core only
+ *  updates these on the explicit "set as default" (Ctrl+S) action inside its
+ *  own /model selector; the /modelcost selector has no equivalent action, so
+ *  we write them directly (read-modify-write to preserve all other keys). */
+function persistDefaultModelAndProvider(model: Model<any>): void {
+  const settingsPath = join(getAgentDir(), "settings.json");
+  try {
+    let settings: any = {};
+    if (existsSync(settingsPath)) {
+      try {
+        settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+      } catch { /* ignore */ }
+    }
+    settings.defaultProvider = model.provider;
+    settings.defaultModel = model.id;
+    writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + "\n");
+  } catch { /* non-fatal */ }
+}
+
 export default function (pi: ExtensionAPI) {
   pi.registerCommand("modelcost", {
     description: "Select model with input/output token cost ($/M)",
@@ -490,7 +510,10 @@ export default function (pi: ExtensionAPI) {
       }
       if (directMatch) {
         const ok = await pi.setModel(directMatch);
-        if (ok) ctx.ui.notify(`Model: ${directMatch.id}`, "info");
+        if (ok) {
+          persistDefaultModelAndProvider(directMatch);
+          ctx.ui.notify(`Default model: ${directMatch.provider}/${directMatch.id}`, "info");
+        }
         return;
       }
 
@@ -607,7 +630,10 @@ export default function (pi: ExtensionAPI) {
         });
       });      if (selected) {
         const ok = await pi.setModel(selected);
-        if (ok) ctx.ui.notify(`Model: ${selected.id}`, "info");
+        if (ok) {
+          persistDefaultModelAndProvider(selected);
+          ctx.ui.notify(`Default model: ${selected.provider}/${selected.id}`, "info");
+        }
       }
     },
   });

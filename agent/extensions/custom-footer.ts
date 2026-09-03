@@ -22,7 +22,13 @@ type PlanEntry = {
 
 type GoUsageWindow = { goCost: number }; // $ of opencode-go usage in the window
 type GoUsage = { h5: GoUsageWindow; wk: GoUsageWindow; mo: GoUsageWindow };
-type GoUsagePct = { h5: number; wk: number; mo: number };
+// Values from the live /zen/go/v1/usage endpoint: percent of the rolling
+// $ limit and seconds until that window resets (rolling/weekly/monthly).
+type GoUsageApi = {
+  h5: { pct: number; resetSec: number };
+  wk: { pct: number; resetSec: number };
+  mo: { pct: number; resetSec: number };
+};
 
 // opencode.go dashboard metric: $ consumed / $ rolling-window limit
 // ($12 / 5h, $30 / week, $60 / month). The website percentage is dollar-based,
@@ -43,6 +49,37 @@ export default function (pi: ExtensionAPI) {
     const h = Math.floor(m / 60);
     const rm = m % 60;
     return `${h}h${rm > 0 ? rm + "m" : ""}`;
+  }
+
+  // Format a seconds-until-reset countdown as days/hours/minutes.
+  function formatReset(sec: number): string {
+    const s = Math.max(0, Math.floor(sec));
+    const d = Math.floor(s / 86400);
+    const h = Math.floor((s % 86400) / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    if (d > 0) return h > 0 ? `${d}d${h}h` : `${d}d`;
+    if (h > 0) return m > 0 ? `${h}h${m}m` : `${h}h`;
+    if (m > 0) return `${m}m`;
+    return `${s}s`;
+  }
+
+  // Seconds until a usage window resets, from the live /zen/go/v1/usage
+  // response. The endpoint returns the reset as an ISO timestamp
+  // (`resetsAt`), not seconds-until-reset; accept either form across API
+  // variants — an ISO/date string (`resetsAt`/`resetAt`) or a numeric
+  // seconds-until-reset (`resetInSec`/`resetSec`/`resetsIn`/`secondsUntilReset`).
+  // Returns -1 when no reset boundary is known (e.g. a rolling window whose
+  // boundary the endpoint does not report) so the countdown is omitted.
+  function resetSeconds(window: GoUsageApi["h5"] | Record<string, unknown> | null | undefined): number {
+    const w = (window ?? {}) as Record<string, unknown>;
+    const dump = w.resetsAt ?? w.resetAt;
+    if (typeof dump === "string") {
+      const t = Date.parse(dump);
+      if (!Number.isNaN(t)) return Math.max(0, Math.floor((t - Date.now()) / 1000));
+    }
+    const raw = w.resetInSec ?? w.resetSec ?? w.resetsIn ?? w.secondsUntilReset;
+    const n = Number(raw);
+    return Number.isFinite(n) && n >= 0 ? Math.floor(n) : -1;
   }
 
   function fmt(n: number): string {
@@ -111,7 +148,7 @@ export default function (pi: ExtensionAPI) {
       // session files (files untouched for >30 days contribute 0 and are
       // skipped outright).
       const goUsageCache = new Map<string, { mtimeMs: number } & GoUsage>();
-      let goApiUsage: GoUsagePct | null = null; // values from the live endpoint
+      let goApiUsage: GoUsageApi | null = null; // values from the live endpoint
       let goApiFetchedAt = 0;
       let goApiKey: string | undefined;
 
@@ -135,9 +172,9 @@ export default function (pi: ExtensionAPI) {
           const u = data?.usage;
           if (u) {
             goApiUsage = {
-              h5: Number(u.rolling?.percent ?? -1),
-              wk: Number(u.weekly?.percent ?? -1),
-              mo: Number(u.monthly?.percent ?? -1),
+              h5: { pct: Number(u.rolling?.percent ?? -1), resetSec: resetSeconds(u.rolling) },
+              wk: { pct: Number(u.weekly?.percent ?? -1), resetSec: resetSeconds(u.weekly) },
+              mo: { pct: Number(u.monthly?.percent ?? -1), resetSec: resetSeconds(u.monthly) },
             };
             tui.requestRender();
           }
@@ -352,16 +389,24 @@ export default function (pi: ExtensionAPI) {
           if (provider === "opencode-go") {
             const fallbackGo = opencodeGoUsage(Date.now()); // local $ sums (API offline)
             const pctFor = (key: "h5" | "wk" | "mo"): number => {
-              if (goApiUsage && goApiUsage[key] >= 0) return goApiUsage[key];
+              if (goApiUsage && goApiUsage[key].pct >= 0) return goApiUsage[key].pct;
               const win = fallbackGo[key];
               return win.goCost > 0 ? Math.min(100, (win.goCost / GO_LIMITS[key]) * 100) : 0;
+            };
+            // Seconds until the window resets, from the live endpoint. The
+            // local fallback computes *rolling* $ sums with no discrete reset
+            // boundary, so it reports -1 and the countdown is omitted there.
+            const resetFor = (key: "h5" | "wk" | "mo"): number => {
+              return goApiUsage ? goApiUsage[key].resetSec : -1;
             };
             const pctBox = (label: string, key: "h5" | "wk" | "mo") => {
               const pct = pctFor(key);
               const color = pct > 75 ? "error" : pct > 50 ? "warning" : "success";
               const filled = Math.min(4, Math.round((pct / 100) * 4));
               const bar = "█".repeat(filled) + "░".repeat(4 - filled);
-              return `${theme.fg("dim", label)} [${theme.fg(color, bar)} ${theme.fg(color, `${pct.toFixed(0)}%`)}]`;
+              const reset = resetFor(key);
+              const resetStr = reset >= 0 ? " " + theme.fg("dim", "" + formatReset(reset)) : "";
+              return `${theme.fg("dim", label)} [${theme.fg(color, bar)} ${theme.fg(color, `${pct.toFixed(0)}%`)}]${resetStr}`;
             };
             usageStr = [
               theme.fg("dim", "go"),
