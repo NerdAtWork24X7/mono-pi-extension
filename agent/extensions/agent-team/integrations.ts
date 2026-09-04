@@ -247,7 +247,7 @@ export function registerCustomReadTool(pi: ExtensionAPI) {
     }),
     async execute(_id, params) {
       const input = params as Record<string, unknown>;
-      const filePath = typeof input.path === "string" ? input.path : input.file;
+      const filePath = firstStringArg(input, "path", "file");
       if (typeof filePath !== "string" || !filePath) {
         throw new Error("custom_read requires `path` or `file`.");
       }
@@ -347,12 +347,8 @@ export function registerCustomWriteTool(pi: ExtensionAPI) {
     }),
     async execute(_id, params) {
       const input = params as Record<string, unknown>;
-      const filePath = typeof input.path === "string" ? input.path : input.file;
-      const content = typeof input.content === "string"
-        ? input.content
-        : typeof input.text === "string"
-          ? input.text
-          : input.data;
+      const filePath = firstStringArg(input, "path", "file");
+      const content = firstStringArg(input, "content", "text", "data");
       if (typeof filePath !== "string" || !filePath || typeof content !== "string") {
         throw new Error("custom_write requires path and content (aliases file/text/data accepted).");
       }
@@ -425,9 +421,9 @@ export function registerCustomEditTool(pi: ExtensionAPI) {
     }),
     async execute(_id, params) {
       const input = params as Record<string, unknown>;
-      const filePath = typeof input.path === "string" ? input.path : input.file;
-      const oldText = typeof input.oldString === "string" ? input.oldString : typeof input.old_string === "string" ? input.old_string : typeof input.old_text === "string" ? input.old_text : input.search;
-      const newText = typeof input.newString === "string" ? input.newString : typeof input.new_string === "string" ? input.new_string : typeof input.new_text === "string" ? input.new_text : input.replace;
+      const filePath = firstStringArg(input, "path", "file");
+      const oldText = firstStringArg(input, "oldString", "old_string", "old_text", "search");
+      const newText = firstStringArg(input, "newString", "new_string", "new_text", "replace");
       if (typeof filePath !== "string" || typeof oldText !== "string" || typeof newText !== "string") {
         throw new Error("custom_edit requires path, oldString, and newString (aliases accepted).");
       }
@@ -505,6 +501,33 @@ export function registerCustomEditTool(pi: ExtensionAPI) {
   });
 }
 
+/** First present string among a tool input's alias keys (deepseek-style
+ *  `path`/`file`, `content`/`text`/`data`, …). Returns undefined when none
+ *  of the aliases is a string — callers reject with their own message. */
+function firstStringArg(input: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const k of keys) {
+    const v = input[k];
+    if (typeof v === "string") return v;
+  }
+  return undefined;
+}
+
+/** Shared "✓/✗ label - N task(s), F failed (Xs)" summary line used by both
+ *  dispatch tools' batch renderResults, so the wording can't drift apart.
+ *  `withElapsed` appends the aggregate elapsed seconds (dispatch_agent only —
+ *  dispatch_agents carries no aggregate elapsed in its details). */
+function batchSummary(d: any, label: string, withElapsed: boolean): [string, string] {
+  const results: any[] = d.results ?? [];
+  const n = results.length;
+  const fails = results.filter(r => r.code !== 0).length;
+  const ok = d.status === "done" && fails === 0;
+  const elapsed = withElapsed && typeof d.elapsed === "number" ? ` (${Math.round(d.elapsed / 1000)}s)` : "";
+  return [ok ? "success" : "error", `${ok ? "✓" : "✗"} ${label} - ${n} task(s)${fails ? `, ${fails} failed` : ""}${elapsed}`];
+}
+
+/** Standard result returned when a dispatch tool runs while the team is off. */
+const TEAM_DISABLED_RESULT = { content: [{ type: "text" as const, text: "Agent team is disabled. /agents-team-toggle on" }], details: {} };
+
 /** Truncate a subagent output to the tool-result cap (keeps the tail). */
 function capOutput(out: string): string {
   return out.length > MAX_RESPONSE_LENGTH ? out.slice(-MAX_RESPONSE_LENGTH) : out;
@@ -564,10 +587,7 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
 
     async execute(_id, params, signal, onUpdate, _ctx) {
       const { agent, task, tasks } = params as { agent: string; task?: string; tasks?: string[] };
-      if (!team.enabled) return {
-        content: [{ type: "text", text: "Agent team is disabled. /agents-team-toggle on" }],
-        details: {},
-      };
+      if (!team.enabled) return TEAM_DISABLED_RESULT;
 
       const multi = Array.isArray(tasks) && tasks.length > 0;
       const single = typeof task === "string" && task.trim().length > 0;
@@ -628,11 +648,7 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
           : { text: "", anyFail: aggregate.results.some(r => r.code !== 0) };
         const anyFail = batch.anyFail;
 
-        const finalOutput = multi ? batch.text : (() => {
-          let o = aggregate.results[0].output;
-          if (o.length > MAX_RESPONSE_LENGTH) o = `... [truncated to last ${MAX_RESPONSE_LENGTH} chars]\n` + o.slice(-MAX_RESPONSE_LENGTH);
-          return o;
-        })();
+        const finalOutput = multi ? batch.text : capOutput(aggregate.results[0].output);
 
         const totalElapsed = aggregate.results.reduce((s, r) => s + r.elapsed, 0);
         const status = anyFail ? "error" : "done";
@@ -683,11 +699,8 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
       }
 
       if (d.multi && d.results) {
-        const n = d.results.length;
-        const fails = d.results.filter((r: any) => r.code !== 0).length;
-        const ok = d.status === "done" && fails === 0;
-        const elapsed = typeof d.elapsed === "number" ? Math.round(d.elapsed / 1000) : 0;
-        const header = theme.fg(ok ? "success" : "error", `${ok ? "✓" : "✗"} ${tag} - ${n} task(s)${fails ? `, ${fails} failed` : ""} (${elapsed}s)`);
+        const [sumColor, sumText] = batchSummary(d, `${tag} -`, true);
+        const header = theme.fg(sumColor as any, sumText);
         if (options.expanded && d.fullOutput) {
           return new Text(header + "\n" + theme.fg("muted", d.fullOutput), 0, 0);
         }
@@ -730,7 +743,7 @@ export function registerDispatchAgentsTool(pi: ExtensionAPI, team: AgentTeamCont
     async execute(_id, params, signal, onUpdate, _ctx) {
       const { tasks } = params as { tasks: Array<{ agent: string; task: string }> };
       if (!team.enabled) {
-        return { content: [{ type: "text", text: "Agent team is disabled. /agents-team-toggle on" }], details: {} };
+        return TEAM_DISABLED_RESULT;
       }
       if (!team.parallelDispatch) {
         return {
@@ -788,13 +801,8 @@ export function registerDispatchAgentsTool(pi: ExtensionAPI, team: AgentTeamCont
       if (options.isPartial || d.status === "dispatching") {
         return new Text(theme.fg("accent", `dispatch_agents - working...`), 0, 0);
       }
-      const n = d.results?.length ?? 0;
-      const fails = d.results?.filter((r: any) => r.code !== 0).length ?? 0;
-      const ok = d.status === "done" && fails === 0;
-      return new Text(
-        theme.fg(ok ? "success" : "error", `${ok ? "✓" : "✗"} dispatch_agents - ${n} task(s)${fails ? `, ${fails} failed` : ""}`),
-        0, 0,
-      );
+      const [sumColor, sumText] = batchSummary(d, "dispatch_agents -", false);
+      return new Text(theme.fg(sumColor as any, sumText), 0, 0);
     },
   });
 }

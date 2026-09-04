@@ -8,9 +8,9 @@ import * as os from "node:os";
 // ━━ Truncation constants & helper ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // These were previously (erroneously) imported from "./pi-scope.ts" — a
 // self-import that resolves to `undefined` at runtime. They live here instead.
-const MAX_TEXT_FIELD = 16 * 1024;   // 16 KiB cap for free-text fields
-const MAX_ARGS_BYTES = 4 * 1024;    // 4 KiB cap per tool-call argument
-const MAX_RESULT_BYTES = 16 * 1024; // 16 KiB cap for tool-result text
+const MAX_TEXT_FIELD = 1024 * 1024;   // 1 MB cap for free-text fields
+const MAX_ARGS_BYTES = 16 * 1024;    // 16 KiB cap per tool-call argument
+const MAX_RESULT_BYTES = 1024 * 1024; // 1 MB cap for tool-result text
 
 interface TruncateResult {
   text: string;

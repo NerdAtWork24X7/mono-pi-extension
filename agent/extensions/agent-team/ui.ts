@@ -2,7 +2,7 @@
 
 import { Text } from "@mariozechner/pi-tui";
 import type { AgentProc, AgentTeamContext } from "./core";
-import { displayName, fmtTok, shortModel } from "./core";
+import { agentNameKey, displayName, fmtTok, shortModel } from "./core";
 import { boxBorder, cardTitleLine, padToVis, statusDisplay, trunc, visLen } from "./helpers";
 
 // The sidebar overlay lives in ./sidebar — re-exported here so existing
@@ -17,21 +17,6 @@ export function isWorking(ap: AgentProc): boolean {
 
 
 // ── System prompt builder ──
-
-export function buildCatalog(ctx: AgentTeamContext): string {
-  if (!ctx.catalogDirty && ctx.catalogCache) return ctx.catalogCache;
-  ctx.catalogCache = Array.from(ctx.procs.values())
-    .filter(a => !ctx.disabledAgents.has(a.def.name.toLowerCase()))
-    .map(a => {
-      const skillsLabel = a.def.skills
-        ? `**Skills:** ${a.def.skills.join(", ") || "none"}`
-        : ``;
-      return `### ${a.def.name}\n ${a.def.description}\n**Tools:** ${a.def.tools}\n${skillsLabel}`;
-    })
-    .join("\n\n");
-  ctx.catalogDirty = false;
-  return ctx.catalogCache;
-}
 
 export function buildSystemPrompt(args: {
   ctx: AgentTeamContext;
@@ -51,7 +36,7 @@ export function buildSystemPrompt(args: {
 
   const ctx = args.ctx;
 
-  const enabled = Array.from(ctx.procs.values()).filter(a => !ctx.disabledAgents.has(a.def.name.toLowerCase()));
+  const enabled = Array.from(ctx.procs.values()).filter(a => !ctx.disabledAgents.has(agentNameKey(a.def.name)));
 
   const dispatchMode = (tools: string): string =>
     tools.split(",").map(t => t.trim().toLowerCase()).filter(Boolean)
@@ -63,7 +48,7 @@ export function buildSystemPrompt(args: {
   // Each role is checked individually against the live enabled set; when a
   // role's subagent is absent or disabled, the orchestrator performs the task.
   const findEnabled = (role: string): string | null =>
-    enabled.find(a => a.def.name.toLowerCase() === role.toLowerCase())?.def.name ?? null;
+    enabled.find(a => agentNameKey(a.def.name) === agentNameKey(role))?.def.name ?? null;
   const tick = (n: string) => "`" + n + "`";
 
   const searcher = findEnabled("searcher");
@@ -264,7 +249,7 @@ export function initWidget(ctx: AgentTeamContext) {
       render(width: number): string[] {
         const hasMemory = !!ctx.memoryManager;
         const activeClones = [...ctx.batchClones].filter(isWorking);
-        const visibleProcs = [...ctx.procs.values()].filter(ap => !ctx.disabledAgents.has(ap.def.name.toLowerCase()));
+        const visibleProcs = [...ctx.procs.values()].filter(ap => !ctx.disabledAgents.has(agentNameKey(ap.def.name)));
         const totalCount = visibleProcs.length + activeClones.length;
         // Memory runs on its own subprocess, independent of the agent-team
         // toggle and of whether any subagents are loaded. Count it as a slot
@@ -366,11 +351,11 @@ function orderedLogLines(ap: AgentProc): string[] {
  *  is one agent (team member + active parallel clone + memory), its lines pulled
  *  from that agent's in-memory ring buffer. The grid scales: more swapped agents
  *  → more columns, laid out across `gridCols`. */
-export function renderLogGrid(ctx: AgentTeamContext, innerW: number, theme: any): string[] {
+function renderLogGrid(ctx: AgentTeamContext, innerW: number, theme: any): string[] {
   const slots: Array<{ label: string; lines: string[]; accent: boolean }> = [];
   for (const ap of ctx.procs.values()) {
     if (!isWorking(ap)) continue;
-    if (ctx.disabledAgents.has(ap.def.name.toLowerCase())) continue;
+    if (ctx.disabledAgents.has(agentNameKey(ap.def.name))) continue;
     slots.push({ label: displayName(ap.def.name), lines: orderedLogLines(ap), accent: true });
   }
   for (const ap of ctx.batchClones) {
@@ -428,7 +413,7 @@ export function invalidate(ctx: AgentTeamContext) {
 // ── Card rendering (modern compact — thin accent bar, pill-like stats) ──
 
 /** 1–2 line agent card: accent bar + icon + name + time, optional stats row. */
-export function renderCard(_ctx: AgentTeamContext, ap: AgentProc, w: number, theme: any, labelOverride?: string): string[] {
+function renderCard(_ctx: AgentTeamContext, ap: AgentProc, w: number, theme: any, labelOverride?: string): string[] {
   const { color: statusColor, icon: statusIcon } = statusDisplay(ap.status);
   const timeStr = ["running", "starting", "done"].includes(ap.status)
     ? `${Math.round(ap.elapsed / 1000)}s` : "";
@@ -485,7 +470,7 @@ function formatAgo(ms: number): string {
   return `${Math.floor(s / 86400)}d`;
 }
 
-export function renderMemoryCard(ctx: AgentTeamContext, w: number, theme: any): string[] {
+function renderMemoryCard(ctx: AgentTeamContext, w: number, theme: any): string[] {
   const mm = ctx.memoryManager;
   if (!mm) return [theme.fg("dim", "·".repeat(w))];
 

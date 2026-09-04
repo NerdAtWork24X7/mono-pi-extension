@@ -38,6 +38,13 @@ import { homedir } from "os";
 /** Remove session files older than 24 hours to prevent unbounded disk growth
  *  when the CLI exits abruptly and leaves orphaned files behind.
  *  Uses async I/O to avoid blocking the event loop. */
+/** All tool names except the dispatch tools — the active-tool set restored
+ *  whenever the agent team is disabled. Shared by disableAgentTeam and the
+ *  disabled session_start path so the exclusion list can't drift apart. */
+function nonDispatchTools(pi: ExtensionAPI): string[] {
+  return pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent" && n !== "dispatch_agents");
+}
+
 async function cleanupOldSessionFiles(sessionDir: string) {
   const CUTOFF_MS = 24 * 60 * 60 * 1000;
   try {
@@ -65,8 +72,6 @@ export class AgentTeam implements AgentTeamContext {
   wCtx: any = null;
   wInvalidate: (() => void) | null = null;
   sessionDir = "";
-  catalogCache = "";
-  catalogDirty = true;
   skillsCache: Array<{ name: string; description: string; dir: string }> = [];
   agentMdCache: string | null = null;
   enabled = true;
@@ -251,7 +256,8 @@ export class AgentTeam implements AgentTeamContext {
     });
   }
 
-  /** Active tool allowlist. Includes dispatch_agents when parallel dispatch is on. */
+  /** Active tool allowlist. When parallel dispatch is on, only dispatch_agents is available;
+   *  when off, only dispatch_agent is available (mutually exclusive). */
   activeToolList(): string[] {
     const all = this.pi.getAllTools().map(t => t.name);
     // Start from full PI tool set, remove internal routing tools
@@ -261,8 +267,13 @@ export class AgentTeam implements AgentTeamContext {
       const block = new Set(this.skipOrchestratorTools.map(t => t.toLowerCase()));
       base = base.filter(n => !block.has(n.toLowerCase()));
     }
-    if (this.parallelDispatch) base.unshift("dispatch_agents");
-    base.unshift("dispatch_agent");
+    if (this.parallelDispatch) {
+      // Parallel ON: dispatch_agents only, dispatch_agent disabled
+      base.unshift("dispatch_agents");
+    } else {
+      // Parallel OFF: dispatch_agent only, dispatch_agents disabled
+      base.unshift("dispatch_agent");
+    }
     return base;
   }
 
@@ -338,8 +349,7 @@ export class AgentTeam implements AgentTeamContext {
     await this.killAll();
     this.wCtx = ctx;
     // Restore all tools EXCEPT dispatch_agent / dispatch_agents
-    const allNames = this.pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent" && n !== "dispatch_agents");
-    this.pi.setActiveTools(allNames);
+    this.pi.setActiveTools(nonDispatchTools(this.pi));
     this.invalidate();
     setAgentTeamHeader(ctx, false, false);
   }
@@ -482,9 +492,8 @@ export default function (pi: ExtensionAPI) {
     team.initWidget();
 
     if (!team.enabled) {
-      // Ensure dispatch_agent is NOT in active tools when disabled
-      const allNames = pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent");
-      pi.setActiveTools(allNames);
+      // Ensure the dispatch tools are NOT in active tools when disabled
+      pi.setActiveTools(nonDispatchTools(pi));
       setAgentTeamHeader(_ctx, false);
       _ctx.ui.notify(
         "Agent team is disabled. Use /agents-team-toggle on to enable.",

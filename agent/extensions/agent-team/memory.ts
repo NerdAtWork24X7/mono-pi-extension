@@ -1,13 +1,13 @@
-import { existsSync, mkdirSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { mkdirSync, statSync, writeFileSync } from "fs";
 import { join, resolve as resolvePath } from "path";
 import { CustomEditor } from "@mariozechner/pi-coding-agent";
 import { matchesKey, Key } from "@mariozechner/pi-tui";
 import type { SessionLogger } from "./core";
 import type { AgentDef, AgentProc, AgentTeamContext, MemoryState } from "./core";
-import { blankProcState, parseModelId } from "./core";
+import { blankProcState, parseModelId, safeUnlink } from "./core";
 import { spawnRpcSubprocess, type RpcSubprocess } from "./core";
 import { buildExtensionCliArgs, buildScopeNameArgs } from "./extensions";
-import { loadTeamsYaml, saveTeamsYaml, teamsYamlPath } from "./config";
+import { updateTeamsYaml, loadTeamsYaml, teamsYamlPath } from "./config";
 import { makeHandleEvent } from "./orchestration";
 import { piBin, trunc } from "./helpers";
 
@@ -144,11 +144,10 @@ export function toggleMemory(ctx: AgentTeamContext): void {
       ctx.memoryManager = createMemoryManager(ctx, model);
     }
   }
-  const parsed = loadTeamsYaml(teamsYamlPath());
-  parsed.memoryModel = ctx.memoryModel || ctx.originalMemoryModel || undefined;
-  parsed.memoryActive = !!ctx.memoryManager;
-  saveTeamsYaml(teamsYamlPath(), parsed);
-  ctx.catalogDirty = true;
+  updateTeamsYaml(p => {
+    p.memoryModel = ctx.memoryModel || ctx.originalMemoryModel || undefined;
+    p.memoryActive = !!ctx.memoryManager;
+  });
   ctx.invalidate();
 }
 
@@ -365,12 +364,8 @@ export class MemoryManager {
   }
 
   private cleanupSessionFiles() {
-    if (this.currentSessionFile && existsSync(this.currentSessionFile)) {
-      try { unlinkSync(this.currentSessionFile); } catch { }
-    }
-    if (this.currentSystemPromptFile && existsSync(this.currentSystemPromptFile)) {
-      try { unlinkSync(this.currentSystemPromptFile); } catch { }
-    }
+    safeUnlink(this.currentSessionFile);
+    safeUnlink(this.currentSystemPromptFile);
     this.currentSessionFile = "";
     this.currentSystemPromptFile = "";
   }

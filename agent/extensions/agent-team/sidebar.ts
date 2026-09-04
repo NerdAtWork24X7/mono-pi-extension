@@ -7,9 +7,9 @@
 // handleInput stay compact declarative dispatchers.
 
 import { matchesKey, Key } from "@mariozechner/pi-tui";
-import type { AgentProc, AgentTeamContext } from "./core";
-import { displayName, shortModel } from "./core";
-import { saveTeamsYaml, loadTeamsYaml, discoverAllSkills, teamsYamlPath, type Skill } from "./config";
+import type { AgentProc, AgentTeamContext, TeamMember } from "./core";
+import { agentNameKey, displayName, shortModel } from "./core";
+import { updateTeamsYaml, discoverAllSkills, type Skill } from "./config";
 import { installMemoryEscEditor, removeMemoryEscEditor, toggleMemory } from "./memory";
 import { boxBorder, sidebarRow, statusDisplay } from "./helpers";
 
@@ -50,24 +50,17 @@ export function closeSidebar(ctx?: AgentTeamContext) {
 
 // ── Toggle actions (handleInput delegates here) ──
 
-/** Persist the `active` flag for a specific agent in the current team to teams.yaml */
+/** Persist the `active` flag for a specific agent in the current team to
+ *  teams.yaml, mirroring it into the in-memory teams data. */
 function persistAgentActive(ctx: AgentTeamContext, agentName: string, active: boolean) {
-  const tp = teamsYamlPath();
-  const parsed = loadTeamsYaml(tp);
-  const teamMembers = parsed.teams[ctx.activeTeam];
-  if (teamMembers) {
-    const member = teamMembers.find(m => m.name.toLowerCase() === agentName.toLowerCase());
-    if (member) {
-      member.active = active;
-    }
-  }
-  // Also update the in-memory teams data
-  const memMembers = ctx.teams[ctx.activeTeam];
-  if (memMembers) {
-    const mem = memMembers.find(m => m.name.toLowerCase() === agentName.toLowerCase());
-    if (mem) mem.active = active;
-  }
-  saveTeamsYaml(tp, parsed);
+  const key = agentNameKey(agentName);
+  const findByKey = (members: TeamMember[] | undefined) => members?.find(m => agentNameKey(m.name) === key);
+  updateTeamsYaml(p => {
+    const member = findByKey(p.teams[ctx.activeTeam]);
+    if (member) member.active = active;
+  });
+  const mem = findByKey(ctx.teams[ctx.activeTeam]);
+  if (mem) mem.active = active;
 }
 
 /** Toggle a skill in an enable-set (empty set = none enabled), then persist. */
@@ -77,14 +70,13 @@ function toggleSkill(ctx: AgentTeamContext, set: Set<string>, sk: Skill) {
   } else {
     set.add(sk.dir);
   }
-  ctx.catalogDirty = true;
   ctx.persist();
 }
 
 /** Enable/disable an agent from the sidebar: updates the disabled set, kills
  *  a running proc when disabling, and persists `active:` to teams.yaml. */
 function setAgentDisabled(ctx: AgentTeamContext, ap: AgentProc, disabled: boolean) {
-  const key = ap.def.name.toLowerCase();
+  const key = agentNameKey(ap.def.name);
   if (disabled) {
     // Kill if running
     if (ap.status === "running" || ap.status === "starting") {
@@ -97,7 +89,6 @@ function setAgentDisabled(ctx: AgentTeamContext, ap: AgentProc, disabled: boolea
     ctx.disabledAgents.delete(key);
   }
   persistAgentActive(ctx, ap.def.name, !disabled);
-  ctx.catalogDirty = true;
   ctx.persist();
   ctx.invalidate();
 }
@@ -199,7 +190,7 @@ export function openSidebar(ctx: AgentTeamContext) {
             for (let i = 0; i < allAgents.length; i++) {
               const ap = allAgents[i];
               const sel = section === "sub" && i === subIdx;
-              const isDisabled = ctx.disabledAgents.has(ap.def.name.toLowerCase());
+              const isDisabled = ctx.disabledAgents.has(agentNameKey(ap.def.name));
               const icon = isDisabled ? "◌" : statusDisplay(ap.status).icon;
               const model = shortModel(ap.model);
               lines.push(sidebarRow(theme, w, [{
@@ -281,7 +272,7 @@ export function openSidebar(ctx: AgentTeamContext) {
             } else if (subIdx >= 0 && subIdx < allAgents.length) {
               // Toggle agent enabled/disabled
               const ap = allAgents[subIdx];
-              setAgentDisabled(ctx, ap, !ctx.disabledAgents.has(ap.def.name.toLowerCase()));
+              setAgentDisabled(ctx, ap, !ctx.disabledAgents.has(agentNameKey(ap.def.name)));
               tui.requestRender();
             } else {
               // Toggle subagent skill

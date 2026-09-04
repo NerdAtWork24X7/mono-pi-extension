@@ -10,10 +10,24 @@ export interface ParsedTeams {
   memoryActive?: boolean;
 }
 
+/** Strip UTF-8 BOM and normalize CRLF/CR to LF so the line-based parsing
+ *  below matches cleanly across platforms. */
+function normalize(raw: string): string {
+  return raw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+}
+
+/** Parse a frontmatter block into a flat key→value map (last wins). */
+function frontmatterKV(block: string): Record<string, string> {
+  const fm: Record<string, string> = {};
+  for (const line of block.split("\n")) {
+    const i = line.indexOf(":");
+    if (i > 0) fm[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  }
+  return fm;
+}
+
 export function parseTeamsYaml(raw: string): ParsedTeams {
-  // Normalize Windows line endings (CRLF), stray CR, and UTF-8 BOM so the
-  // line-based regexes below match cleanly across platforms.
-  raw = raw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
+  raw = normalize(raw);
   const teams: Record<string, TeamMember[]> = {};
   let memoryModel: string | undefined;
   let memoryActive: boolean | undefined;
@@ -79,14 +93,10 @@ export function parseTeamsYaml(raw: string): ParsedTeams {
 export function parseAgentFile(fp: string): AgentDef | null {
   try {
     let raw = readFileSync(fp, "utf-8");
-    raw = raw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n"); // Normalize BOM and Windows line endings
+    raw = normalize(raw);
     const m = raw.match(/^---\s*\n([\s\S]*?)\n---\s*\n?([\s\S]*)$/);
     if (!m) return null;
-    const fm: Record<string, string> = {};
-    for (const line of m[1].split("\n")) {
-      const i = line.indexOf(":");
-      if (i > 0) fm[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-    }
+    const fm = frontmatterKV(m[1]);
     if (!fm.name) return null;
     // Tool allowlist comes strictly from the frontmatter `tools:` key.
     // The body is intentionally NOT scanned — prose examples routinely
@@ -165,20 +175,10 @@ export interface Skill {
 
 /** Parse YAML frontmatter (very limited: just `name:` and `description:`) */
 function parseSkillFrontmatter(raw: string): { name: string; description: string } | null {
-  raw = raw.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n");
-  const m = raw.match(/^---\s*\n([\s\S]*?)\n---\s*/);
+  const m = normalize(raw).match(/^---\s*\n([\s\S]*?)\n---\s*/);
   if (!m) return null;
-  let name = "";
-  let description = "";
-  for (const line of m[1].split("\n")) {
-    const i = line.indexOf(":");
-    if (i <= 0) continue;
-    const key = line.slice(0, i).trim();
-    const val = line.slice(i + 1).trim();
-    if (key === "name") name = val;
-    else if (key === "description") description = val;
-  }
-  return name ? { name, description } : null;
+  const fm = frontmatterKV(m[1]);
+  return fm.name ? { name: fm.name, description: fm.description || "" } : null;
 }
 
 /** Convert settings.json `skills` entry to a skill name.
@@ -346,6 +346,15 @@ export function saveTeamsYaml(filePath: string, data: ParsedTeams): void {
   // Invalidate the in-memory cache since we just wrote new content.
   teamsYamlCache = null;
   writeFileSync(filePath, lines.join("\n") + "\n");
+}
+
+/** Read-modify-write teams.yaml in one step (load → mutate → save), so
+ *  toggle sites don't each rebuild the load/save round-trip. */
+export function updateTeamsYaml(mutate: (parsed: ParsedTeams) => void): void {
+  const tp = teamsYamlPath();
+  const parsed = loadTeamsYaml(tp);
+  mutate(parsed);
+  saveTeamsYaml(tp, parsed);
 }
 
 export const CONFIG_FILE = "agent-team-config.json";

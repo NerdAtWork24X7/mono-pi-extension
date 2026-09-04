@@ -1,10 +1,10 @@
 // ── Orchestration: process manager + dispatch + RPC handlers ──
 
-import { unlinkSync, writeFileSync, existsSync } from "fs";
+import { writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import type { AgentProc } from "./core";
 import { spawnRpcSubprocess } from "./core";
-import { SessionLogger, agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, parseModelId, filterSkills, shortModel, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
+import { SessionLogger, agentKey, agentNameKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, parseModelId, filterSkills, safeUnlink, shortModel, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext } from "./core";
 import { resolveSkillPath } from "./config";
 import { buildExtensionCliArgs, buildScopeNameArgs } from "./extensions";
@@ -39,6 +39,13 @@ const UI_FIRE_AND_FORGET = new Set(["notify", "setStatus", "setWidget", "setTitl
  *  working and this only fires once the cap is exceeded or compaction fails. */
 const taskTooLargeSignal = (why: string) =>
   `TASK_TOO_LARGE: ${why}. Split this task into smaller pieces and re-dispatch.`;
+
+/** First non-empty captured output for a dispatch, in precedence order.
+ *  Shared by the completion and process-close fallback paths so they can't
+ *  drift apart. */
+function capturedText(ap: AgentProc): string {
+  return ap.lastAssistantText.trim() || ap.currentMessageText.trim() || ap.collectedText.trim();
+}
 
 export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) {
   let ev: any;
@@ -330,10 +337,7 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
   clearInterval(ap.timer);
   ctx.logger.flushStreamBuf(ap);
 
-  const output = ap.lastAssistantText.trim()
-    || ap.currentMessageText.trim()
-    || ap.collectedText.trim()
-    || "(no output)";
+  const output = capturedText(ap) || "(no output)";
 
   if (output === "(no output)") {
     ctx.logger.logErrorBox(ap, "EMPTY RESPONSE",
@@ -399,9 +403,10 @@ export function autoRespondUI(ap: AgentProc, ev: any) {
 /** Resolve an agent name to its team-member proc, or the standard
  *  not-found / disabled error message. Shared by all dispatch entry points. */
 function resolveAgent(ctx: AgentTeamContext, name: string): { ap: AgentProc } | { error: string } {
-  const ap = ctx.procs.get(name.toLowerCase());
+  const key = agentNameKey(name);
+  const ap = ctx.procs.get(key);
   if (!ap) return { error: `Agent "${name}" not found. Available: ${availableAgentNames(ctx)}` };
-  if (ctx.disabledAgents.has(name.toLowerCase())) {
+  if (ctx.disabledAgents.has(key)) {
     return { error: `Agent "${name}" is disabled. Enable it from the sidebar (Ctrl+Q).` };
   }
   return { ap };
@@ -504,8 +509,8 @@ export async function runAgent(
 
   const cmdPayload = { type: "prompt", message: task };
   const failDispatch = (msg: string): { output: string; code: number; elapsed: number } => {
-    if (ap.timer) { clearInterval(ap.timer); ap.timer = undefined; }
-    if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
+    clearTimers(ap);
+    ap.timer = undefined;
     ap.resetPongTimeout = undefined;
     ap.resolveDispatch = null;
     ap.status = "error";
@@ -704,30 +709,26 @@ export async function activateTeam(ctx: AgentTeamContext, name: string) {
   await ctx.killAll();
   ctx.procs.clear();
   ctx.activeTeam = name;
-  ctx.catalogDirty = true;
 
   const members = ctx.teams[name] || [];
-  const byName = new Map(ctx.allDefs.map(d => [d.name.toLowerCase(), d]));
+  const byName = new Map(ctx.allDefs.map(d => [agentNameKey(d.name), d]));
 
-  // Clear disabledAgents for this team's members so teams.yaml is the
-  // source of truth. Agents from other teams retain their state.
+  // Reset each member's proc so teams.yaml is the source of truth: the
+  // disabled set is cleared first, then inactive members are re-added.
+  // Agents from other teams retain their disabled state.
   for (const m of members) {
-    const def = byName.get(m.name.toLowerCase());
-    if (def) ctx.disabledAgents.delete(def.name.toLowerCase());
-  }
-  // Now re-add inactive members from teams.yaml
-  for (const m of members) {
-    const def = byName.get(m.name.toLowerCase());
+    const def = byName.get(agentNameKey(m.name));
     if (!def) continue;
-    const agentKey = def.name.toLowerCase();
-    ctx.procs.set(agentKey, {
+    const key = agentNameKey(def.name);
+    ctx.disabledAgents.delete(key);
+    ctx.procs.set(key, {
       def,
       teamModel: m.model,
       model: m.model || def.model || ctx.orchestratorModel || "",
       ...blankProcState(),
     });
     if (m.active === false) {
-      ctx.disabledAgents.add(agentKey);
+      ctx.disabledAgents.add(key);
     }
   }
   ctx.persist();
@@ -762,9 +763,7 @@ export class ProcessManager {
 
   /** Safely delete session file if it exists */
   wipeSessionFile(ap: AgentProc) {
-    if (ap.sessionFile && existsSync(ap.sessionFile)) {
-      try { unlinkSync(ap.sessionFile); } catch { }
-    }
+    safeUnlink(ap.sessionFile);
   }
 
   // Write system prompt to temp file (avoids shell escaping issues with multi-line prompts)
@@ -778,9 +777,7 @@ export class ProcessManager {
   }
 
   cleanSystemPrompt(ap: AgentProc) {
-    if (ap.systemPromptFile) {
-      try { unlinkSync(ap.systemPromptFile); } catch { }
-    }
+    safeUnlink(ap.systemPromptFile);
   }
 
   killProc(ap: AgentProc, immediate = false) {
@@ -931,7 +928,7 @@ export class ProcessManager {
         // don't log a scary PROCESS EXIT box and don't overwrite the
         // TASK_TOO_LARGE signal that was already resolved.
         if (!ap.autoCompacted) {
-          const captured = ap.lastAssistantText.trim() || ap.currentMessageText.trim() || ap.collectedText.trim();
+          const captured = capturedText(ap);
           if (code !== 0 && !captured) {
             ctx.logger.logErrorBox(ap, "PROCESS EXIT", exitDetail);
           }

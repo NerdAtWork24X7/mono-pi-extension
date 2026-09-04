@@ -123,11 +123,6 @@ export interface AgentTeamContext {
   orchestratorModel: string;
   cachedExtPaths: string[];
   sessionDir: string;
-  /** Cached agent catalog string for the system prompt. Invalidated when
-   *  the active team (and therefore ctx.procs) changes. */
-  catalogCache: string;
-  /** True when the cached catalog needs to be rebuilt. */
-  catalogDirty: boolean;
   /** Cached skills list for the system prompt. Computed once per session. */
   skillsCache: Array<{ name: string; description: string; dir: string }>;
   /** Cached AGENTS.md content for the system prompt. Computed once per session. */
@@ -190,7 +185,7 @@ export interface AgentTeamContext {
 
 // ── Utilities ──
 
-import { readdirSync, existsSync } from "fs";
+import { readdirSync, existsSync, unlinkSync } from "fs";
 import { resolve } from "path";
 
 /** Extract short model name after last '/' */
@@ -229,6 +224,17 @@ export const displayName = (name: string) =>
 
 export const agentKey = (ap: { def: { name: string } }) =>
   ap.def.name.toLowerCase().replace(/\s+/g, "-");
+
+/** Canonical lookup key for agent names (case-insensitive). Used by every
+ *  disabled-set / team-member / proc-map lookup so the keying strategy lives
+ *  in one place. */
+export const agentNameKey = (name: string) => name.toLowerCase();
+
+/** Best-effort file deletion; missing files and errors are silently ignored. */
+export function safeUnlink(p: string): void {
+  if (!p) return;
+  try { unlinkSync(p); } catch { /* best-effort */ }
+}
 
 /** Format token count: >=1000 → "1.2k", else raw */
 export const fmtTok = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);

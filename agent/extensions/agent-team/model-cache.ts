@@ -13,8 +13,9 @@
 
 import { homedir } from "os";
 import { join } from "path";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync, unlinkSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from "fs";
 import { randomBytes } from "crypto";
+import { safeUnlink } from "./core";
 
 const CACHE_DIR = join(homedir(), ".pi", "cache");
 const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
@@ -95,7 +96,7 @@ export async function loadCachedModels<T>(
     } catch {
       /* cache write failure is non-fatal — but don't leave an orphaned
        * temp file sitting on disk forever if we got past the write. */
-      try { unlinkSync(tmp); } catch { /* nothing to clean up */ }
+      safeUnlink(tmp);
     }
     return data;
   } catch (err) {
