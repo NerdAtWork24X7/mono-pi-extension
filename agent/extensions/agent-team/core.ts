@@ -56,6 +56,13 @@ export interface AgentProc {
   logHead: number;            // index of the oldest logical ring-buffer entry
   streamLogIdx: number;      // logLines index where the current assistant message's streamed text began (retry rollback mark)
   runId?: string;         // unique per concurrent run; suffixed into session/prompt files to avoid collisions
+  /** Level-2 debug: absolute path of this dispatch's raw JSONL trace file
+   *  (undefined = not tracing). Scoped per dispatch — opened when a dispatch
+   *  starts, closed (dropped) when it resolves. */
+  debugTracePath?: string;
+  /** Level-2 debug: count of raw JSONL lines teed for the current dispatch.
+   *  Reported to the debug log when the dispatch's trace closes. */
+  debugLines?: number;
 }
 
 export interface TeamMember {
@@ -73,12 +80,23 @@ export interface MemoryState {
   elapsed: number;
 }
 
+/** Debug verbosity for the agent-team dispatch pipeline.
+ *  0 — off (default): no debug output at all.
+ *  1 — lifecycle: dispatch→result handoff events (spawn, readiness, agent_end,
+ *      resolve, close fallback) appended to <sessionDir>/agent-team-debug.log.
+ *  2 — raw JSONL: additionally tee every JSONL line a subagent writes to
+ *      stdout into per-dispatch <sessionDir>/<agent>-debug.jsonl files. */
+export type DebugLevel = 0 | 1 | 2;
+
 export interface TeamConfig {
   activeTeam: string;
   gridCols: number;
   enabled: boolean;
   /** Master toggle for parallel batched subagent dispatch (dispatch_agents). */
   parallelDispatch?: boolean;
+  /** Debug verbosity for the dispatch pipeline.
+   *  0 = off, 1 = lifecycle log lines, 2 = raw JSONL protocol trace. */
+  debugLevel?: number;
   /** Max concurrent read-only subagent processes spawned by one dispatch_agents call. */
   maxParallel?: number;
   /** Tools that mark an agent as "writable" (serialized, never parallel). */
@@ -100,6 +118,7 @@ export interface TeamConfig {
  *  memoryManager is typed as `any` to avoid a circular import with memory.ts. */
 export interface AgentTeamContext {
   // State
+  debugLevel: number;
   procs: Map<string, AgentProc>;
   orchestratorModel: string;
   cachedExtPaths: string[];
@@ -245,6 +264,8 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
     logLines: [],
     logHead: 0,
     streamLogIdx: 0,
+    debugTracePath: undefined,
+    debugLines: 0,
   };
 }
 
@@ -274,6 +295,7 @@ export function resetForDispatch(ap: AgentProc) {
   ap.toolCount = 0;
   ap.task = "";
   ap.lastWork = "";
+  ap.debugLines = 0;
   clearTimers(ap);
   if (ap.readyTimeout) { clearTimeout(ap.readyTimeout); ap.readyTimeout = undefined; }
 }
@@ -437,6 +459,36 @@ export function sanitizeLine(s: string): string {
 
 export class SessionLogger {
 
+  // ── Debug config (set once by index.ts at startup) ──
+  /** Debug verbosity shared by all log calls. Configured in index.ts so this
+   *  file never has to import the runtime context (avoids cycles). */
+  static debugLevel = 0;
+  /** Directory for debug output: the shared agent-team-debug.log (level 1+)
+   *  plus per-dispatch raw JSONL traces (level 2). */
+  static debugDir = "";
+  /** Absolute path of the shared lifecycle debug log ("" until debugDir is set). */
+  static debugLogPath(): string {
+    return SessionLogger.debugDir ? join(SessionLogger.debugDir, "agent-team-debug.log") : "";
+  }
+  private static debugDirReady = false;
+  private static ensureDebugDir() {
+    if (SessionLogger.debugDirReady || !SessionLogger.debugDir) return;
+    try { mkdirSync(SessionLogger.debugDir, { recursive: true }); SessionLogger.debugDirReady = true; } catch { /* ignore */ }
+  }
+  /** Turn a per-agent debug trace on/off for the CURRENT dispatch only. */
+  static setFileTrace(ap: AgentProc, on: boolean) {
+    const had = ap.debugTracePath;
+    ap.debugTracePath = on && SessionLogger.debugDir
+      ? join(SessionLogger.debugDir, `${agentKey(ap)}${ap.runId ? `-${ap.runId}` : ""}-debug.jsonl`)
+      : undefined;
+    if (on) {
+      SessionLogger.ensureDebugDir();
+      try { appendFileSync(ap.debugTracePath!, `--- debug trace opened ${new Date().toISOString()} ---\n`); } catch { /* ignore */ }
+    }
+    // Traces belong to a single dispatch; dropping the path closes them.
+    if (!on && had) ap.debugTracePath = undefined;
+  }
+
   /** Append a line to the owning agent's ring buffer. The widget boxes these
    *  at the actual widget width, so lines are stored RAW (no border) here. */
   private push(ap: AgentProc, s: string) {
@@ -456,6 +508,30 @@ export class SessionLogger {
 
   log(msg: string, ap: AgentProc) {
     this.push(ap, msg);
+  }
+
+  /** Debug log: lifecycle events gated at level ≥1, appended to the shared
+   *  agent-team-debug.log. Deliberately NOT the TUI ring buffer — diagnosing
+   *  lost subagent results needs a chronological cross-agent timeline read
+   *  with tail/grep, not per-agent panels that scroll away. Lines look like:
+   *  `2026-09-04T… [scout·scout-2-…-a1b2c] agent_end: resolving dispatch code=0` */
+  debug(ap: AgentProc, msg: string) {
+    if (SessionLogger.debugLevel < 1) return;
+    const path = SessionLogger.debugLogPath();
+    if (!path) return;
+    SessionLogger.ensureDebugDir();
+    const label = ap?.def?.name
+      ? `${ap.def.name}${ap.runId ? `·${ap.runId}` : ""}`
+      : "?";
+    try { appendFileSync(path, `${new Date().toISOString()} [${label}] ${msg}\n`); } catch { /* ignore */ }
+  }
+
+  /** Raw JSONL protocol line from a subagent's stdout (level 2 only). Teed
+   *  into the per-agent trace file — never into the TUI ring buffer, where
+   *  hundreds of RPC lines would evict useful history. */
+  debugRaw(ap: AgentProc, line: string) {
+    if (SessionLogger.debugLevel < 2 || !ap.debugTracePath) return;
+    try { appendFileSync(ap.debugTracePath, `${new Date().toISOString()} ${line}\n`); } catch { /* ignore */ }
   }
 
   /** Store each line RAW (no outer box): the widget wraps it in the per-agent
@@ -549,6 +625,8 @@ export class SessionLogger {
 // ── RPC subprocess spawner ──
 
 import { spawn as nodeSpawn } from "node:child_process";
+import { appendFileSync, mkdirSync } from "fs";
+import { join } from "path";
 
 export interface RpcSubprocessOpts {
   bin: string;
@@ -586,11 +664,21 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
   let settled = false;
   let killed = false;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
+  // If the child process exits but a helper/grandchild it spawned keeps the
+  // stdio pipe fds open, Node's ChildProcess 'close' event (and the stdout
+  // 'end' event) never fire — so the trailing agent_end / final partial line
+  // stays stuck in stdoutBuf and the orchestrator waits forever. The 'exit'
+  // event fires on process termination regardless of stdio, so we use it as a
+  // bounded backstop to flush the remaining line and settle the subprocess
+  // lifecycle even when the pipe is never closed.
+  let exitGraceTimer: ReturnType<typeof setTimeout> | undefined;
+  const EXIT_GRACE_MS = 500;
 
   const settle = () => {
     if (settled) return false;
     settled = true;
     if (killTimer) { clearTimeout(killTimer); killTimer = undefined; }
+    if (exitGraceTimer) { clearTimeout(exitGraceTimer); exitGraceTimer = undefined; }
     return true;
   };
   const fireError = (err: Error) => {
@@ -617,6 +705,12 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
   const emitLine = (line: string) => {
     if (line.endsWith("\r")) line = line.slice(0, -1);
     if (!line.trim()) return;
+    // Level-2 debug: tee the raw JSONL protocol line before the consumer
+    // parses it. Owned routing keeps parallel clones' traces separate.
+    if (SessionLogger.debugLevel >= 2 && opts.owner?.debugTracePath) {
+      opts.owner.debugLines = (opts.owner.debugLines ?? 0) + 1;
+      opts.logger.debugRaw(opts.owner, line);
+    }
     opts.onLine(line);
   };
   proc.stdout!.on("data", (chunk: string) => {
@@ -624,6 +718,21 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
     while (true) {
       const nl = stdoutBuf.indexOf("\n");
       if (nl === -1) {
+        // Eagerly read a trailing, complete, unterminated JSON event (typically
+        // agent_end / the final response) straight from the output log, so a
+        // finished subagent is detected from its content rather than from
+        // process liveness or pipe closure. Safe: JSON.parse only succeeds on
+        // a fully-formed object, never on a partial streamed line, and a
+        // concatenation of two objects fails parse, so we cannot emit early.
+        if (stdoutBuf.length > 0) {
+          try {
+            const parsed = JSON.parse(stdoutBuf);
+            if (parsed && typeof parsed === "object") {
+              emitLine(stdoutBuf);
+              stdoutBuf = "";
+            }
+          } catch { /* incomplete — wait for more data */ }
+        }
         if (stdoutBuf.length > MAX_LINE_BUF) {
           const truncated = stdoutBuf.slice(0, MAX_LINE_BUF);
           stdoutBuf = "";
@@ -668,6 +777,25 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
     fireError(err);
   });
 
+  // 'exit' fires when the process terminates, even if a grandchild keeps the
+  // stdio pipes open so 'close'/'end' never arrive. Give the stream a short
+  // window to deliver any piped data the (now-exited) process already wrote;
+  // if 'close' still hasn't settled the subprocess, flush the trailing
+  // partial line (so agent_end / final response is not lost) and settle.
+  proc.on("exit", (code, signal) => {
+    if (settled) return;
+    if (exitGraceTimer) clearTimeout(exitGraceTimer);
+    exitGraceTimer = setTimeout(() => {
+      exitGraceTimer = undefined;
+      if (settled) return;
+      if (!stdoutEnded && stdoutBuf.length > 0) emitLine(stdoutBuf);
+      stdoutBuf = "";
+      if (stderrBuf.length > 0) emitStderr(stderrBuf);
+      stderrBuf = "";
+      fireClose(code, signal);
+    }, EXIT_GRACE_MS);
+  });
+
   proc.on("close", (code, signal) => {
     // Backstop: deliver any final buffered line only if stdout did not already
     // flush it on 'end'. This keeps completion delivery exactly-once.
@@ -684,6 +812,9 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
     kill: (signal: NodeJS.Signals = "SIGTERM") => {
       if (killed) return;
       killed = true;
+      if (SessionLogger.debugLevel >= 1 && opts.owner) {
+        opts.logger.debug(opts.owner, `kill requested signal=${signal}`);
+      }
       try { proc.stdin?.end(); } catch { }
       try { proc.stdout?.resume(); } catch { }
       try { proc.stderr?.resume(); } catch { }

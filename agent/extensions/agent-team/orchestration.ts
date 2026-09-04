@@ -4,7 +4,7 @@ import { unlinkSync, writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import type { AgentProc } from "./core";
 import { spawnRpcSubprocess } from "./core";
-import { agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, parseModelId, filterSkills, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
+import { SessionLogger, agentKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, parseModelId, filterSkills, shortModel, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext } from "./core";
 import { resolveSkillPath } from "./config";
 import { buildExtensionCliArgs, buildScopeNameArgs } from "./extensions";
@@ -44,12 +44,20 @@ export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) 
   let ev: any;
   try { ev = JSON.parse(line); } catch { return; }
 
-  // Completion events can arrive after `agent_end` has marked the proc done.
+  // Completion events can arrive after the proc has been marked done.
   // Keep refreshing activity while the child is still owned by this dispatch;
   // otherwise a final response/close gap can look like a stuck worker.
   if (ap.status === "running" || ap.status === "done") {
     ap.lastActivity = Date.now();
     ap.resetPongTimeout?.();
+  }
+
+  if (SessionLogger.debugLevel >= 1) {
+    // Trace every RPC event type (and its completion relevance) without
+    // dumping payloads — the raw bytes go to the level-2 trace file.
+    const completionRelevant = ev.type === "response" || ev.type === "agent_end" || ev.type === "agent_settled" ||
+      (ev.type === "message_end" && ev.message?.role === "assistant") ? " [completion-relevant]" : "";
+    ctx.logger.debug(ap, `event ${ev.type}${completionRelevant} (pendingResolve=${ap.resolveDispatch ? "yes" : "no"})`);
   }
 
   switch (ev.type) {
@@ -60,7 +68,13 @@ export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) 
     case "message_end": return handleMessageEnd(ctx, ap, ev);
     case "tool_execution_start": return handleToolStart(ctx, ap, ev);
     case "tool_execution_end": return handleToolEnd(ctx, ap, ev);
-    case "agent_end": return handleAgentEnd(ctx, ap, ev);
+    // pi ≥0.85 renamed the RPC completion event from `agent_end` to
+    // `agent_settled` (its own RpcClient resolves prompts on agent_settled,
+    // and agent_end no longer reaches the JSONL stream at all). Handle both
+    // names so we stay compatible with either pi version. resolveIfPending
+    // guarantees exactly-once resolution if both ever arrive.
+    case "agent_end":
+    case "agent_settled": return handleAgentEnd(ctx, ap, ev);
     case "extension_ui_request": return autoRespondUI(ap, ev);
     case "compaction_start": return handleCompactionStart(ctx, ap, ev);
     case "compaction_end": return handleCompactionEnd(ctx, ap, ev);
@@ -125,6 +139,7 @@ export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
     if (ev.success) {
       ap.ready = true;
       ap.status = "idle";
+      if (SessionLogger.debugLevel >= 1) ctx.logger.debug(ap, `ready probe OK model=${ev.data?.model?.id ?? "?"} ctxWindow=${ev.data?.model?.contextWindow ?? "?"}`);
       // Clear the spawn-readiness timeout — ready flipped to true via
       // the probe response, not the timeout. This closes the race where
       // the timeout fires just after the probe resolves.
@@ -135,6 +150,7 @@ export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
     } else {
       const errMsg = ev.error || `${ev.command} failed`;
       ctx.logger.logErrorBox(ap, "READY PROBE FAILED", errMsg);
+      if (SessionLogger.debugLevel >= 1) ctx.logger.debug(ap, `ready probe FAILED: ${errMsg}`);
       if (ap.readyTimeout) { clearTimeout(ap.readyTimeout); ap.readyTimeout = undefined; }
     }
     ctx.invalidate();
@@ -159,6 +175,7 @@ export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
     ap.lastWork = `Error: ${errMsg}`;
     ap.status = "error";
     ctx.invalidate();
+    if (SessionLogger.debugLevel >= 1) ctx.logger.debug(ap, `error response resolving dispatch (code=1)`);
     ctx.resolveIfPending(ap, errMsg, 1);
   }
 }
@@ -303,9 +320,12 @@ export function handleToolEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
   ctx.invalidate();
 }
 
+/** Completion of a subagent run: resolves the pending dispatch with the
+ *  final output. Fired on `agent_end` (pi ≤0.84) or `agent_settled`
+ *  (pi ≥0.85) — both route here. */
 export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
   // If we already terminated the subagent because it auto-compacted, ignore
-  // any late agent_end event and don't overwrite the TASK_TOO_LARGE signal.
+  // any late completion event and don't overwrite the TASK_TOO_LARGE signal.
   if (ap.autoCompacted) return;
   clearInterval(ap.timer);
   ctx.logger.flushStreamBuf(ap);
@@ -320,6 +340,12 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
       `lastAssistant:${ap.lastAssistantText ? "yes" : "no"} curMsg:${ap.currentMessageText.length}c collected:${ap.collectedText.length}c`);
   }
 
+  if (SessionLogger.debugLevel >= 1) {
+    ctx.logger.debug(ap, `agent_end: output=${output.length}c source=${
+      ap.lastAssistantText.trim() ? "lastAssistantText" : ap.currentMessageText.trim() ? "currentMessageText" : ap.collectedText.trim() ? "collectedText" : "none"
+    } pendingResolve=${ap.resolveDispatch ? "yes" : "no"} status=${ap.status}`);
+  }
+
   ctx.logger.logDoneBox(ap, Math.round(ap.elapsed / 1000), ap.toolCount);
   ap.status = "done";
   ap.lastWork = extractLastLine(output);
@@ -327,7 +353,7 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
   // Keep the captured output until the dispatch promise has resolved and the
   // process close handler has had a chance to drain trailing stdout. Clearing
   // these fields here loses the final answer when bash causes response/close
-  // events to arrive immediately after agent_end.
+  // events to arrive immediately after the completion event.
   ap.collectedText = "";
   ap.currentMessageText = "";
 
@@ -340,9 +366,10 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
     );
   }
 
-  // Resolve from agent_end, but leave the captured final text intact until
-  // the close fallback has had a chance to run. This is safe because
-  // resolveIfPending clears the callback exactly once.
+  // Resolve from the completion event, but leave the captured final text
+  // intact until the close fallback has had a chance to run. This is safe
+  // because resolveIfPending clears the callback exactly once.
+  if (SessionLogger.debugLevel >= 1) ctx.logger.debug(ap, `agent_end: resolving dispatch code=0`);
   ctx.resolveIfPending(ap, output, 0);
   // `lastAssistantText` is deliberately cleared by the next dispatch reset,
   // not before the child has finished flushing its final RPC events.
@@ -424,6 +451,13 @@ export async function runAgent(
     return { output, code: 1, elapsed: 0 };
   }
 
+  // Level-2 debug: open this dispatch's raw JSONL trace for the window where
+  // the result is in flight. Closed (path dropped) once the dispatch resolves.
+  if (SessionLogger.debugLevel >= 2) {
+    SessionLogger.setFileTrace(ap, true);
+    ctx.logger.debug(ap, `raw JSONL trace opened: ${ap.debugTracePath}`);
+  }
+
   // Start dispatch
   ap.status = "running";
   ap.task = task;
@@ -436,6 +470,9 @@ export async function runAgent(
   ap.lastWork = "";
   ap.runCount++;
   ap.lastActivity = Date.now();
+  if (SessionLogger.debugLevel >= 1) {
+    ctx.logger.debug(ap, `dispatch #${ap.runCount} start model=${shortModel(ap.model)} writable=${isWritable(ap.def, ctx.destructiveTools)} task=${task.length}c`);
+  }
   ctx.invalidate();
 
   const t0 = Date.now();
@@ -491,9 +528,21 @@ export async function runAgent(
       // drained trailing stdout; late response/agent_end events can otherwise
       // be lost between resolution and process teardown.
       if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
+      if (SessionLogger.debugLevel >= 1) {
+        ctx.logger.debug(ap, `dispatch promise resolved code=${code} output=${output.length}c elapsed=${Math.round(ap.elapsed / 1000)}s`);
+      }
       resolve({ output, code, elapsed: ap.elapsed });
     };
   });
+
+  // Level-2 debug: the result is now safely in the caller's hands — close
+  // the raw trace and report how much protocol traffic it captured.
+  if (SessionLogger.debugLevel >= 2) {
+    const traced = ap.debugLines ?? 0;
+    const tracePath = ap.debugTracePath;
+    SessionLogger.setFileTrace(ap, false);
+    ctx.logger.debug(ap, `raw JSONL trace closed: ${tracePath ?? "?"} (${traced} line(s))`);
+  }
 
   // Task complete — kill the subagent process but KEEP the terminal pane alive
   // so the user can scroll back and see what the agent did.
@@ -690,12 +739,21 @@ export class ProcessManager {
     private cachedExtPaths: () => string[],
     private orchestratorModel: () => string,
     private invalidate: () => void,
+    private logger: SessionLogger,
   ) { }
 
   // ── Resolve helper ──────────────────────────────────────────────
 
   resolveIfPending(ap: AgentProc, output: string, code: number) {
-    if (!ap.resolveDispatch) return;
+    if (!ap.resolveDispatch) {
+      if (SessionLogger.debugLevel >= 1) {
+        this.logger.debug(ap, `resolveIfPending: SKIPPED — no pending dispatch (status=${ap.status}) output=${output.length}c code=${code}`);
+      }
+      return;
+    }
+    if (SessionLogger.debugLevel >= 1) {
+      this.logger.debug(ap, `resolveIfPending: resolving code=${code} output=${output.length}c status=${ap.status}`);
+    }
     const resolve = ap.resolveDispatch;
     ap.resolveDispatch = null;
     clearTimers(ap);
@@ -861,6 +919,10 @@ export class ProcessManager {
         const exitDetail = signal
           ? `${displayName(ap.def.name)} subprocess terminated by ${signal}`
           : `${displayName(ap.def.name)} subprocess exited with code ${code ?? "unknown"}`;
+        if (SessionLogger.debugLevel >= 1) {
+          const capturedNow = ap.lastAssistantText.length || ap.currentMessageText.length || ap.collectedText.length;
+          this.logger.debug(ap, `subprocess close code=${code ?? "?"} signal=${signal ?? "none"} status=${ap.status} pendingResolve=${ap.resolveDispatch ? "yes" : "no"} capturedText=${capturedNow}c`);
+        }
         // Detach this child before cleanup so callbacks from its streams cannot
         // be mistaken for events from a later process using the same AgentProc.
         ap.proc = null;
@@ -876,9 +938,9 @@ export class ProcessManager {
           if (code === 0 && !captured) {
             ctx.logger.logErrorBox(ap, "EMPTY RESPONSE", exitDetail);
           }
-          // A clean RPC child exit is a successful completion even when pi
-          // omitted agent_end. This is the important fallback for parallel
-          // clones: resolve only after stdout has been fully drained.
+          // A clean RPC child exit is a successful completion even when no
+          // completion event arrived (or pi omitted it). Resolve only after
+          // stdout has been fully drained.
           this.resolveIfPending(ap, captured || (code === 0 ? "(no output)" : exitDetail), code === 0 ? 0 : 1);
         }
         // stdin is already owned and closed by the RPC wrapper/kill path.
@@ -890,6 +952,9 @@ export class ProcessManager {
     });
     ap.proc = sub.proc;
     ap.procRef = sub;
+    if (SessionLogger.debugLevel >= 1) {
+      this.logger.debug(ap, `spawn pid=${sub.proc.pid ?? "?"} model=${shortModel(model)} args=${args.length}`);
+    }
     this.invalidate();
 
     // ── Readiness probe: send get_state, wait for response ──
@@ -900,6 +965,7 @@ export class ProcessManager {
         ap.readyTimeout = undefined;
         if (!ap.ready) {
           ctx.logger.logErrorBox(ap, "READY TIMEOUT", `status=${ap.status}`);
+          if (SessionLogger.debugLevel >= 1) ctx.logger.debug(ap, `readiness timeout after ${SPAWN_READY_TIMEOUT_MS}ms — proceeding with proc=${ap.proc ? "alive" : "dead"}`);
           ap.status = ap.proc ? "idle" : "dead";
           ap.ready = ap.proc != null; // only ready if process is alive
           resolve(ap.proc != null);

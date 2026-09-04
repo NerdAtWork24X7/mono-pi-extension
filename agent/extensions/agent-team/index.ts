@@ -72,6 +72,9 @@ export class AgentTeam implements AgentTeamContext {
   enabled = true;
   parallelDispatch = true;
   maxParallel = 5;
+  /** Debug verbosity for the dispatch pipeline (0 off, 1 lifecycle, 2 raw JSONL).
+   *  See DebugLevel in core.ts. Persisted in agent-team-config.json. */
+  debugLevel = 0;
   destructiveTools: string[] = ["custom_edit", "custom_write"];
   dispatchLock: RwLock = new RwLock();
   batchClones = new Set<AgentProc>();
@@ -109,6 +112,7 @@ export class AgentTeam implements AgentTeamContext {
     this.enabled = this.saved.enabled ?? true;
     this.parallelDispatch = this.saved.parallelDispatch ?? true;
     this.maxParallel = this.saved.maxParallel ?? 5;
+    this.debugLevel = this.saved.debugLevel ?? 0;
     this.destructiveTools = this.saved.destructiveTools ?? ["write", "custom_edit"];
     this.disabledAgents = new Set(this.saved.disabledAgents ?? []);
     this.orchestratorSkills = new Set(this.saved.orchestratorSkills ?? []);
@@ -116,6 +120,11 @@ export class AgentTeam implements AgentTeamContext {
     this.skipOrchestratorTools = this.saved.skipOrchestratorTools ?? [];
 
     this.logger = new SessionLogger();
+
+    // Wire the debug config through statics so core.ts never has to import
+    // the runtime context (import cycle). SessionLogger.debugDir is set in
+    // loadAgents once sessionDir is known.
+    SessionLogger.debugLevel = this.debugLevel;
 
     // ProcessManager takes accessor closures so it can read the latest
     // values of sessionDir/cachedExtPaths/orchestratorModel without
@@ -125,6 +134,7 @@ export class AgentTeam implements AgentTeamContext {
       () => this.cachedExtPaths,
       () => this.orchestratorModel,
       () => this.invalidate(),
+      this.logger,
     );
   }
 
@@ -232,6 +242,7 @@ export class AgentTeam implements AgentTeamContext {
       enabled: this.enabled,
       parallelDispatch: this.parallelDispatch,
       maxParallel: this.maxParallel,
+      debugLevel: this.debugLevel,
       destructiveTools: this.destructiveTools,
       disabledAgents: Array.from(this.disabledAgents),
       orchestratorSkills: Array.from(this.orchestratorSkills),
@@ -268,6 +279,8 @@ export class AgentTeam implements AgentTeamContext {
     this.sessionDir = join(homedir(), ".pi", "agent-team-log", "agent-sessions");
     this.memoryDir = join(cwd, ".pi_memory");
     mkdirSync(this.sessionDir, { recursive: true });
+    // Level-2 debug traces land next to the session files.
+    SessionLogger.debugDir = this.sessionDir;
     void cleanupOldSessionFiles(this.sessionDir); // fire-and-forget async cleanup
 
     this.allDefs = scanAgents(cwd);

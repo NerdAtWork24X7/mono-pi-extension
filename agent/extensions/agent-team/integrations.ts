@@ -7,7 +7,7 @@ import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, stat
 import { dirname, resolve } from "path";
 import { randomBytes } from "crypto";
 import type { AgentTeamContext, BatchTaskResult } from "./core";
-import { displayName, shortModel } from "./core";
+import { SessionLogger, displayName, shortModel } from "./core";
 import { MAX_RESPONSE_LENGTH } from "./orchestration";
 import { toggleSidebar } from "./ui";
 
@@ -874,6 +874,38 @@ export function registerCommands(pi: ExtensionAPI, team: AgentTeamContext) {
       } else {
         await ctx.ui.notify("Usage: /agents-team-toggle on|off|status");
       }
+    },
+  });
+
+  pi.registerCommand("agents-debug", {
+    description: "Set dispatch-pipeline debug level: /agents-debug [0|1|2|status]",
+    handler: async (args, ctx) => {
+      team.wCtx = ctx;
+      const sub = (args?.trim().split(/\s+/)[0] ?? "").toLowerCase();
+      if (sub === "status") {
+        const label = team.debugLevel === 0 ? "OFF" : team.debugLevel === 2 ? "2 (lifecycle + raw JSONL)" : "1 (lifecycle)";
+        const logPath = SessionLogger.debugLogPath() || "<sessionDir>/agent-team-debug.log";
+        ctx.ui.notify(`Debug level: ${label}. Lifecycle log: ${logPath}. Level 2 also writes per-dispatch <agent>-debug.jsonl traces.`, "info");
+        return;
+      }
+      const n = parseInt(sub, 10);
+      if (!(n === 0 || n === 1 || n === 2)) {
+        ctx.ui.notify("Usage: /agents-debug <0|1|2|status>", "error");
+        return;
+      }
+      team.debugLevel = n;
+      SessionLogger.debugLevel = n; // statics are read on the hot dispatch path
+      team.persist();
+      const logPath = SessionLogger.debugLogPath() || "<sessionDir>/agent-team-debug.log";
+      ctx.ui.notify(
+        n === 0
+          ? "Debug: OFF"
+          : n === 1
+            ? `Debug: 1 — dispatch lifecycle events appended to ${logPath}.`
+            : `Debug: 2 — lifecycle events + per-dispatch raw JSONL traces under ${SessionLogger.debugDir || "<sessionDir>"}/.`,
+        "info",
+      );
+      team.invalidate();
     },
   });
 

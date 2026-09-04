@@ -68,9 +68,9 @@ const IDLE_TIMEOUT_MS = 60_000;
 
 /** After a memory file is detected written, give the LLM a short grace
  *  period to finalize, then treat the run as complete. Without this the
- *  subprocess can write the file yet keep streaming (never emitting
- *  `agent_end`), leaving MemoryState stuck at "summarizing" and the in-TUI
- *  memory log pinned on screen after the work is actually done. */
+ *  subprocess can write the file yet keep streaming (never emitting a
+ *  completion event), leaving MemoryState stuck at "summarizing" and the
+ *  in-TUI memory log pinned on screen after the work is actually done. */
 const SETTLE_MS = 5_000;
 
 /** Hard wall-clock cap on a single memory run. Backstops a subprocess that
@@ -465,8 +465,9 @@ export class MemoryManager {
           try { ev = JSON.parse(line); } catch { return; }
 
           // Route through the standard rpc pipeline first so streaming
-          // text, tool start/end, agent_end, etc. all get logged and
-          // the animation timer is cleared on agent_end.
+          // text, tool start/end, and the completion event (agent_end on
+          // pi ≤0.84 / agent_settled on pi ≥0.85) all get logged and the
+          // animation timer is cleared.
           this.handleEvent(memoryAp, line);
 
           if (ev.type === "response") {
@@ -523,7 +524,7 @@ export class MemoryManager {
                 }
               }
             }
-          } else if (ev.type === "agent_end") {
+          } else if (ev.type === "agent_end" || ev.type === "agent_settled") {
             finish(() => resolve({ wroteFile: fileWritten || mtimeAdvanced() }));
           }
         },
@@ -563,7 +564,7 @@ export class MemoryManager {
       if (settled) return;
 
       // Hard wall-clock cap: guarantees the run terminates even if the
-      // subprocess stays active without ever emitting agent_end.
+      // subprocess stays active without ever emitting a completion event.
       hardTimer = setTimeout(() => {
         finish(() => resolve({ wroteFile: fileWritten || mtimeAdvanced() }));
       }, MEMORY_HARD_TIMEOUT_MS);
@@ -596,8 +597,8 @@ export class MemoryManager {
 //
 // `escape` resolves to the built-in `app.interrupt` keybinding, which is in
 // pi's RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS list — pi.registerShortcut
-// ("escape") is skipped with a warning. And the summarizer starts at
-// `agent_end`, i.e. while the app is idle, so the turn's abort signal is
+// ("escape") is skipped with a warning. And the summarizer starts when the
+// orchestrator's turn ends (the app is idle), so the turn's abort signal is
 // already spent. The supported hook is a custom editor component: subclass
 // CustomEditor, intercept ESC, delegate everything else to the base class
 // (pi copies onEscape/onCtrlD/actionHandlers onto it, so default behaviour

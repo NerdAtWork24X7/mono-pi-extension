@@ -122,6 +122,7 @@ Add your own by dropping a `.md` file into `agent/agents/` with the same frontma
 | `/agents-grid <1-6>` | Set UI grid columns for the agent status widgets |
 | `/agents-team-toggle on|off|status` | Enable/disable the agent team |
 | `/agents-parallel [on|off|status] [max N]` | Toggle global parallelism (subagent dispatch + read-only host tool calls) |
+| `/agents-debug <0\|1\|2\|status>` | Dispatch-pipeline debug level: 0 off, 1 lifecycle log to `~/.pi/agent-team-log/agent-sessions/agent-team-debug.log`, 2 + raw per-agent JSONL traces |
 | `dispatch_agent(agent, task)` | Send one task to a specialist |
 | `dispatch_agent(agent, tasks: [...])` | Fan the same agent across many tasks (parallel for read-only, serialized for writable) |
 | `Ctrl+Q` | Toggle the sidebar (agent grid, skills snapshot, team list) |
