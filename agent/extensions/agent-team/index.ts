@@ -31,7 +31,8 @@ import { scanExtensionPaths } from "./extensions";
 import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchMany as dispatchManyImpl, dispatchAgentMany as dispatchAgentManyImpl } from "./orchestration";
 import { MemoryManager, createMemoryManager, extractLastAssistantText, installMemoryEscEditor, memoryFiles } from "./memory";
 import { buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl, closeSidebar } from "./ui";
-import { registerCustomReadTool, registerCustomWriteTool, registerCustomEditTool, registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
+import { registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
+import { registerCustomReadTool, registerCustomWriteTool, registerCustomEditTool } from "./custom_tools";
 import { fullModelId } from "./helpers";
 import { homedir } from "os";
 
