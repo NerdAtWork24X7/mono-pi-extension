@@ -103,8 +103,16 @@ function skillRow(theme: any, w: number, sk: Skill, on: boolean, selected: boole
   ], selected);
 }
 
+/** Toggle the orchestrator system-prompt mode between standard and creative,
+ *  then persist the choice so it survives across sessions. */
+function toggleMode(ctx: AgentTeamContext) {
+  ctx.mode = ctx.mode === "creative" ? "standard" : "creative";
+  ctx.persist();
+  ctx.invalidate();
+}
+
 /** Focus sections in Tab-cycling order. */
-const SECTION_ORDER = ["orch", "memory", "teams", "sub"] as const;
+const SECTION_ORDER = ["orch", "mode", "memory", "teams", "sub"] as const;
 type Section = typeof SECTION_ORDER[number];
 
 export function openSidebar(ctx: AgentTeamContext) {
@@ -147,6 +155,19 @@ export function openSidebar(ctx: AgentTeamContext) {
           for (let i = 0; i < allSkills.length; i++) {
             const sk = allSkills[i];
             lines.push(skillRow(theme, w, sk, ctx.orchestratorSkills.has(sk.dir), section === "orch" && i === skillIdx));
+          }
+
+          // Mode section
+          lines.push(boxBorder(theme, w, "sep"));
+          lines.push(sidebarRow(theme, w, [{ t: "Mode (Enter to toggle)", c: "dim", b: true }]));
+          {
+            const creative = ctx.mode === "creative";
+            const sel = section === "mode";
+            lines.push(sidebarRow(theme, w, [
+              { t: sel ? "▸ " : "  ", c: sel ? "accent" : "text" },
+              { t: creative ? "◆ " : "◇ ", c: creative ? "accent" : "dim" },
+              { t: creative ? "Creative (free-form)" : "Standard (strict/YAGNI)", c: sel ? "accent" : "text" },
+            ], sel));
           }
 
           // Memory section
@@ -213,7 +234,7 @@ export function openSidebar(ctx: AgentTeamContext) {
           lines.push(boxBorder(theme, w, "sep"));
           for (const help of [
             "Tab Switch focus ↑↓ Navigate",
-            "Enter Select team / Toggle skill / agent / memory",
+            "Enter Select team / Toggle skill / agent / memory / mode",
             "●=enabled ○=disabled (per group)",
             "Esc/Ctrl+Q Close sidebar",
           ]) {
@@ -249,6 +270,10 @@ export function openSidebar(ctx: AgentTeamContext) {
             if (section === "memory") {
               // Toggle memory on/off (persists to teams.yaml)
               toggleMemory(ctx);
+              tui.requestRender();
+            } else if (section === "mode") {
+              // Toggle orchestrator mode standard/creative
+              toggleMode(ctx);
               tui.requestRender();
             } else if (section === "teams") {
               // Switch to the selected team

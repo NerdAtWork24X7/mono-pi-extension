@@ -5,7 +5,7 @@ import { join } from "path";
 import type { AgentProc } from "./core";
 import { spawnRpcSubprocess } from "./core";
 import { SessionLogger, agentKey, agentNameKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, parseModelId, filterSkills, safeUnlink, shortModel, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
-import type { AgentTeamContext } from "./core";
+import type { AgentTeamContext, AgentMode } from "./core";
 import { resolveSkillPath } from "./config";
 import { buildExtensionCliArgs, buildScopeNameArgs } from "./extensions";
 import { availableAgentNames, piBin } from "./helpers";
@@ -18,6 +18,41 @@ const STREAM_INVALIDATE_THROTTLE_MS = 100;
 
 export const MAX_RESPONSE_LENGTH = 600000; // Subagent tool-result cap. Keep the marker string in dispatch_agent in sync.
 export const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
+
+/** Post-process a subagent's static system prompt before it is handed to the
+ *  `pi` subprocess. This is the single hook where the subagent prompt can be
+ *  adjusted at runtime (e.g. for the orchestrator's creative/standard mode).
+ *
+ *  In `creative` mode, drop the YAGNI / principles / minimalism constraints so
+ *  the subagent can explore freely (mirrors the orchestrator prompt behavior).
+ *  In `standard` mode the prompt is returned unchanged.
+ *
+ *  Returns the transformed prompt; callers append any trailing newline. */
+export function postProcessAgentPrompt(prompt: string, mode: AgentMode): string {
+  if (mode !== "creative") return prompt;
+  let out = prompt;
+  // Remove "# Principles" sections (heading -> next heading or EOF).
+  const lines = out.split("\n");
+  const filtered: string[] = [];
+  let inPrinciples = false;
+  for (const line of lines) {
+    if (/^# Principles\s*$/.test(line.trim())) { inPrinciples = true; continue; }
+    if (inPrinciples) {
+      if (/^#\s+/.test(line)) { inPrinciples = false; }
+      else continue;
+    }
+    filtered.push(line);
+  }
+  out = filtered.join("\n");
+  // Remove explicit minimalism / YAGNI / KISS guidance lines (whole-line).
+  out = out
+    .replace(/^- Make the smallest diff that satisfies the task\.\s*$/gm, "")
+    .replace(/^- Keep diffs minimal\.\s*$/gm, "")
+    .replace(/^- \*\*Minimalism & Craftsmanship\*\*.*\s*$/gm, "")
+    .replace(/\n{3,}/g, "\n\n");
+  return out.trim();
+}
+
 /** Auto-compactions tolerated within one dispatch before aborting as
  *  TASK_TOO_LARGE. Compactions are allowed to complete — the subagent keeps
  *  working — so large tasks aren't killed at their first sign of pressure.
@@ -767,8 +802,8 @@ export class ProcessManager {
   }
 
   // Write system prompt to temp file (avoids shell escaping issues with multi-line prompts)
-  writeSystemPrompt(ap: AgentProc) {
-    const content = `${ap.def.systemPrompt}\n\n`;
+  writeSystemPrompt(ap: AgentProc, mode: AgentMode = "standard") {
+    const content = `${postProcessAgentPrompt(ap.def.systemPrompt, mode)}\n\n`;
     if (ap.lastPromptHash === content && ap.systemPromptFile && existsSync(ap.systemPromptFile)) return; // skip if unchanged and file still exists
     ap.lastPromptHash = content;
     const key = agentKey(ap) + (ap.runId ? `-${ap.runId}` : "");
@@ -837,7 +872,7 @@ export class ProcessManager {
     ap.sessionFile = join(this.sessionDir(), `${agentKey(ap)}${ap.runId ? `-${ap.runId}` : ""}.json`);
 
     // Write system prompt to temp file to avoid CLI escaping issues
-    this.writeSystemPrompt(ap);
+    this.writeSystemPrompt(ap, ctx.mode);
 
     // Sync model: if agent def has no model, always use current orchestrator model
     const model = ap.teamModel || ap.def.model || this.orchestratorModel() || "google/gemini-2.5-flash";

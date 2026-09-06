@@ -88,10 +88,17 @@ export interface MemoryState {
  *      stdout into per-dispatch <sessionDir>/<agent>-debug.jsonl files. */
 export type DebugLevel = 0 | 1 | 2;
 
+/** Orchestrator system-prompt mode. `standard` keeps the strict YAGNI /
+ *  principles guidance; `creative` drops those constraints and lets the
+ *  model explore freely. Persisted in agent-team-config.json. */
+export type AgentMode = "standard" | "creative";
+
 export interface TeamConfig {
   activeTeam: string;
   gridCols: number;
   enabled: boolean;
+  /** Orchestrator system-prompt mode: "standard" (strict) or "creative". */
+  mode?: AgentMode;
   /** Master toggle for parallel batched subagent dispatch (dispatch_agents). */
   parallelDispatch?: boolean;
   /** Debug verbosity for the dispatch pipeline.
@@ -133,6 +140,8 @@ export interface AgentTeamContext {
   saved: Partial<TeamConfig>;
   wCtx: any;
   enabled: boolean;
+  /** Orchestrator system-prompt mode: "standard" (strict) or "creative". */
+  mode: AgentMode;
   parallelDispatch: boolean;
   maxParallel: number;
   batchClones: Set<AgentProc>;

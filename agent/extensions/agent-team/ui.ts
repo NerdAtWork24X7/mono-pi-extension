@@ -36,6 +36,11 @@ export function buildSystemPrompt(args: {
 
   const ctx = args.ctx;
 
+  // Orchestrator mode: "standard" (strict YAGNI/principles) or "creative"
+  // (constraints removed so the model can explore freely). Default standard.
+  const mode = (args.ctx.mode ?? "standard") as "standard" | "creative";
+  const creative = mode === "creative";
+
   const enabled = Array.from(ctx.procs.values()).filter(a => !ctx.disabledAgents.has(agentNameKey(a.def.name)));
 
   const dispatchMode = (tools: string): string =>
@@ -159,17 +164,20 @@ Every dispatch task MUST include:
     ? "\n## Tools (enabled)\n" + enabledTools.map(t => "- `" + t + "`").join("\n") + "\n"
     : "";
 
-  return {
-    systemPrompt: `## Identity
-You are the lead engineer and orchestrator. You are accountable for the complete lifecycle: understand the request, inspect the repository, plan, delegate, integrate results, verify behavior, and report truthfully. Subagents are disposable specialists, not authorities: they return findings or changes to you, and you must reconcile conflicts and validate their claims.
-
-## Operating mode
+  // ── Mode-dependent sections ──
+  // `creative` drops the YAGNI / principles / minimalism constraints so the
+  // model can pursue the most innovative solution; `standard` keeps them.
+  const operatingModeSection = creative
+    ? `## Operating mode
+Be deliberate before acting. Separate facts, hypotheses, decisions, and verification evidence. Think expansively and pursue the most innovative, high-quality solution rather than only the smallest change. Always take the route which gives the best user experience for the product you are developing. Do not delegate simple reasoning, but delegate work that benefits from independent context, specialized tools, parallel discovery, implementation, or verification.`
+    : `## Operating mode
 Be deliberate before acting. Separate facts, hypotheses, decisions, and verification evidence. Prefer the smallest change that fully satisfies the request. Do not delegate simple reasoning, but delegate work that benefits from independent context, specialized tools, parallel discovery, implementation, or verification.
 
-## Tone & Style
-Pragmatic, direct, and concise senior engineer. Monospace CLI format in GFM; no filler, apologies, or emojis. If uncertain about external libraries or facts, ${webFallback}.
+Always take the route which gives the best user experience for the product you are developing.`;
 
-## Task Ladder (stop at the first applicable rung)
+  const taskLadderSection = creative
+    ? ""
+    : `## Task Ladder (stop at the first applicable rung)
 1. **YAGNI**: Is this change strictly necessary? If not, skip it.
 2. **Platform/Stdlib**: Can this be done with native language/runtime features?
 3. **Existing Dependencies**: Is there an already-installed library that handles this?
@@ -180,8 +188,19 @@ Pragmatic, direct, and concise senior engineer. Monospace CLI format in GFM; no 
 - **KISS & YAGNI**: Keep solutions minimal; do not build unrequested abstractions.
 - **DRY**: Eliminate code duplication without over-abstracting.
 - **SOLID**: Maintain clean, decoupled modular design.
+- If you think bigger changes are better than patching existing code then ask user confirmation.
+`;
 
-${toolsSection}
+  return {
+    systemPrompt: `## Identity
+You are the lead engineer and orchestrator. You are accountable for the complete lifecycle: understand the request, inspect the repository, plan, delegate, integrate results, verify behavior, and report truthfully. Subagents are disposable specialists, not authorities: they return findings or changes to you, and you must reconcile conflicts and validate their claims.
+
+${operatingModeSection}
+
+## Tone & Style
+Pragmatic, direct, and concise senior engineer. Monospace CLI format in GFM; no filler, apologies, or emojis. If uncertain about external libraries or facts, ${webFallback}.
+
+${taskLadderSection}${toolsSection}
 ${subagents_header}
 ${tableRows}
 
@@ -302,12 +321,14 @@ export function initWidget(ctx: AgentTeamContext) {
         }
 
         const topBorder = boxBorder(theme, width, "top");
-        // ── Header: "Subagent Team" sits inside the box, left-aligned after the border ──
+        // ── Header: "Subagent Team" + active mode sits inside the box, left-aligned after the border ──
         const headerText = "Subagent Team";
-        const headerPad = Math.max(0, innerW - [...headerText].length);
+        const modeSuffix = " · " + (ctx.mode === "creative" ? "Creative" : "Standard");
+        const headerPad = Math.max(0, innerW - [...headerText].length - [...modeSuffix].length);
         const headerLine =
           theme.fg("border", "│ ") +
           theme.fg("accent", theme.bold(headerText)) +
+          theme.fg("dim", modeSuffix) +
           " ".repeat(headerPad) +
           " " + theme.fg("border", "│");
         const sepLine = boxBorder(theme, width, "sep");

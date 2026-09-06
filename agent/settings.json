@@ -1,9 +1,9 @@
 {
-  "lastChangelogVersion": "0.84.4",
+  "lastChangelogVersion": "0.85.1",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
   "defaultProvider": "kilo",
-  "defaultModel": "tencent/hy3:free",
+  "defaultModel": "inclusionai/ling-3.0-flash-fin:free",
   "defaultThinkingLevel": "high",
   "packages": [
     "npm:@juicesharp/rpiv-ask-user-question",
@@ -13,32 +13,42 @@
         "-index.ts"
       ]
     },
-    "npm:pi-updater",
-    "npm:@marckrenn/pi-sub-bar"
+    "npm:pi-updater"
   ],
   "theme": "cyberpunk",
   "hideThinkingBlock": false,
   "skills": [
-    "+skills/electron-scaffold/SKILL.md",
     "-skills/flet/SKILL.md",
     "-skills/pyside6/SKILL.md",
-    "-skills/improve-codebase-architecture/SKILL.md"
+    "-skills/improve-codebase-architecture/SKILL.md",
+    "-skills/electron-scaffold/SKILL.md",
+    "-skills/graphify/SKILL.md"
   ],
   "enabledModels": [
-    "cline-pass/cline-pass/kimi-k3",
-    "cline-pass/cline-pass/deepseek-v4-flash",
-    "cline-pass/cline-pass/deepseek-v4-pro",
-    "cline-pass/cline-pass/qwen3.8-max",
-    "cline-pass/cline-pass/glm-5.3",
-    "kilo/tencent/hy3:free"
+    "xiaomi-token-plan-ams/mimo-v2.5-pro",
+    "opencode-go/glm-5.3",
+    "opencode-go/glm-5.3-flash",
+    "opencode-go/hy3",
+    "opencode-go/deepseek-v4-pro",
+    "opencode-go/hy4-preview",
+    "opencode-go/qwen3.8-flash",
+    "opencode-go/gpt-5.6-luna",
+    "opencode-go/minimax-m3",
+    "opencode-go/qwen3.7-plus",
+    "opencode-go/qwen3.8-max",
+    "opencode-go/grok-4.6",
+    "opencode-go/kimi-k3",
+    "kilo/inclusionai/ling-3.0-flash-fin:free",
+    "kilo/stepfun/step-3.7-flash:free",
+    "opencode-go/deepseek-v4-flash-vision-exp"
   ],
   "extensions": [
-    "+extensions/custom-footer.ts",
     "+extensions/agent-team/index.ts",
     "+extensions/web_fetch_crawl4ai/index.ts",
     "-extensions/obscura/index.ts",
     "+extensions/browser.ts",
-    "+extension/pi-scope.ts"
+    "+extension/pi-scope.ts",
+    "+extensions/custom-footer.ts"
   ],
   "terminal": {
     "showTerminalProgress": true
