@@ -44,7 +44,7 @@
   ],
   "extensions": [
     "+extensions/agent-team/index.ts",
-    "+extensions/web_fetch_crawl4ai/index.ts",
+    "+extensions/web_fetch/index.ts",
     "-extensions/obscura/index.ts",
     "+extensions/browser.ts",
     "+extension/pi-scope.ts",

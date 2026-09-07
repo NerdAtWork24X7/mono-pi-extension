@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Standalone setup for the web-fetch (Crawl4AI) extension package.
+# Standalone setup for the web-fetch extension package.
 # Installs Python deps into this package's local .venv and ensures the
 # Chromium browser binary is available — no global `crwl`/venv required.
 set -euo pipefail

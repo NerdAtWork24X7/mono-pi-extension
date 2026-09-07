@@ -17,7 +17,7 @@ Most "multi-agent" setups on the internet do one of two things: (a) run every ag
 | 3 | **A structural quality gate** | `harsh_critic` reviews every worker deliverable and loops *revise → critique → revise* until `VERDICT: APPROVED` — **before** anything is tested or shipped. Quality control is built into the workflow, not left to chance. |
 | 4 | **Persistent project memory** | A background summarizer distills each turn into per-category files under `.pi_memory/` (Folder Structure, Architecture, Design Decisions, Facts, User Taste & Preferences, User Suggestions, Failures & Solutions); the orchestrator's system prompt points to those files every turn so it can read accumulated context when relevant. The agent "remembers" across sessions without bloating the live context. |
 | 5 | **Runtime team switching + parallel fan-out** | Define teams in YAML, switch them live with `/agents-team`, and fan one agent across many tasks — read-only agents run in parallel, writable ones serialize automatically. |
-| 6 | **Batteries included** | Web fetching via Obscura (Rust headless browser — fast startup, low memory) and Crawl4AI (persistent Chromium), Context7 docs lookup, token routing / cost tracking, browser automation, code-scope, and more — all shipped as extensions. |
+| 6 | **Batteries included** | Web fetching via Obscura (Rust headless browser — fast startup, low memory) and a persistent headless Chromium via Playwright, Context7 docs lookup, token routing / cost tracking, browser automation, code-scope, and more — all shipped as extensions. |
 | 7 | **It's an extension, not a new runtime** | It layers on top of `pi-coding-agent`. You keep the agent's existing tools, shortcuts, and UX, and gain orchestration. |
 
 ---
@@ -155,7 +155,7 @@ agent/
   extensions/
     agent-team/            # Core orchestrator extension (TypeScript source)
     obscura/              # Web-fetch via Obscura headless browser (setup.sh extracts binaries)
-    web_fetch_crawl4ai/    # Persistent-Chromium web fetch (setup-web-fetch.sh)
+    web_fetch_crawl4ai/    # Persistent-Chromium web fetch (Playwright, setup-web-fetch.sh)
     browser.ts, context7.ts, modelcost.ts, pi-scope.ts, TokenRouter.ts, ...
   skills/                  # Reusable skills (flet, pyside6, electron-scaffold, ...)
 .pi/                      # Project configuration

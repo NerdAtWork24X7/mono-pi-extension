@@ -14,7 +14,7 @@
 
 - [agent/extensions/agent-team/](agent/extensions/agent-team/): Core orchestrator extension (TypeScript) — lifecycle hooks, process manager, RPC dispatch, memory, UI, integrations.
 - [agent/agents/](agent/agents/): Per-subagent `.md` definitions (coder, tester, searcher, file_reader, documenter, doc_generator, image_analyzer, harsh_critic).
-- [agent/extensions/web_fetch_crawl4ai/](agent/extensions/web_fetch_crawl4ai/): Persistent-Chromium web fetch (Crawl4AI) with `setup-web-fetch.sh`.
+- [agent/extensions/web_fetch_crawl4ai/](agent/extensions/web_fetch_crawl4ai/): Persistent-Chromium web fetch (Playwright) with `setup-web-fetch.sh`.
 - [agent/extensions/](agent/extensions/): Other extensions — browser, context7, modelcost, pi-scope, TokenRouter, custom-footer, herdr-agent-state, kilo.
 - [agent/skills/](agent/skills/): Reusable skills (flet, pyside6, electron-scaffold, improve-codebase-architecture).
 

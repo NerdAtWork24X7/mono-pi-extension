@@ -4,10 +4,13 @@
 3. User request
 4. Other rules in this file
 
+**Extremely IMPORTANT** - Always understand user request fully before taking decision. Ask clarification questions when you don't fully understand.
+**Extremely IMPORTANT** - Undertand Indentify Plan Execute Verify
+
 ## 2. Scope & Execution
 - **Strict Scope**: Implement only what was requested. Make the smallest correct change. Do not refactor, rename, format-clean, or add unrequested dependencies. Report unrelated issues; do not fix them.
 - **Repository First**: Inspect CWD, read `README.md`/`CHANGELOG.md` if present, and search via `grep`/`find` before opening files. Never ask questions answerable from the repository.
-- **File & Tool Handling**: Read files >200 lines in targeted line ranges. Re-read edited sections before citing. Never run write/edit on the same file in parallel. The `edit` tool requires an EXACT byte-for-byte match of `oldString`.
+- **File & Tool Handling**: Read files >200 lines in targeted line ranges. Re-read edited sections before citing. Never run write/edit on the same file in parallel. The `custom_edit` tool requires an EXACT byte-for-byte match of `oldString`. Prioritize surgical edit instead of writing complete file.
 - **Ignored Paths**: `.git`, `node_modules`, `.agent`, `.next`, `__pycache__`, `.venv`, `.env`, `build`, `dist`, `coverage`.
 - **Python**: Use `<cwd>/.venv` and `uv`. Check installed package versions before changing.
 
