@@ -528,7 +528,7 @@ function renderCard(_ctx: AgentTeamContext, ap: AgentProc, w: number, theme: any
   // ── Line 1: ▌ ● Coder claude-3.5              12s ──
   const lines = [cardTitleLine(theme, w, statusColor, statusIcon, labelOverride ?? displayName(ap.def.name), shortModel(ap.model), timeStr)];
 
-  // ── Line 2: ▌   ████░░░░  45% · In 1.2k · Out 400 · � H=500 ──
+  // ── Line 2: ▌   ████░░░░  45% · In 1.2k · Out 400 · ⚡ H=500 ──
   if (ap.contextWindow > 0 && (ap.tokensUsed > 0 || ap.tokensOut > 0)) {
     const pct = Math.min(100, Math.round((ap.tokensUsed / ap.contextWindow) * 100));
     const barW = Math.min(10, Math.max(4, Math.floor((w - 4) / 4)));
@@ -542,7 +542,7 @@ function renderCard(_ctx: AgentTeamContext, ap: AgentProc, w: number, theme: any
       const parts: string[] = [];
       if (ap.cacheRead > 0) parts.push(`H=${fmtTok(ap.cacheRead)}`);
       if (ap.cacheSavedTotal > 0) parts.push(`Σ=${fmtTok(ap.cacheSavedTotal)}`);
-      cachePill = ` · � ${parts.join(" ")}`;
+      cachePill = ` · ⚡ ${parts.join(" ")}`;
     }
 
     // Drop cache pill if it would overflow; fall back to compact if still too wide

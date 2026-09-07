@@ -767,7 +767,7 @@ export default function (pi: ExtensionAPI) {
     if (!token) {
       // Loud, single-line warning. Server will 401 every POST otherwise.
       try {
-        notify?.(`� Pi Scope: no auth token — set OBS_AUTH_TOKEN env or --obs-token to match the server.`, "warning");
+        notify?.(`⚠️ Pi Scope: no auth token — set OBS_AUTH_TOKEN env or --obs-token to match the server.`, "warning");
       } catch { /* hasUI may be false */ }
       logObs("no_token_configured", { server_url: serverUrl });
     }
@@ -782,9 +782,9 @@ export default function (pi: ExtensionAPI) {
         const connected = await probeServer(serverUrl);
         try {
           if (connected) {
-            notify?.(`� Pi Scope: connected to ${serverUrl}`, "info");
+            notify?.(`✅ Pi Scope: connected to ${serverUrl}`, "info");
           } else {
-            notify?.(`� Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`,
+            notify?.(`⚠️ Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`,
               "warning");
           }
         } catch { /* hasUI may be false */ }
