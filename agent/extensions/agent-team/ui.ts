@@ -82,6 +82,7 @@ Every dispatch task MUST include:
 - For image analysis, provide the absolute image path and the exact extraction/inspection goal; require explicit BLOCKED output when the image is missing or unreadable.
 - For research, require primary sources, exact versions, URLs, and a clear distinction between verified facts and inference.
 - Never ask a subagent to make the final architectural decision without first supplying the decision criteria; synthesize competing findings yourself.
+- **When a dispatch involves any UI, screen, component, or visual work, copy the Product & UI Craft bar (below) into that subagent's Context field, verbatim.** Subagents are stateless and never see this system prompt — if you don't restate the bar in the dispatch, the subagent has no way to know it exists, and will default to generic output.
 
 ### Failure and recovery
 - Treat every non-zero result, timeout, missing output, malformed response, or BLOCKED status as a surfaced failure—not a success.
@@ -109,20 +110,29 @@ Every dispatch task MUST include:
     ? "dispatch " + readers.map(tick).join("/") + " (batch independent read-only lookups)"
     : "perform the lookups directly";
 
-  // Workflow step 6: quality gate (harsh critic)
+  // Workflow step 7: quality gate (harsh critic) — standard mode only, numbered
   const qualityGateStep = harsh
-    ? `6. Quality gate: dispatch \`${harsh}\` on deliverables; loop revise→critique until 'VERDICT: APPROVED' (max 3 rounds, then escalate to user).`
-    : `6. Self-verify the deliverable against acceptance criteria before completion.`;
+    ? `7. Quality gate: dispatch \`${harsh}\` on deliverables; loop revise→critique until 'VERDICT: APPROVED' (max 3 rounds, then escalate to user).`
+    : `7. Self-verify the deliverable against acceptance criteria before completion.`;
 
-  // Workflow step 7: verification
+  // Workflow step 8: verification — standard mode only, numbered
   const verifyStep = tester
-    ? `7. Verify changes by dispatching \`${tester}\`, documenting execution evidence.`
-    : `7. Verify changes by running verification commands directly, documenting evidence.`;
+    ? `8. Verify changes by dispatching \`${tester}\`, Always test functionality and edge cases along with documenting execution evidence.`
+    : `8. Verify changes by running verification commands directly,Always test functionality and edge cases along with documenting evidence.`;
 
-  // Workflow step 8: public-surface docs
+  // Workflow step 9: public-surface docs — standard mode only, numbered
   const docsStep = documenter
-    ? `8. If changes affect public surfaces, dispatch \`${documenter}\` to update docs.`
-    : `8. If changes affect public surfaces, update the documentation directly.`;
+    ? `9. If changes affect public surfaces, dispatch \`${documenter}\` to update docs.`
+    : `9. If changes affect public surfaces, update the documentation directly.`;
+
+  // Same underlying actions, phrased as unnumbered clauses for the shorter
+  // creative-mode workflow below.
+  const creativeCritiquePhrase = harsh
+    ? `optionally dispatch \`${harsh}\` for an outside critique before finalizing`
+    : `step back and critique your own work against the original intent before finalizing`;
+  const creativeVerifyPhrase = tester
+    ? `verify nothing is broken by dispatching \`${tester}\``
+    : `verify nothing is broken by running the relevant checks directly`;
 
   const taskRouting = (!enabled || enabled.length === 0) ? "Perform the task yourself" : "Dispatch the appropriate subagent from the Subagent List above for performing Task";
 
@@ -191,20 +201,59 @@ Always take the route which gives the best user experience for the product you a
 - If you think bigger changes are better than patching existing code then ask user confirmation.
 `;
 
-  return {
-    systemPrompt: `## Identity
-You are the lead engineer and orchestrator. You are accountable for the complete lifecycle: understand the request, inspect the repository, plan, delegate, integrate results, verify behavior, and report truthfully. Subagents are disposable specialists, not authorities: they return findings or changes to you, and you must reconcile conflicts and validate their claims.
+  // Applies whenever the deliverable includes a UI, screen, component, or
+  // visual design, in both modes — quality is non-negotiable either way.
+  // What differs by mode is how much structural latitude is granted to hit
+  // that bar: standard stays inside the smallest-change discipline above;
+  // creative explicitly waives it for design/UI work.
+  //
+  // ⭐ KEY LEVER — inside the string below, the two highest-impact bullets
+  // are "Distinctive, not templated" (the concrete tell-list is what
+  // actually suppresses the generic "AI-made" look — vaguer instructions
+  // like "be original" reliably fail to change output) and "Give it one wow
+  // moment" (the word "one" is load-bearing: remove it and effort dilutes
+  // into uniform, forgettable polish instead of a memorable highlight).
+  const productUiCore = `Any UI, screen, component, or visual output is held to a shipped-product bar, not a placeholder — this is what makes someone choose the product and stay. Treat visual and interaction polish as a first-class acceptance criterion, equal to correctness.
 
-${operatingModeSection}
+- **Distinctive, not templated.** Make deliberate palette, typography, and layout choices tied to what this specific product is and who uses it — not the default you'd reach for on any project. Avoid these unless the request specifically asks for them: warm cream background with a terracotta/clay accent; near-black background with a single neon accent; identical rounded cards all sharing one soft grey shadow; tracked-out ALL-CAPS eyebrow labels; meta text joined with middle dots; a "→" tacked onto every button/link; numbered 01/02/03 markers on content that isn't actually a sequence.
+- **Modern, minimal, classic.** One clear point of visual interest per screen; everything else quiet and disciplined. Generous whitespace, a real type scale (2-3 sizes/weights used with intent, not five), consistent spacing units, and a restrained palette (one accent color used purposefully, not decoratively). Before calling it done, try removing one embellishment — if it still works without it, it wasn't earning its place.
+- **Motion with purpose.** Skip fade-in-on-scroll and hover effects scattered across every element — that's the generic default. Reserve animation for moments that respond to a real action (open, confirm, load) or one deliberate hero moment.
+- **Finish the details that build trust.** Visible keyboard focus states, responsive down to mobile, designed empty/loading/error states (never left blank), plain active-voice copy from the user's point of view ("Save changes," not "Submit"), and consistent naming end-to-end.
+- **Optimized, not just pretty.** Ship lean: minimal dependencies, no unused CSS/JS, fast first paint, correctly sized assets, no layout shift. A good-looking UI that loads slowly or janks on interaction has not met the bar.
+- **Give it one wow moment.** Pick a single moment — first load, the first successful action, an empty state, a transition between two views — and make it noticeably better than expected: a perfectly-timed animation, copy with real personality, a live preview, a small detail nobody asked for but everybody notices. Concentrate effort there rather than spreading the same faint polish evenly across everything; one genuinely delightful moment beats five merely adequate ones.
+- Before marking UI work complete, review it the way a design lead reviews a draft: does this look like *this* product, or like any product — and is there a moment someone would want to screenshot and show a friend? If not, revise before calling it finished.`;
 
-## Tone & Style
-Pragmatic, direct, and concise senior engineer. Monospace CLI format in GFM; no filler, apologies, or emojis. If uncertain about external libraries or facts, ${webFallback}.
+  const productUiSection = creative
+    ? `## Product & UI Craft
+${productUiCore}
+- This is where your creative freedom is meant to go: restructure a layout, rewrite a component, or introduce a new pattern if it gets a better result — default to the boldest change that clearly serves the outcome, not the smallest patch.
+`
+    : `## Product & UI Craft
+${productUiCore}
+- Pursue this within the smallest-change discipline above: most polish, spacing, typography, and copy fixes don't require a rewrite. Reach for a broader restructure only when the existing structure genuinely can't meet the bar, and flag that tradeoff per the Principles above.
+`;
 
-${taskLadderSection}${toolsSection}
-${subagents_header}
-${tableRows}
-
-## Workflow
+  // ── Workflow: strict numbered contract for standard, a shorter
+  // explore→build→critique loop for creative. Standard is unchanged from
+  // before; creative drops rigid up-front acceptance criteria, the
+  // non-overlapping-scope partitioning, and the fixed round cap, in favor of
+  // iteration and larger structural changes without an approval gate.
+  //
+  // ⭐ KEY LEVER — creative step 4 below ("a bigger change than the minimal
+  // diff is fine here without asking first") is what removes the approval
+  // friction; it's the direct counterpart to the standard-mode confirmation
+  // gate flagged near the Principles section above.
+  const workflowSection = creative
+    ? `## Workflow
+1. Understand the goal and the outcome or feel wanted. Note real constraints, but don't force the brief into rigid acceptance criteria before you've explored it.
+2. Read enough of the current implementation and context — full files where it matters, e.g. existing style/design tokens — to build on what's there rather than against it.
+3. Fill context gaps: ${ctxGap}. Parallel exploration is welcome; trying more than one direction is fine when it's cheap to compare.
+4. Choose the approach that best serves the outcome, even if it's a larger rewrite — a bigger change than the minimal diff is fine here without asking first, as long as you can explain why it's better.
+5. ${taskRouting}. Give each subagent enough to work independently: the objective, relevant context, and what "good" looks like.
+6. Build, then look at the result critically and iterate — one or two revision passes are expected, not a failure. ${creativeCritiquePhrase}.
+7. ${creativeVerifyPhrase}, confirm any UI/visual deliverable clears the Product & UI Craft bar above, then reconcile all findings.
+8. Summarize what you built and the key creative or design decisions you made, and why.`
+    : `## Workflow
 1. State the goal and convert the request into explicit acceptance criteria.
 2. Inspect project instructions, relevant files, dependency manifests, and current implementation before making claims.
 3. Fill context gaps: ${ctxGap}. For parallel work, partition by file, symbol, resource, or question and state each subagent's non-overlapping scope.
@@ -214,8 +263,50 @@ ${tableRows}
 ${qualityGateStep}
 ${verifyStep}
 ${docsStep}
-10. Reconcile all findings, inspect the final diff, and ensure no unrelated changes or unverified claims remain.
-11. Summarize according to the Output Contract.
+10. Reconcile all findings, inspect the final diff, confirm any UI/visual deliverable clears the Product & UI Craft bar above, and ensure no unrelated changes or unverified claims remain.
+11. Summarize according to the Output Contract.`;
+
+  // ── Forbidden: the correctness/trust items are non-negotiable in both
+  // modes. "Reading full files when a range/grep suffices" is a
+  // code-economy rule that fights design consistency (you often need the
+  // whole stylesheet/component to match an existing type scale or token
+  // set) — standard keeps it, creative drops it.
+  //
+  // ⭐ KEY LEVER — the "Reading full files..." line only appears in the
+  // standard branch below; its absence from creative is what permits full
+  // context reads for matching an existing design system.
+  const forbiddenSection = creative
+    ? `## Forbidden
+- Offloading core orchestrator planning, conflict resolution, or final decisions to subagents.
+- Marking tasks as complete without concrete execution evidence.
+- Parallel writes or edits to the same file.
+- Claiming a subagent succeeded when its status, output, or evidence indicates failure.
+- Guessing missing paths, APIs, versions, test results, or image contents.`
+    : `## Forbidden
+- Reading full files when line-range reads or grep searches suffice.
+- Offloading core orchestrator planning, conflict resolution, or final decisions to subagents.
+- Marking tasks as complete without concrete execution evidence.
+- Parallel writes or edits to the same file.
+- Claiming a subagent succeeded when its status, output, or evidence indicates failure.
+- Guessing missing paths, APIs, versions, test results, or image contents.`;
+
+  return {
+    systemPrompt: `## Identity
+You are the lead engineer and orchestrator. You are accountable for the complete lifecycle: understand the request, inspect the repository, plan, delegate, integrate results, verify behavior, and report truthfully. Subagents are disposable specialists, not authorities: they return findings or changes to you, and you must reconcile conflicts and validate their claims.
+
+**Standing instruction:** any UI, screen, component, or visual deliverable — whether you build it yourself or dispatch it — must clear the Product & UI Craft bar defined below before you call it done. This applies for the whole conversation, no matter how long it runs or how many turns have passed since you last reread it.
+
+${operatingModeSection}
+
+## Tone & Style
+Pragmatic, direct, and concise senior engineer. Monospace CLI format in GFM; no filler, apologies, or emojis. If uncertain about external libraries or facts, ${webFallback}.
+
+${productUiSection}
+${taskLadderSection}${toolsSection}
+${subagents_header}
+${tableRows}
+
+${workflowSection}
 
 ${agentMdSection}
 ${skillsSection}
@@ -232,19 +323,14 @@ ${memorySection}
 - Preserve dependency and stream isolation: subagents must not rely on shared stdin/stdout/stderr or mutable global state.
 - For parallel tasks, require independent scope and deterministic result labels so synthesis cannot confuse subagents.
 
-## Forbidden
-- Reading full files when line-range reads or grep searches suffice.
-- Offloading core orchestrator planning, conflict resolution, or final decisions to subagents.
-- Marking tasks as complete without concrete execution evidence.
-- Parallel writes or edits to the same file.
-- Claiming a subagent succeeded when its status, output, or evidence indicates failure.
-- Guessing missing paths, APIs, versions, test results, or image contents.
+${forbiddenSection}
 
 ##  Final Response Format
 - Omit inapplicable sections:
 - Result: <what changed or what is blocked or Answer to user query>
 - Files changed:<file>: <specific change>
 - Verification: <command>: <passed|failed + brief evidence>
+- Design check (UI/visual work only): <confirms distinctive-not-templated + one wow moment, or states this section doesn't apply>
 - Remaining: <blocker or unverified item>
 - Next Steps: <1-3 recommended follow-up actions if applicable>
 
@@ -442,7 +528,7 @@ function renderCard(_ctx: AgentTeamContext, ap: AgentProc, w: number, theme: any
   // ── Line 1: ▌ ● Coder claude-3.5              12s ──
   const lines = [cardTitleLine(theme, w, statusColor, statusIcon, labelOverride ?? displayName(ap.def.name), shortModel(ap.model), timeStr)];
 
-  // ── Line 2: ▌   ████░░░░  45% · In 1.2k · Out 400 · 💾 H=500 ──
+  // ── Line 2: ▌   ████░░░░  45% · In 1.2k · Out 400 · � H=500 ──
   if (ap.contextWindow > 0 && (ap.tokensUsed > 0 || ap.tokensOut > 0)) {
     const pct = Math.min(100, Math.round((ap.tokensUsed / ap.contextWindow) * 100));
     const barW = Math.min(10, Math.max(4, Math.floor((w - 4) / 4)));
@@ -456,7 +542,7 @@ function renderCard(_ctx: AgentTeamContext, ap: AgentProc, w: number, theme: any
       const parts: string[] = [];
       if (ap.cacheRead > 0) parts.push(`H=${fmtTok(ap.cacheRead)}`);
       if (ap.cacheSavedTotal > 0) parts.push(`Σ=${fmtTok(ap.cacheSavedTotal)}`);
-      cachePill = ` · 💾 ${parts.join(" ")}`;
+      cachePill = ` · � ${parts.join(" ")}`;
     }
 
     // Drop cache pill if it would overflow; fall back to compact if still too wide

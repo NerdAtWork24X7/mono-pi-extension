@@ -26,7 +26,7 @@ import { join } from "path";
 
 import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, BatchDispatchResult, AgentMode } from "./core";
 import { displayName, shortModel, SessionLogger, RwLock, filterSkills } from "./core";
-import { loadPersistedConfig, savePersistedConfig, scanAgents, loadTeamsYaml, discoverEnabledSkills, loadAgentMd, teamsYamlPath } from "./config";
+import { loadPersistedConfig, savePersistedConfig, scanAgents, loadTeamsYaml, discoverEnabledSkills, loadAgentMd, teamsYamlPath, persistTeams } from "./config";
 import { scanExtensionPaths } from "./extensions";
 import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchMany as dispatchManyImpl, dispatchAgentMany as dispatchAgentManyImpl } from "./orchestration";
 import { MemoryManager, createMemoryManager, extractLastAssistantText, installMemoryEscEditor, memoryFiles } from "./memory";
@@ -34,7 +34,6 @@ import { buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalida
 import { registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
 import { registerCustomReadTool, registerCustomWriteTool, registerCustomEditTool } from "./custom_tools";
 import { fullModelId } from "./helpers";
-import { homedir } from "os";
 
 /** Remove session files older than 24 hours to prevent unbounded disk growth
  *  when the CLI exits abruptly and leaves orphaned files behind.
@@ -68,7 +67,7 @@ export class AgentTeam implements AgentTeamContext {
   teams: Record<string, TeamMember[]> = {};
   saved: Partial<TeamConfig> = {};
   activeTeam = "";
-  gridCols = 1;
+  gridCols = 2;
   animFrame = 0;
   wCtx: any = null;
   wInvalidate: (() => void) | null = null;
@@ -116,7 +115,7 @@ export class AgentTeam implements AgentTeamContext {
   constructor(pi: ExtensionAPI) {
     this.pi = pi;
     this.saved = loadPersistedConfig();
-    this.gridCols = this.saved.gridCols ?? 1;
+    this.gridCols = this.saved.gridCols ?? 2;
     this.enabled = this.saved.enabled ?? true;
     this.parallelDispatch = this.saved.parallelDispatch ?? true;
     this.maxParallel = this.saved.maxParallel ?? 5;
@@ -170,7 +169,9 @@ export class AgentTeam implements AgentTeamContext {
   }
 
   writeSystemPrompt(ap: AgentProc) {
-    this.procMgr.writeSystemPrompt(ap, this.mode);
+    // Pass memory info so subagent prompts get the Project Memory section when
+    // memory is enabled (mirrors how the orchestrator prompt receives it).
+    this.procMgr.writeSystemPrompt(ap, this.mode, this.memoryManager ? { dir: this.memoryDir, files: memoryFiles(this.memoryDir) } : null);
   }
 
   cleanSystemPrompt(ap: AgentProc) {
@@ -292,7 +293,8 @@ export class AgentTeam implements AgentTeamContext {
 
   async loadAgents(cwd: string): Promise<void> {
 
-    this.sessionDir = join(homedir(), ".pi", "agent-team-log", "agent-sessions");
+    // Project-local so each project keeps its own session logs.
+    this.sessionDir = join(cwd, ".pi", "agent-team-log", "agent-sessions");
     this.memoryDir = join(cwd, ".pi_memory");
     mkdirSync(this.sessionDir, { recursive: true });
     // Level-2 debug traces land next to the session files.
@@ -321,7 +323,16 @@ export class AgentTeam implements AgentTeamContext {
       this.memoryManager = createMemoryManager(this, this.memoryModel);
     }
 
-    if (!Object.keys(this.teams).length) this.teams = { all: this.allDefs.map(d => ({ name: d.name })) };
+    if (!Object.keys(this.teams).length) {
+      this.teams = { all: this.allDefs.map(d => ({ name: d.name })) };
+      // Seed teams.yaml (project-local) with the fallback so later sidebar
+      // toggles find their members in the file and persist correctly.
+      // Without this, updateTeamsYaml loads an empty file, finds no member
+      // to mutate, and every toggle is silently lost.
+      // memory_model is seeded explicit-off with no model; toggleMemory
+      // falls back to the orchestrator's model when enabling.
+      persistTeams(this.teams, "", false);
+    }
   }
 
   // ── Shared enable/disable (used by command + shortcut) ─────────

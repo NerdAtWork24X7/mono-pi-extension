@@ -59,7 +59,7 @@ const OBSCURA_BIN: string = (() => {
 
 const CACHE_DIR = process.env.WEB_FETCH_CACHE_DIR
   ? resolve(process.env.WEB_FETCH_CACHE_DIR)
-  : join(homedir(), ".pi", "web-fetch-cache");
+  : join(process.cwd(), ".pi", "web-fetch-cache"); // project-local
 
 function envMs(name: string, fallback: number): number {
   const n = Number(process.env[name]);

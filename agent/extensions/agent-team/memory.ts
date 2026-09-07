@@ -136,8 +136,9 @@ export function toggleMemory(ctx: AgentTeamContext): void {
     ctx.memoryManager = null;
     ctx.memoryModel = "";
   } else {
-    // Enable — use preserved original model or read from teams.yaml
-    const model = ctx.originalMemoryModel || loadTeamsYaml(teamsYamlPath()).memoryModel || "";
+    // Enable — use preserved original model, teams.yaml model, or fall back
+    // to the orchestrator's current model when none is specified.
+    const model = ctx.originalMemoryModel || loadTeamsYaml(teamsYamlPath()).memoryModel || ctx.orchestratorModel || "";
     if (model) {
       ctx.originalMemoryModel = model;
       ctx.memoryModel = model;

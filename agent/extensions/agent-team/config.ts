@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync, existsSync, writeFileSync, statSync } from "fs";
-import { join } from "path";
+import { readFileSync, readdirSync, existsSync, writeFileSync, statSync, mkdirSync } from "fs";
+import { dirname, join } from "path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { scanDirs } from "./core";
 import type { AgentDef, TeamMember, TeamConfig } from "./core";
@@ -131,10 +131,32 @@ function parseAgentSkills(raw?: string): string[] | undefined {
   return names;
 }
 
-/** Absolute path to the team definitions file (teams.yaml). Single source
- *  for the path — it was previously rebuilt inline in 4 places. */
+/** Project-local settings dir: <cwd>/.pi/settings. The pi CLI is launched
+ *  from the project root, so process.cwd() identifies the current project.
+ *  Project files take precedence on read; writes always go here so each
+ *  project carries its own agent-team configuration. */
+function projectSettingsPath(rel: string): string {
+  return join(process.cwd(), ".pi", "settings", rel);
+}
+
+function projectTeamsYamlPath(): string {
+  return projectSettingsPath(join("agents", "teams.yaml"));
+}
+
+/** Read path for the team definitions file (teams.yaml): project-local
+ *  <cwd>/.pi/settings/agents/teams.yaml when present, otherwise the global
+ *  agent-dir copy. Single source for the path — it was previously rebuilt
+ *  inline in 4 places. */
 export function teamsYamlPath(): string {
+  const p = projectTeamsYamlPath();
+  if (existsSync(p)) return p;
   return join(getAgentDir(), "agents", "teams.yaml");
+}
+
+/** Write path for teams.yaml — always project-local so toggles persist
+ *  per project instead of mutating the global config. */
+function teamsYamlWritePath(): string {
+  return projectTeamsYamlPath();
 }
 
 /** Resolve a skill short name to an absolute SKILL.md path.
@@ -286,7 +308,7 @@ export function loadAgentMd(cwd: string): string | null {
 // ── Config Persistence ────────────────────────────────────────────────
 
 /** Cached result keyed by mtimeMs. Invalidates when teams.yaml changes. */
-let teamsYamlCache: { key: number; parsed: ParsedTeams } | null = null;
+let teamsYamlCache: { key: string; parsed: ParsedTeams } | null = null;
 
 /** Load and parse teams.yaml, cached by mtimeMs so `loadAgents` doesn't
  *  re-read+re-parse on every toggle. Returns an empty ParsedTeams when
@@ -298,9 +320,10 @@ export function loadTeamsYaml(filePath: string): ParsedTeams {
   }
   let mtime = 0;
   try { mtime = statSync(filePath).mtimeMs; } catch { /* fall through */ }
-  if (teamsYamlCache && teamsYamlCache.key === mtime) return teamsYamlCache.parsed;
+  const key = `${filePath}:${mtime}`;
+  if (teamsYamlCache && teamsYamlCache.key === key) return teamsYamlCache.parsed;
   const parsed = parseTeamsYaml(readFileSync(filePath, "utf-8"));
-  teamsYamlCache = { key: mtime, parsed };
+  teamsYamlCache = { key, parsed };
   return parsed;
 }
 
@@ -327,9 +350,12 @@ export function saveTeamsYaml(filePath: string, data: ParsedTeams): void {
   lines.push("#       A background subprocess summarizes each orchestrator turn and writes");
   lines.push("#       per-category files under <cwd>/.pi_memory/.");
   lines.push("");
-  if (data.memoryModel) {
+  // Write the memory_model block whenever any part of it is set, so a
+  // seeded file always carries an explicit `active:` switch (false by
+  // default when no model is configured).
+  if (data.memoryModel || data.memoryActive !== undefined) {
     lines.push("memory_model:");
-    lines.push(`  model: ${data.memoryModel}`);
+    if (data.memoryModel) lines.push(`  model: ${data.memoryModel}`);
     lines.push(`  active: ${data.memoryActive === true ? "true" : "false"}`);
     lines.push("");
   }
@@ -345,26 +371,49 @@ export function saveTeamsYaml(filePath: string, data: ParsedTeams): void {
   }
   // Invalidate the in-memory cache since we just wrote new content.
   teamsYamlCache = null;
+  mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, lines.join("\n") + "\n");
 }
 
+/** Persist the given teams (plus memory_model flags) to the project-local
+ *  teams.yaml. Used to seed the file when it doesn't exist yet, so that
+ *  subsequent updateTeamsYaml calls find their members and persist. */
+export function persistTeams(
+  teams: Record<string, TeamMember[]>,
+  memoryModel?: string,
+  memoryActive?: boolean,
+): void {
+  saveTeamsYaml(teamsYamlWritePath(), {
+    teams,
+    ...(memoryModel ? { memoryModel } : {}),
+    ...(memoryActive !== undefined ? { memoryActive } : {}),
+  });
+}
+
 /** Read-modify-write teams.yaml in one step (load → mutate → save), so
- *  toggle sites don't each rebuild the load/save round-trip. */
+ *  toggle sites don't each rebuild the load/save round-trip. Loads from
+ *  the effective read path (project or global fallback) and always writes
+ *  to the project-local path, migrating global config on first write. */
 export function updateTeamsYaml(mutate: (parsed: ParsedTeams) => void): void {
-  const tp = teamsYamlPath();
-  const parsed = loadTeamsYaml(tp);
+  const parsed = loadTeamsYaml(teamsYamlPath());
   mutate(parsed);
-  saveTeamsYaml(tp, parsed);
+  saveTeamsYaml(teamsYamlWritePath(), parsed);
 }
 
 export const CONFIG_FILE = "agent-team-config.json";
 
+/** Load persisted config: project-local <cwd>/.pi/settings/agent-team-config.json
+ *  when present, otherwise the global agent-dir copy. */
 export function loadPersistedConfig(): Partial<TeamConfig> {
-  const p = join(getAgentDir(), CONFIG_FILE);
-  if (!existsSync(p)) return {};
-  try { return JSON.parse(readFileSync(p, "utf-8")); } catch { return {}; }
+  const p = projectSettingsPath(CONFIG_FILE);
+  const file = existsSync(p) ? p : join(getAgentDir(), CONFIG_FILE);
+  if (!existsSync(file)) return {};
+  try { return JSON.parse(readFileSync(file, "utf-8")); } catch { return {}; }
 }
 
+/** Persist config to the project-local path so settings are per project. */
 export function savePersistedConfig(cfg: TeamConfig) {
-  writeFileSync(join(getAgentDir(), CONFIG_FILE), JSON.stringify(cfg, null, 2));
+  const p = projectSettingsPath(CONFIG_FILE);
+  mkdirSync(dirname(p), { recursive: true });
+  writeFileSync(p, JSON.stringify(cfg, null, 2));
 }

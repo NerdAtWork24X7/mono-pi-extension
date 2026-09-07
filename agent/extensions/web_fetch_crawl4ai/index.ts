@@ -1,7 +1,6 @@
 import { createHash } from "crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { join, resolve, dirname } from "path";
-import { homedir } from "os";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@mariozechner/pi-ai";
@@ -15,7 +14,7 @@ function envNum(name: string, fallback: number): number {
 const CACHE_NAMESPACE = "crawl4ai";
 const CACHE_DIR = process.env.WEB_FETCH_CACHE_DIR
 	? resolve(process.env.WEB_FETCH_CACHE_DIR)
-	: join(homedir(), ".pi", "web-fetch-cache");
+	: join(process.cwd(), ".pi", "web-fetch-cache"); // project-local
 const CACHE_TTL_MS = envNum("WEB_FETCH_CACHE_TTL_MS", 3_600_000); // 1h
 const CRAWL_TIMEOUT_MS = envNum("WEB_FETCH_CRAWL_TIMEOUT_MS", 60_000); // whole-batch cap
 const BATCH_CONCURRENCY = envNum("WEB_FETCH_CONCURRENCY", 4); // parallel tabs in the one Chromium

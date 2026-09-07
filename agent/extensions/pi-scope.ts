@@ -1,4 +1,19 @@
-
+/**
+ * pi-scope.ts — Pi Scope extension for Pi agents (DEPRECATED)
+ *
+ * ╔══════════════════════════════════════════════════════════════════════╗
+ * ║  DEPRECATED: Use the capture endpoints instead —                    ║
+ * ║  POST /capture/llm-request and POST /capture/llm-response           ║
+ * ║                                                                     ║
+ * ║  Any harness (Pi, other agents, scripts) can POST the raw           ║
+ * ║  provider-format request/response bodies to the scope server.       ║
+ * ║  No Pi-specific extension needed. See server.ts capture routes.     ║
+ * ╚══════════════════════════════════════════════════════════════════════╝
+ *
+ * This extension hooks the Pi agent lifecycle and streams events to
+ * the scope server. It still works but the capture endpoint approach
+ * is recommended for new integrations.
+ */
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -160,7 +175,17 @@ interface BranchNavPayload {
 }
 
 // ━━ Module-scope state ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-let seqCounter = 0;
+// Per-session monotonic sequence counters. Seeded from the server at boot for
+// a resumed session so continued turns keep numbering where the session left
+// off — restarting at 0 would collide on the server's (session_id, seq) UNIQUE
+// index and every continued message would be silently dropped by INSERT OR
+// IGNORE, leaving transcripts stuck at the original session's data.
+const seqBySession = new Map<string, number>();
+function nextSeq(sessionId: string): number {
+  const n = seqBySession.get(sessionId) ?? 0;
+  seqBySession.set(sessionId, n + 1);
+  return n;
+}
 
 // Last text captured from a message_end → assistant_message event.  Used as a
 // definitive fallback in agent_end when scanning event.messages yields nothing
@@ -246,6 +271,34 @@ async function probeServer(url: string): Promise<boolean> {
     return res.ok;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Seed the seq counter for a resumed session from the server's highest recorded
+// seq for that session (GET /sessions/:id/seq, loopback-trusted — no auth
+// needed, matching POST /events). Using the auth-gated events endpoint here
+// broke dev setups where the extension can't resolve the server token: the seed
+// 401'd, the counter restarted at 0, and every continued event collided on the
+// (session_id, seq) UNIQUE index and was silently dropped. On failure (server
+// down, session unknown) we start at 0 — the previous behavior. Fire-and-forget;
+// a short timeout keeps this from ever stalling agent boot.
+async function seedSessionSeq(sessionId: string, url: string): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    const res = await fetch(
+      `${url.replace(/\/+$/, "")}/sessions/${encodeURIComponent(sessionId)}/seq`,
+      { signal: controller.signal }
+    );
+    if (!res.ok) return;
+    const data: any = await res.json();
+    if (typeof data?.seq === "number" && data.seq >= 0) {
+      seqBySession.set(sessionId, data.seq + 1);
+    }
+  } catch {
+    // server unreachable — start at 0
   } finally {
     clearTimeout(timer);
   }
@@ -387,13 +440,14 @@ function createEventEnvelope<T>(
     sessionFile?: string;
     cwd: string;
     agentName?: string;
+    parentSessionId?: string;
     pool: string;
     tags: string[];
     provider?: string;
     model?: string;
   }
 ): ObsEventEnvelope<T> {
-  const seq = seqCounter++;
+  const seq = nextSeq(sessionInfo.sessionId);
   return {
     event_id: crypto.randomUUID(),
     ts: new Date().toISOString(),
@@ -402,6 +456,7 @@ function createEventEnvelope<T>(
     session_file: sessionInfo.sessionFile,
     cwd: sessionInfo.cwd,
     agent_name: sessionInfo.agentName,
+    parent_session_id: sessionInfo.parentSessionId,
     pool: sessionInfo.pool,
     tags: sessionInfo.tags,
     provider: sessionInfo.provider,
@@ -422,14 +477,14 @@ class EventQueue {
   private isFlushing = false;
   private consecutiveFailures = 0;
   private droppedEventsCount = 0;
-  private getNextSeq: () => number;
+  private getNextSeq: (sessionId: string) => number;
 
   constructor(
     private serverUrl: string,
     private tokenProvider: () => string,
     private pi: ExtensionAPI,
     private onPostFailed: (err: any) => void,
-    getNextSeq: () => number
+    getNextSeq: (sessionId: string) => number
   ) {
     this.getNextSeq = getNextSeq;
   }
@@ -467,7 +522,7 @@ class EventQueue {
       },
       // Allocate a real monotonic seq instead of -1 (which would collide on the
       // server's (session_id, seq) UNIQUE index if overflow recurs).
-      seq: this.getNextSeq(),
+      seq: this.getNextSeq(event.session_id),
     };
   }
 
@@ -606,6 +661,7 @@ export default function (pi: ExtensionAPI) {
     sessionFile?: string;
     cwd: string;
     agentName?: string;
+    parentSessionId?: string;
     pool: string;
     tags: string[];
     provider?: string;
@@ -628,8 +684,20 @@ export default function (pi: ExtensionAPI) {
 
   // ━━ session_start ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   pi.on("session_start", async (event, ctx) => {
+    // Context snapshot taken NOW. pi invalidates the ctx when the session is
+    // replaced (ctx.newSession()/ctx.switchSession()/ctx.reload()), and the
+    // runner fires session_start again for the new session. Work that survives
+    // past this handler must use only these captured values — touching ctx after
+    // an await (e.g. the probe below) would throw the stale-ctx error and crash
+    // the whole agent process mid-turn.
+    const notify = (() => { try { return ctx.ui?.notify?.bind(ctx.ui); } catch { return undefined; } })();
+    const cwd = (() => { try { return ctx.cwd; } catch { return undefined; } })();
+    const sessId = (() => { try { return ctx.sessionManager.getSessionId(); } catch { return undefined; } })();
+    const sessFile = (() => { try { return ctx.sessionManager.getSessionFile(); } catch { return undefined; } })();
+    const sessModel = (() => { try { return ctx.model; } catch { return undefined; } })();
+
     // 1. Load env files from CWD
-    loadEnv(ctx.cwd);
+    if (cwd) loadEnv(cwd);
 
     // 2. Resolve parameters
     const serverUrl = (pi.getFlag("obs-server-url") as string) || process.env.OBS_SERVER_URL || "http://127.0.0.1:43190";
@@ -660,6 +728,12 @@ export default function (pi: ExtensionAPI) {
       process.env.OBS_NAME ||
       process.env.SCOPE_NAME ||
       genAgentName();
+    // Exact spawn linkage: the harness that spawns a subagent passes the
+    // PARENT pi session id in SCOPE_PARENT_SESSION. The server stores it on
+    // the session row so the UI can nest the subagent under the session that
+    // spawned it — no timestamp/args inference needed. Set it (per process)
+    // when launching subagents, e.g. SCOPE_PARENT_SESSION=<parent session_id>.
+    const parentSessionId = (process.env.SCOPE_PARENT_SESSION || "").trim() || undefined;
 
     // Parse tags
     const rawTag = pi.getFlag("o-tag");
@@ -674,8 +748,8 @@ export default function (pi: ExtensionAPI) {
       tags = process.env.OBS_TAG.split(",").map(t => t.trim()).filter(Boolean);
     }
 
-    // 3. Reset seq counter + boot-snapshot gate
-    seqCounter = 0;
+    // 3. Reset per-session seq counters + boot-snapshot gate
+    seqBySession.clear();
     lastAssistantText = null;
     lastToolResultText = null;
 
@@ -687,48 +761,58 @@ export default function (pi: ExtensionAPI) {
       (err) => {
         logObs("post_failed", { error: err?.message || String(err) });
       },
-      () => seqCounter++
+      (sid: string) => nextSeq(sid)
     );
 
     if (!token) {
       // Loud, single-line warning. Server will 401 every POST otherwise.
       try {
-        ctx.ui?.notify?.(
-          `� Pi Scope: no auth token — set OBS_AUTH_TOKEN env or --obs-token to match the server.`,
-          "warning",
-        );
+        notify?.(`� Pi Scope: no auth token — set OBS_AUTH_TOKEN env or --obs-token to match the server.`, "warning");
       } catch { /* hasUI may be false */ }
       logObs("no_token_configured", { server_url: serverUrl });
     }
 
     // 4b. Simple connectivity check — tell the operator whether the obs server
     // is reachable. Fire-and-forget with a short timeout so boot never blocks.
+    // The ctx may be invalidated (switch_session/new_session) while the probe is
+    // in flight — only captured notify is used, and the whole block is guarded so
+    // a stale snapshot can never crash the agent mid-turn.
     void (async () => {
-      const connected = await probeServer(serverUrl);
       try {
-        if (connected) {
-          ctx.ui?.notify?.(`� Pi Scope: connected to ${serverUrl}`, "info");
-        } else {
-          ctx.ui?.notify?.(
-            `� Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`,
-            "warning",
-          );
-        }
-      } catch { /* hasUI may be false */ }
-      logObs(connected ? "server_connected" : "server_unreachable", { server_url: serverUrl });
+        const connected = await probeServer(serverUrl);
+        try {
+          if (connected) {
+            notify?.(`� Pi Scope: connected to ${serverUrl}`, "info");
+          } else {
+            notify?.(`� Pi Scope: NOT connected to ${serverUrl}. If that's intentional, ignore this — otherwise start the server with \`just obs\`.`,
+              "warning");
+          }
+        } catch { /* hasUI may be false */ }
+        logObs(connected ? "server_connected" : "server_unreachable", { server_url: serverUrl });
+      } catch {
+        // Session was replaced while probing — nothing to report, and the new
+        // session_start already took over. Never throw into the runner.
+      }
     })();
 
     // 5. Initialize session info
     sessionInfo = {
-      sessionId: ctx.sessionManager.getSessionId(),
-      sessionFile: ctx.sessionManager.getSessionFile(),
-      cwd: ctx.cwd,
+      sessionId: sessId,
+      sessionFile: sessFile,
+      cwd,
       agentName: name,
+      parentSessionId,
       pool,
       tags,
-      provider: ctx.model?.provider,
-      model: ctx.model?.id,
+      provider: sessModel?.provider,
+      model: sessModel?.id,
     };
+
+    // 5b. If this process resumed an existing pi session, continue its event
+    // sequence where the server left off instead of restarting at 0 (which
+    // would collide on the server's (session_id, seq) UNIQUE index and drop
+    // every continued turn). Fire-and-forget — boot must never block.
+    void seedSessionSeq(sessionInfo.sessionId, serverUrl);
 
     // 6. Log boot
     logObs("obs boot", { serverUrl, pool, tags, agentName: name });

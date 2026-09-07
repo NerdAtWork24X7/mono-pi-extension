@@ -11,13 +11,14 @@
  * subagents consume it.
  */
 
-import { homedir } from "os";
 import { join } from "path";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from "fs";
 import { randomBytes } from "crypto";
 import { safeUnlink } from "./core";
 
-const CACHE_DIR = join(homedir(), ".pi", "cache");
+// Project-local so each project has an independent model-list cache.
+// The pi CLI (and spawned subagents) run with the project root as cwd.
+const CACHE_DIR = join(process.cwd(), ".pi", "cache");
 const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 /** Owner-only. Cached model lists can reflect account-specific entitlements
