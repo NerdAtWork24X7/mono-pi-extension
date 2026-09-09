@@ -234,7 +234,7 @@ export function registerCustomReadTool(pi: ExtensionAPI) {
   pi.registerTool({
     name: "custom_read",
     label: "Custom Read",
-    description: "Read a file or line range. Accepts path or file, plus optional offset and limit.",
+    description: "Read file text or line range. Accepts path or file alias, plus optional offset and limit.",
     parameters: Type.Object({
       path: Type.Optional(Type.String()),
       file: Type.Optional(Type.String()),
@@ -333,7 +333,7 @@ export function registerCustomWriteTool(pi: ExtensionAPI) {
   pi.registerTool({
     name: "custom_write",
     label: "Custom Write",
-    description: "Write complete file contents. Accepts path/file and content/text/data aliases for DeepSeek compatibility.",
+    description: "Write complete file contents to disk. Accepts path/file and content/text/data aliases.",
     parameters: Type.Object({
       path: Type.Optional(Type.String()),
       file: Type.Optional(Type.String()),
@@ -408,7 +408,7 @@ export function registerCustomEditTool(pi: ExtensionAPI) {
   pi.registerTool({
     name: "custom_edit",
     label: "Custom Edit",
-    description: "Safely replace text in a file. Accepts path/file, oldString/old_text/search, and newString/new_text/replace aliases.",
+    description: "Replace exact text in a file. Accepts path/file, oldString/search, and newString/replace aliases.",
     parameters: Type.Object({
       path: Type.Optional(Type.String()), file: Type.Optional(Type.String()),
       oldString: Type.Optional(Type.String()), old_string: Type.Optional(Type.String()), old_text: Type.Optional(Type.String()), search: Type.Optional(Type.String()),

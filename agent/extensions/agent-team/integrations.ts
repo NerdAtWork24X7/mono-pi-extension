@@ -74,11 +74,11 @@ export function registerDispatchAgentTool(pi: ExtensionAPI, team: AgentTeamConte
   pi.registerTool({
     name: "dispatch_agent",
     label: "Dispatch Agent",
-    description: "Delegate one independent task to a specialist in a fresh isolated process. The worker sees no orchestrator context, other workers, or unsaved reasoning, so include objective, scope, relevant paths/symbols and snippets, constraints, acceptance criteria, and an explicit output format with status, evidence, errors, and uncertainty. Use one consolidated dispatch for related writable edits; never overlap writes. For large generated files, provide a path and specification rather than pasting the entire file.",
+    description: "Delegate an isolated task to a specialized subagent. Provide explicit objective, file paths, constraints, and required output format.",
     parameters: Type.Object({
-      agent: Type.String({ description: "Agent name (case-insensitive)" }),
-      task: Type.String({ description: "Task description for the agent. Use this OR `tasks`." }),
-      tasks: Type.Optional(Type.Array(Type.String(), { description: "Multiple task descriptions for the SAME agent — spawns one isolated subagent per task (parallel for read-only agents, serialized for writable ones). When dispatching multiple instances of the same agent partition the work (URLs, queries, files) so each task is distinct to avoid duplicate work. For writable agents prefer a single consolidated `task` over many small `tasks` — they run serialized with a cold start each. Use instead of `task`." })),
+      agent: Type.String({ description: "Target agent name (e.g. coder, tester, searcher)" }),
+      task: Type.String({ description: "Single task description with objective, context, and criteria. Use this OR `tasks`." }),
+      tasks: Type.Optional(Type.Array(Type.String(), { description: "Batch tasks for the same agent (parallel for read-only agents, serialized for writable agents)." })),
     }),
 
     async execute(_id, params, signal, onUpdate, _ctx) {
@@ -221,18 +221,14 @@ export function registerDispatchAgentsTool(pi: ExtensionAPI, team: AgentTeamCont
   pi.registerTool({
     name: "dispatch_agents",
     label: "Dispatch Agents (parallel, read-only)",
-    description:
-      "Run independent READ-ONLY tasks concurrently and return every result labeled by agent and task. " +
-      "Each task must have a distinct non-overlapping scope and include objective, context, acceptance criteria, and output/evidence requirements. " +
-      "Only read-only agents are allowed; writable agents must use dispatch_agent and must never overlap file mutations. " +
-      "Treat non-zero exits, timeouts, empty/malformed output, and BLOCKED results as failures surfaced to the orchestrator.",
+    description: "Run independent read-only tasks concurrently across subagents. Each task must have distinct scope and criteria. Writable agents are not permitted.",
     parameters: Type.Object({
       tasks: Type.Array(
         Type.Object({
-          agent: Type.String({ description: "Agent name (case-insensitive)" }),
-          task: Type.String({ description: "Task description for the agent" }),
+          agent: Type.String({ description: "Read-only agent name (e.g. searcher, file_reader)" }),
+          task: Type.String({ description: "Task description with objective and relevant paths/symbols" }),
         }),
-        { description: "Independent read-only lookups to run concurrently." },
+        { description: "Concurrent read-only tasks" },
       ),
     }),
 

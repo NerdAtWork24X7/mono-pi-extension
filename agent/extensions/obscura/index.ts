@@ -345,45 +345,35 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "web-fetch",
     label: "Web Fetch",
-    description:
-      "Fetch a web page (Markdown/text/HTML via Obscura headless browser engine). " +
-      "If 'query' is given, run a DuckDuckGo search and fetch the top results; " +
-      "otherwise fetch 'url' directly. Supports JavaScript-rendered pages. " +
-      "Stealth mode (real Chrome TLS/HTTP fingerprint + tracker blocking) is on by default " +
-      "to bypass anti-bot protection; set stealth=false to disable. Optional 'proxy' routes " +
-      "the request through a proxy (http/socks5).",
+    description: "Fetch web pages as Markdown/HTML via headless browser, or search DuckDuckGo via 'query'. Supports JS, anti-bot stealth, and proxy.",
     parameters: Type.Object({
       url: Type.Optional(
-        Type.String({ description: "URL to fetch. Omit if using query.", default: "" }),
+        Type.String({ description: "URL to fetch (omit if using query)", default: "" }),
       ),
       raw: Type.Optional(
-        Type.Boolean({ description: "Return raw HTML instead of markdown", default: false }),
+        Type.Boolean({ description: "Return raw HTML instead of markdown (default false)", default: false }),
       ),
       query: Type.Optional(
         Type.String({
-          description: "Search query — runs DuckDuckGo first, then fetches top results.",
+          description: "Search query to find and fetch top DuckDuckGo results",
           default: "",
         }),
       ),
       maxResults: Type.Optional(
         Type.Number({
-          description: "Max top DuckDuckGo results to fetch (1–5, used with query)",
+          description: "Max search results to fetch (1–5, default 5)",
           default: 5,
         }),
       ),
       stealth: Type.Optional(
         Type.Boolean({
-          description:
-            "Stealth mode: consistent Windows-Chrome TLS fingerprint + tracker blocking. " +
-            "Default true (env WEB_FETCH_STEALTH). Use for sites with bot detection (e.g. Cloudflare).",
+          description: "Bypass bot detection with TLS fingerprinting (default true)",
           default: true,
         }),
       ),
       proxy: Type.Optional(
         Type.String({
-          description:
-            "Proxy URL for this fetch, e.g. http://user:pass@host:port or socks5://host:port. " +
-            "Default from env WEB_FETCH_PROXY (empty = direct).",
+          description: "Optional proxy URL (http/socks5)",
           default: "",
         }),
       ),

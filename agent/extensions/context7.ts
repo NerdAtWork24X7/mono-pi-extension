@@ -144,10 +144,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "context7-search",
     label: "Context7 Search",
-    description: "Search for a library and resolve its Context7 library ID for Context7 Queries.",
+    description: "Resolve a library name to its Context7 ID for documentation queries.",
     parameters: Type.Object({
-      libraryName: Type.String({ description: "The name of the library (e.g. 'react')" }),
-      query: Type.String({ description: "Optional query to help find the library. If not provided, libraryName is used.", default: "" }),
+      libraryName: Type.String({ description: "Library name (e.g. 'react', 'pydantic')" }),
+      query: Type.String({ description: "Optional query to narrow library match", default: "" }),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -172,10 +172,10 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "context7-query",
     label: "Context7 Query",
-    description: "Query documentation for a specific library using its Context7 library ID.",
+    description: "Query indexed documentation for a library using its Context7 library ID.",
     parameters: Type.Object({
-      libraryId: Type.String({ description: "The Context7 library ID (e.g. '/websites/react_dev')" }),
-      query: Type.String({ description: "Your question or search term for the documentation" }),
+      libraryId: Type.String({ description: "Context7 library ID (e.g. '/websites/react_dev')" }),
+      query: Type.String({ description: "Specific question or search term for the docs" }),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {

@@ -16,12 +16,12 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "web-fetch",
 		label: "Web Fetch",
-		description: "Fetch a web page (Markdown via headless Chromium/Playwright). If 'query' is given, run a DuckDuckGo search and fetch the top results; otherwise fetch 'url' directly.",
+		description: "Fetch web pages as Markdown via headless browser, or search DuckDuckGo via 'query'.",
 		parameters: Type.Object({
-			url: Type.Optional(Type.String({ description: "URL to fetch. Omit if using query.", default: "" })),
-			raw: Type.Optional(Type.Boolean({ description: "Return raw HTML instead of markdown", default: false })),
-			query: Type.Optional(Type.String({ description: "Search query — runs DuckDuckGo first, then fetches top results. Optional.", default: "" })),
-			maxResults: Type.Optional(Type.Number({ description: "Max top DuckDuckGo results to fetch (1-5, used with query)", default: 5 })),
+			url: Type.Optional(Type.String({ description: "URL to fetch (omit if using query)", default: "" })),
+			raw: Type.Optional(Type.Boolean({ description: "Return raw HTML instead of markdown (default false)", default: false })),
+			query: Type.Optional(Type.String({ description: "Search query to find and fetch top DuckDuckGo results", default: "" })),
+			maxResults: Type.Optional(Type.Number({ description: "Max search results to fetch (1-5, default 5)", default: 5 })),
 		}),
 
 		async execute(_toolCallId: unknown, params: { url?: string; raw?: boolean; query?: string; maxResults?: number }, signal?: AbortSignal, onUpdate?: (u: Update) => void) {
