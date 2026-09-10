@@ -517,7 +517,7 @@ async def launch_browser(p):
     site state, both across the jobs of one batch and across batches and even
     across process restarts (the profile persists on disk)."""
     opts = dict(
-        headless=False,
+        headless=True,
         viewport=random.choice(VIEWPORTS),  # same size every session is a fingerprint
         user_agent=USER_AGENT,
         locale="en-US",

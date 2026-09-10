@@ -36,6 +36,7 @@
   ],
   "extensions": [
     "+extensions/agent-team/index.ts",
+    "+extensions/custom-tools/index.ts",
     "+extensions/web_fetch/index.ts",
     "+extensions/omni-router/index.ts",
     "-extensions/obscura/index.ts",

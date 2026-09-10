@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "fs";
-import { join, dirname } from "path";
+import { join, dirname, delimiter } from "path";
 
 // ── Config ──────────────────────────────────────────────────────────────
 function envNum(name: string, fallback: number): number {
@@ -53,18 +53,28 @@ export interface Job {
 	max?: number; // per-job text cap, enforced by Python BEFORE the pipe transfer
 }
 
-// ── Python binary resolution ─────────────────────────────────────────────
-function resolvePyBin(): string {
-	// 1. explicit override
-	if (process.env.WEB_FETCH_PY_BIN) return process.env.WEB_FETCH_PY_BIN;
-	// 2. this package's local venv (standalone)
-	const localVenv = join(dirname(__filename), ".venv", "bin", "python3");
-	if (existsSync(localVenv)) return localVenv;
-	// 3. last resort
-	return "/home/alexa/wk/.venv/bin/python3";
+// ── Python runtime resolution ────────────────────────────────────────────
+const SCRIPT_DIR = dirname(__filename);
+const PY_SCRIPT = join(SCRIPT_DIR, "web-fetch.py");
+const PY_REQUIREMENTS = join(SCRIPT_DIR, "requirements.txt");
+
+/** Locate the `uv` launcher on PATH — never a hardcoded interpreter path.
+ *  `WEB_FETCH_UV_BIN` overrides; the bare name lets spawn resolve via PATH. */
+function resolveUvBin(): string {
+	if (process.env.WEB_FETCH_UV_BIN) return process.env.WEB_FETCH_UV_BIN;
+	const exe = process.platform === "win32" ? "uv.exe" : "uv";
+	const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+	return dirs.map((d) => join(d, exe)).find((p) => existsSync(p)) ?? exe;
 }
-const PY_BIN = resolvePyBin();
-const PY_SCRIPT = join(dirname(__filename), "web-fetch.py");
+const UV_BIN = resolveUvBin();
+
+/** `uv run` resolves the interpreter and syncs requirements.txt into a cached
+ *  env, so neither a venv nor an interpreter path is hardcoded. A direct
+ *  interpreter can still be forced via `WEB_FETCH_PY_BIN`. */
+const PY_CMD: readonly string[] = process.env.WEB_FETCH_PY_BIN
+	? [process.env.WEB_FETCH_PY_BIN, PY_SCRIPT]
+	: [UV_BIN, "run", "--no-project", "--with-requirements", PY_REQUIREMENTS, "python", PY_SCRIPT];
+const PY_LABEL = PY_CMD.join(" ");
 
 // ── Process helpers ──────────────────────────────────────────────────────
 /** Kill a spawned crawler and its whole process group (Playwright/Chromium
@@ -180,7 +190,7 @@ class Runner {
 		if (this.child) return;
 		this.buf = "";
 		this.stderr = "";
-		const child = spawn(PY_BIN, [PY_SCRIPT], {
+		const child = spawn(PY_CMD[0], PY_CMD.slice(1), {
 			detached: true,
 			stdio: ["pipe", "pipe", "pipe"],
 			// Tell the crawler which persistent profile dir to launch Chromium on.
@@ -213,7 +223,7 @@ class Runner {
 			this.clearIdle();
 			if (this.flight) this.settle(this.flight, null, err);
 		};
-		child.on("error", () => onDeath(new Error(`failed to start crawler (${PY_BIN}): ${this.stderr.trim().slice(-300)}`)));
+		child.on("error", () => onDeath(new Error(`failed to start crawler (${PY_LABEL}): ${this.stderr.trim().slice(-300)}`)));
 		child.on("close", (code) => onDeath(new Error(`crawler exited with code ${code}${this.stderr ? `: ${this.stderr.trim().slice(-300)}` : ""}`)));
 	}
 

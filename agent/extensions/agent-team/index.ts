@@ -33,7 +33,6 @@ import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamI
 import { MemoryManager, createMemoryManager, extractLastAssistantText, installMemoryEscEditor, memoryFiles } from "./memory";
 import { buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl, closeSidebar } from "./ui";
 import { registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
-import { registerCustomReadTool, registerCustomWriteTool, registerCustomEditTool } from "./custom_tools";
 import { fullModelId } from "./helpers";
 
 /** Remove session files older than 24 hours to prevent unbounded disk growth
@@ -618,10 +617,10 @@ export default function (pi: ExtensionAPI) {
     if (team.wCtx?.ui?.setHeader) team.wCtx.ui.setHeader(undefined);
   });
 
-  // Register tools, commands, shortcut
-  registerCustomReadTool(pi);
-  registerCustomWriteTool(pi);
-  registerCustomEditTool(pi);
+  // Register tools, commands, shortcut. The custom file tools (custom_read /
+  // custom_write / custom_edit) are registered by the standalone custom-tools
+  // extension, not here — subagents exclude agent-team from their extension
+  // paths, so those tools must live outside this extension to be available.
   registerDispatchAgentTool(pi, team);
   registerDispatchAgentsTool(pi, team);
   registerCommands(pi, team);
