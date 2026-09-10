@@ -10,12 +10,12 @@ PY="$VENV/bin/python3"
 
 if [ ! -x "$PY" ]; then
   echo "Creating venv at $VENV ..."
-  python3 -m venv "$VENV"
+  uv venv --python 3.12
 fi
 
 echo "Installing Python dependencies ..."
-"$PY" -m pip install --upgrade pip
-"$PY" -m pip install -r requirements.txt
+uv pip install --upgrade pip
+uv pip install -r requirements.txt
 
 echo "Ensuring Chromium browser is installed ..."
 "$PY" -m playwright install chromium

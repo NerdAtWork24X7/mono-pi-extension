@@ -156,6 +156,7 @@ agent/
     agent-team/            # Core orchestrator extension (TypeScript source)
     obscura/              # Web-fetch via Obscura headless browser (setup.sh extracts binaries)
     web_fetch_crawl4ai/    # Persistent-Chromium web fetch (Playwright, setup-web-fetch.sh)
+    omni-router/           # OmniRoute gateway provider (localhost:20128/v1, live model catalog)
     browser.ts, context7.ts, modelcost.ts, pi-scope.ts, TokenRouter.ts, ...
   skills/                  # Reusable skills (flet, pyside6, electron-scaffold, ...)
 .pi/                      # Project configuration

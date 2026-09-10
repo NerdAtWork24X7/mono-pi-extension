@@ -24,6 +24,18 @@ const IDLE_MS = (() => {
 	const n = Number(process.env.WEB_FETCH_IDLE_MS);
 	return Number.isFinite(n) && n >= 0 ? n : 300_000; // 5min
 })();
+// Persistent Chromium profile dir: cookies/logins/site state live on disk here
+// and survive process restarts, so the SAME browser session is reused across
+// all tool calls (and after a respawn). Mirrors the Python default.
+export const PROFILE_DIR = process.env.WEB_FETCH_PROFILE_DIR
+	?? join(process.cwd(), ".pi", "web-fetch-profile");
+
+/** Whole-batch timeout: jobs run BATCH_CONCURRENCY at a time and each job is
+ *  bounded by CRAWL_TIMEOUT_MS, so a batch gets one round-trip per wave. */
+function batchTimeoutMs(jobCount: number): number {
+	const rounds = Math.max(1, Math.ceil(jobCount / BATCH_CONCURRENCY));
+	return rounds * CRAWL_TIMEOUT_MS;
+}
 const MAX_OUTPUT_BYTES = 10 * 1024 * 1024; // stderr cap (matches old execAsync maxBuffer)
 
 export type Update = { content: Array<{ type: "text"; text: string }>; details: Record<string, any> };
@@ -100,6 +112,10 @@ interface Flight {
  * Flight is active; stale lines from aborted/timed-out batches are dropped
  * by batch-id matching. The process is respawned lazily after crashes and
  * killed after IDLE_MS of inactivity or on session_shutdown.
+ *
+ * The browser runs on PROFILE_DIR (a persistent user-data-dir), so even when
+ * the process is killed and respawned the session (cookies/logins) carries
+ * over — "same browser session" across every tool call.
  */
 class Runner {
 	private child: ChildProcess | null = null;
@@ -121,7 +137,10 @@ class Runner {
 				resolve,
 				reject,
 				onUpdate,
-				timeout: setTimeout(() => this.onTimeout(flight), CRAWL_TIMEOUT_MS),
+				// Whole-batch cap scales with batch size: jobs run BATCH_CONCURRENCY
+				// at a time, each job bounded by CRAWL_TIMEOUT_MS, so a multi-URL
+				// batch gets ceil(jobs/concurrency) rounds instead of one flat cap.
+				timeout: setTimeout(() => this.onTimeout(flight), batchTimeoutMs(jobs.length)),
 			};
 			this.flight = flight;
 			if (signal) {
@@ -161,7 +180,12 @@ class Runner {
 		if (this.child) return;
 		this.buf = "";
 		this.stderr = "";
-		const child = spawn(PY_BIN, [PY_SCRIPT], { detached: true, stdio: ["pipe", "pipe", "pipe"] });
+		const child = spawn(PY_BIN, [PY_SCRIPT], {
+			detached: true,
+			stdio: ["pipe", "pipe", "pipe"],
+			// Tell the crawler which persistent profile dir to launch Chromium on.
+			env: { ...process.env, WEB_FETCH_PROFILE_DIR: PROFILE_DIR },
+		});
 		this.child = child;
 
 		child.stderr?.on("data", (d: Buffer) => {

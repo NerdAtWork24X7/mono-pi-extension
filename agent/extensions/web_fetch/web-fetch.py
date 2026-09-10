@@ -7,6 +7,13 @@ once per session instead of once per tool call. The TS side keeps this
 process alive between tool calls (idle-timeout / session end closes stdin,
 which shuts us down gracefully).
 
+The browser runs on a PERSISTENT profile directory (user-data-dir, from
+WEB_FETCH_PROFILE_DIR, default ~/.pi/web-fetch-profile), so cookies, logins
+and site state survive process restarts (idle kill, crash, session end) —
+the same session is reused across all tool calls, and after a respawn.
+All pages share that one context: a cookie/login set on one page is visible
+to every later page, in the same batch or a later tool call.
+
 Protocol (newline-delimited JSON) — unchanged from the previous runner.
 ----------------------------------------------------------------------
 stdin : one request per line:
@@ -22,6 +29,7 @@ exit  : 0 on EOF, 1 on fatal/browser error (TS respawns lazily on next batch).
 """
 import asyncio
 import json
+import os
 import random
 import re
 import sys
@@ -469,6 +477,13 @@ async def handle_batch(context, req):
     return healthy
 
 
+# Persistent profile directory: cookies/logins/site state are written here
+# and survive process restarts, so the "same browser session" is kept across
+# tool calls. The TS runner passes WEB_FETCH_PROFILE_DIR; standalone fallback
+# mirrors the TS default.
+PROFILE_DIR = os.environ.get("WEB_FETCH_PROFILE_DIR") or os.path.join(
+    os.path.expanduser("~"), ".pi", "web-fetch-profile")
+
 # Launch args shared by both browser variants. Chromium stops exposing
 # navigator.webdriver at the engine level with AutomationControlled disabled
 # (stronger than any JS patch); images stay off — text extraction never needs
@@ -489,27 +504,35 @@ LAUNCH_ARGS = [
 
 
 async def launch_browser(p):
-    """Launch headless Chromium, preferring the FULL browser build over
-    Playwright's default stripped 'headless shell'. The shell's fingerprint is
-    trivially detected by anti-bot edges — X/Twitter's Cloudflare 403s it
-    before any JS stealth can matter — while the full build in new-headless
-    mode (channel="chromium") renders real content. Fall back to the shell
-    only when it isn't installed, so partial setups keep working."""
+    """Launch headless Chromium on a PERSISTENT profile directory (see
+    PROFILE_DIR), preferring the FULL browser build over Playwright's default
+    stripped 'headless shell'. The shell's fingerprint is trivially detected by
+    anti-bot edges — X/Twitter's Cloudflare 403s it before any JS stealth can
+    matter — while the full build in new-headless mode (channel="chromium")
+    renders real content. Fall back to the shell only when it isn't installed,
+    so partial setups keep working.
+
+    launch_persistent_context returns the single shared context directly: every
+    page opened in it (context.new_page() per job) shares cookies/localStorage/
+    site state, both across the jobs of one batch and across batches and even
+    across process restarts (the profile persists on disk)."""
+    opts = dict(
+        headless=False,
+        viewport=random.choice(VIEWPORTS),  # same size every session is a fingerprint
+        user_agent=USER_AGENT,
+        locale="en-US",
+        ignore_https_errors=True,
+        args=LAUNCH_ARGS,
+    )
     try:
-        return await p.chromium.launch(headless=True, channel="chromium", args=LAUNCH_ARGS)
+        return await p.chromium.launch_persistent_context(PROFILE_DIR, channel="chromium", **opts)
     except Exception:
-        return await p.chromium.launch(headless=True, args=LAUNCH_ARGS)
+        return await p.chromium.launch_persistent_context(PROFILE_DIR, **opts)
 
 
 async def serve():
     async with async_playwright() as p:
-        browser = await launch_browser(p)
-        context = await browser.new_context(
-            viewport=random.choice(VIEWPORTS),  # same size every session is a fingerprint
-            user_agent=USER_AGENT,
-            locale="en-US",
-            ignore_https_errors=True,
-        )
+        context = await launch_browser(p)
         await context.add_init_script(STEALTH_JS)
 
         # Fix client-hint / UA headers on document requests: headless Chromium
@@ -555,8 +578,9 @@ async def serve():
                 if not healthy:
                     return 1  # let TS respawn a fresh browser on the next batch
         finally:
+            # context.close() also closes the browser it owns; with a persistent
+            # profile Chromium flushes cookies/state to disk here (and on SIGTERM).
             await context.close()
-            await browser.close()
 
 
 def main():

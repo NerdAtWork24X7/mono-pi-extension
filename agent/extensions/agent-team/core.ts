@@ -178,6 +178,10 @@ export interface AgentTeamContext {
   disableAgentTeam: (ctx: any) => Promise<void>;
   /** Current active tool allowlist (includes dispatch_agents when parallel is on). */
   activeToolList: () => string[];
+  /** All tools available to the orchestrator (excludes the dispatch routing tools). */
+  allTools: () => string[];
+  /** Enable/disable an orchestrator tool. Off = added to the skip denylist. */
+  toggleOrchestratorTool: (name: string, enabled: boolean) => void;
   /** True when an agent's tool allowlist includes any destructive (file-mutating) tool. */
   destructiveTools: string[];
   /** Async read/write lock: read-only dispatches run concurrently; writable dispatches are exclusive. */

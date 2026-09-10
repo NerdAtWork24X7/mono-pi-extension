@@ -8,6 +8,18 @@ function errRes(text: string) {
 	return { content: [{ type: "text" as const, text }], details: { error: text } };
 }
 
+const SEARCH_URL = (q: string) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
+
+/** Normalize a URL and require http(s); returns null when invalid. */
+function validHttpUrl(u: string): string | null {
+	try {
+		const p = new URL(u);
+		return p.protocol === "http:" || p.protocol === "https:" ? p.href : null;
+	} catch {
+		return null;
+	}
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		shutdownRunner();
@@ -16,37 +28,68 @@ export default function (pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "web-fetch",
 		label: "Web Fetch",
-		description: "Fetch web pages as Markdown via headless browser, or search DuckDuckGo via 'query'.",
+		description:
+			"Fetch web pages as Markdown via a persistent headless browser (one shared session across calls), or search DuckDuckGo via 'query'. " +
+			"Pass 'urls' (array) and/or 'queries' (array) to batch many fetches/searches in ONE tool call — everything is crawled in parallel in the same browser session. Singular 'url'/'query' still work.",
 		parameters: Type.Object({
-			url: Type.Optional(Type.String({ description: "URL to fetch (omit if using query)", default: "" })),
+			url: Type.Optional(Type.String({ description: "A single URL to fetch (omit if using query/queries)", default: "" })),
+			urls: Type.Optional(Type.Array(Type.String({ description: "Multiple URLs to fetch in one batch (parallel, shared session)", default: [] }))),
 			raw: Type.Optional(Type.Boolean({ description: "Return raw HTML instead of markdown (default false)", default: false })),
-			query: Type.Optional(Type.String({ description: "Search query to find and fetch top DuckDuckGo results", default: "" })),
-			maxResults: Type.Optional(Type.Number({ description: "Max search results to fetch (1-5, default 5)", default: 5 })),
+			query: Type.Optional(Type.String({ description: "A single search query to find and fetch top DuckDuckGo results (omit if using url/urls)", default: "" })),
+			queries: Type.Optional(Type.Array(Type.String({ description: "Multiple search queries, each returning its top results, all in one batch", default: [] }))),
+			maxResults: Type.Optional(Type.Number({ description: "Max search results to fetch per query (1-5, default 5)", default: 5 })),
 		}),
 
-		async execute(_toolCallId: unknown, params: { url?: string; raw?: boolean; query?: string; maxResults?: number }, signal?: AbortSignal, onUpdate?: (u: Update) => void) {
+		async execute(_toolCallId: unknown, params: { url?: string; urls?: string[]; raw?: boolean; query?: string; queries?: string[]; maxResults?: number }, signal?: AbortSignal, onUpdate?: (u: Update) => void) {
 			const raw = params.raw ?? false;
-			const query = params.query?.trim() ?? "";
-			const url = params.url?.trim() ?? "";
-			if (!query && !url) return errRes("Error: provide either 'url' or 'query' parameter.");
-			if (url) {
-				let scheme = "";
-				try { scheme = new URL(url).protocol; } catch { /* invalid URL */ }
-				if (scheme !== "http:" && scheme !== "https:") {
-					return errRes(`Error: 'url' must be a valid http(s) URL, got "${url}".`);
-				}
+			const maxResults = Math.min(Math.max(params.maxResults ?? 5, 1), 5);
+
+			// Collect + dedupe queries and direct URLs (plural + singular forms).
+			const queries = [...(params.query ? [params.query] : []), ...(params.queries ?? [])]
+				.map((q) => q.trim()).filter((q) => q.length > 0);
+			const urlInputs = [...(params.url ? [params.url] : []), ...(params.urls ?? [])]
+				.map((u) => u.trim()).filter((u) => u.length > 0);
+			const seenQ = new Set<string>();
+			const qList = queries.filter((q) => { const k = q.toLowerCase(); if (seenQ.has(k)) return false; seenQ.add(k); return true; });
+			const seenU = new Set<string>();
+			const urls: string[] = [];
+			const badUrls: string[] = [];
+			for (const u of urlInputs) {
+				const norm = validHttpUrl(u);
+				if (!norm) { badUrls.push(u); continue; }
+				if (seenU.has(norm)) continue;
+				seenU.add(norm);
+				urls.push(norm);
+			}
+
+			if (qList.length === 0 && urls.length === 0) {
+				return errRes("Error: provide 'url', 'urls', 'query', or 'queries'.");
+			}
+			if (badUrls.length > 0) {
+				return errRes(`Error: invalid URL(s): ${badUrls.join(", ")} (must be valid http(s) URLs).`);
 			}
 
 			const details: Record<string, any> = { urlsFetched: 0, urlsFailed: 0 };
+			if (qList.length) details.queries = qList;
+			if (urls.length) details.urls = urls;
+
 			type Target = { key: number; url: string; raw: boolean; kind: "search" | "source" | "direct"; max: number };
 			const targets: Target[] = [];
 			const results = new Map<number, JobResult>();
+			const keyUrl = new Map<number, string>();
+			const byUrl = new Map<string, number>();
 			let seq = 0;
 
-			// Register a target for fetching. `max` is the per-job text cap the
-			// Python crawler enforces before writing to the pipe.
+			// Register a target for fetching (deduped by URL — two queries that
+			// return the same source, or a direct URL that is also a search hit,
+			// are crawled ONCE). `max` is the per-job text cap the Python crawler
+			// enforces before writing to the pipe.
 			const reg = (u: string, r: boolean, kind: Target["kind"]): number => {
+				const existing = byUrl.get(u);
+				if (existing !== undefined) return existing;
 				const k = seq++;
+				byUrl.set(u, k);
+				keyUrl.set(k, u);
 				targets.push({
 					key: k, url: u, raw: r, kind,
 					max: kind === "search" ? SEARCH_TEXT_CHARS : (r ? MAX_RAW_CHARS : MAX_RESULT_CHARS),
@@ -54,8 +97,8 @@ export default function (pi: ExtensionAPI) {
 				return k;
 			};
 
-			// Fetch every registered target as ONE batch on the warm runner
-			// (single Chromium, parallel tabs).
+			// Crawl every registered target as ONE batch on the warm runner
+			// (single Chromium, parallel tabs, shared session).
 			const fetchMissing = async () => {
 				const need = targets.filter((t) => !results.has(t.key));
 				if (need.length === 0) return;
@@ -79,84 +122,116 @@ export default function (pi: ExtensionAPI) {
 				}
 			};
 
-			// ── Mode 1: DuckDuckGo search → fetch top results ──
-			if (query) {
-				const maxResults = Math.min(Math.max(params.maxResults ?? 5, 1), 5);
-				const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-				details.query = query;
-				details.searchUrl = searchUrl;
-				onUpdate?.({ content: [{ type: "text", text: `Searching DuckDuckGo for "${query}"...` }], details: { query, phase: "search" } });
+			// ── Register all work up front: every search page + every direct URL ──
+			const searchKeys = qList.map((q) => reg(SEARCH_URL(q), false, "search"));
+			urls.forEach((u) => reg(u, raw, "direct"));
 
-				const searchKey = reg(searchUrl, false, "search");
-				if (url) reg(url, raw, "direct"); // fetched in the SAME batch as the search page
+			if (qList.length) {
+				onUpdate?.({ content: [{ type: "text", text: `Searching DuckDuckGo for: ${qList.join(" | ")}` }], details: { queries: qList, phase: "search" } });
+			}
+			if (urls.length) {
+				onUpdate?.({ content: [{ type: "text", text: `Fetching ${urls.length} URL(s): ${urls.join(", ")}` }], details: { phase: "fetch", urls } });
+			}
 
-				let searchErr: string | null = null; // hard failure (fetch/exception)
-				let searchEmpty: string | null = null; // page fetched, but no links extracted
-				try {
-					await fetchMissing();
-					const sr = results.get(searchKey)!;
-					if (!sr.ok) {
-						searchErr = `Error searching "${query}": ${sr.error}`;
-					} else {
-						const resultUrls = extractUrlsFromDDGMarkdown(sr.text, maxResults);
-						if (resultUrls.length === 0) {
-							searchEmpty = `DuckDuckGo search for "${query}" returned no extractable results.\n\n${sr.text.slice(0, 2000)}`;
+			try {
+				await fetchMissing();
+			} catch (e) {
+				// A dead crawler can't serve anything: report the batch error.
+				if (qList.length === 0 && urls.length > 0) {
+					return errRes(`Error fetching ${urls.join(", ")}: ${e instanceof Error ? e.message : "batch failed"}`);
+				}
+			}
+
+			// ── Parse each search page; register its top results as sources ──
+			// Per-query outcome: { keys: source keys, hard: hard failure, empty: no results }
+			type QueryOutcome = { q: string; keys: number[]; hard: string | null; empty: string | null };
+			const outcomes: QueryOutcome[] = [];
+			let anySources = false;
+			for (let i = 0; i < qList.length; i++) {
+				const sr = results.get(searchKeys[i]);
+				if (!sr || !sr.ok) {
+					outcomes.push({ q: qList[i], keys: [], hard: `Error searching "${qList[i]}": ${sr?.error ?? "unknown"}`, empty: null });
+					continue;
+				}
+				const resultUrls = extractUrlsFromDDGMarkdown(sr.text, maxResults);
+				if (resultUrls.length === 0) {
+					outcomes.push({
+						q: qList[i], keys: [], hard: null,
+						empty: `DuckDuckGo search for "${qList[i]}" returned no extractable results.\n\n${sr.text.slice(0, 2000)}`,
+					});
+					continue;
+				}
+				const keys = resultUrls.map((ru) => reg(ru, raw, "source"));
+				if (keys.length) anySources = true;
+				outcomes.push({ q: qList[i], keys, hard: null, empty: null });
+			}
+
+			// Second batch: all extracted result pages (sources only).
+			try {
+				if (anySources) await fetchMissing();
+			} catch { /* per-key failures are captured in `results`; surfaced below */ }
+
+			// ── Assemble output ──
+			const sections: string[] = [];
+			const counted = new Set<number>();
+			const count = (k: number, ok: boolean) => {
+				if (counted.has(k)) return;
+				counted.add(k);
+				if (ok) details.urlsFetched++; else details.urlsFailed++;
+			};
+
+			for (const o of outcomes) {
+				sections.push(`# Search: ${o.q}`);
+				if (o.hard) {
+					sections.push(`\n_Search failed: ${o.hard}_`);
+				} else if (o.empty) {
+					sections.push(`\n_${o.empty}_`);
+				} else if (o.keys.length === 0) {
+					sections.push("\n_No results._");
+				} else {
+					let n = 0;
+					for (const k of o.keys) {
+						const r = results.get(k);
+						const url = keyUrl.get(k) ?? "?";
+						if (r && r.ok && r.text) {
+							sections.push(`## Source ${++n}: ${url}\n\n${r.text}`);
+							count(k, true);
 						} else {
-							for (const ru of resultUrls) reg(ru, raw, "source");
-							await fetchMissing();
+							sections.push(`## Source ${++n}: ${url}\n\n_Fetch failed: ${r?.error ?? "unknown"}_`);
+							count(k, false);
 						}
 					}
-				} catch (error) {
-					searchErr = `Error searching "${query}": ${error instanceof Error ? error.message : "Unknown error"}`;
-				}
-				// With no direct URL to fall back on, search failures are fatal.
-				if (!url) {
-					if (searchErr) return errRes(searchErr);
-					if (searchEmpty) {
-						return {
-							content: [{ type: "text", text: searchEmpty }],
-							details: { query, searchUrl, urlsFound: 0 },
-						};
-					}
 				}
 			}
 
-			// ── Mode 2: Direct URL fetch (alone, or alongside a query) ──
-			if (url) {
-				if (!query) {
-					// In query mode the direct URL was already registered + fetched above.
-					onUpdate?.({ content: [{ type: "text", text: `Fetching ${url}...` }], details: { phase: "fetch", url } });
-					reg(url, raw, "direct");
-					try {
-						await fetchMissing();
-					} catch { /* failures are captured in `results`; surfaced below */ }
+			// With no direct URL to fall back on, search failures are fatal.
+			if (urls.length === 0 && outcomes.length > 0) {
+				const hard = outcomes.find((o) => o.hard);
+				const empty = outcomes.find((o) => o.empty);
+				if (hard && outcomes.every((o) => o.hard || o.empty)) return errRes(hard.hard!);
+				if (empty && outcomes.every((o) => o.hard || o.empty)) {
+					return { content: [{ type: "text", text: empty.empty! }], details: { ...details, urlsFound: 0 } };
 				}
-				details.url = url;
 			}
 
-			// Assemble sections (skip the internal search page; sources first, then direct).
-			// Text caps were already enforced per-job by the Python crawler.
-			const sections: string[] = [];
-			let sourceIdx = 0;
-			const ordered = [...targets.filter((t) => t.kind === "source"), ...targets.filter((t) => t.kind === "direct")];
-			for (const t of ordered) {
-				const r = results.get(t.key);
-				const label = t.kind === "direct" ? `Direct URL: ${t.url}` : `Source ${++sourceIdx}: ${t.url}`;
+			for (const u of urls) {
+				const k = byUrl.get(u)!;
+				const r = results.get(k);
+				sections.push(`# Fetch: ${u}`);
 				if (r && r.ok && r.text) {
-					sections.push(`## ${label}\n\n${r.text}`);
-					details.urlsFetched++;
+					sections.push(`\n${r.text}`);
+					count(k, true);
 				} else {
-					sections.push(`## ${label}\n\n_Fetch failed: ${r?.error ?? "unknown"}_`);
-					details.urlsFailed++;
+					sections.push(`\n_Fetch failed: ${r?.error ?? "unknown"}_`);
+					count(k, false);
 				}
 			}
 
 			if (sections.length === 0) {
-				const lastKey = targets[targets.length - 1].key;
-				return errRes(`Error fetching ${url}: ${results.get(lastKey)?.error ?? "unknown"}`);
+				return errRes(`Error: nothing to fetch (${badUrls.length ? `invalid URLs: ${badUrls.join(", ")}` : "no usable inputs"}).`);
 			}
 
-			const header = query ? `# Search: ${query}` : `# Fetch: ${url}`;
+			const header = qList.length ? `# Search${qList.length > 1 ? "es" : ""}: ${qList.join(" | ")}` : `# Fetch: ${urls.join(", ")}`;
 			return {
 				content: [{ type: "text", text: `${header}\n\n${sections.join("\n\n---\n\n")}` }],
 				details,

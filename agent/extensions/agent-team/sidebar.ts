@@ -112,7 +112,7 @@ function toggleMode(ctx: AgentTeamContext) {
 }
 
 /** Focus sections in Tab-cycling order. */
-const SECTION_ORDER = ["orch", "mode", "memory", "teams", "sub"] as const;
+const SECTION_ORDER = ["orch", "tools", "mode", "memory", "teams", "sub"] as const;
 type Section = typeof SECTION_ORDER[number];
 
 export function openSidebar(ctx: AgentTeamContext) {
@@ -127,7 +127,10 @@ export function openSidebar(ctx: AgentTeamContext) {
       let section: Section = "orch"; // which section is focused
       let teamIdx = 0; // index within teams section
       let skillIdx = 0; // index within orchestrator skill list
+      let toolIdx = 0; // index within orchestrator tool list
       let subIdx = 0; // index within subagents flat list (agents then skills)
+      let scrollTop = 0; // viewport offset into the rendered line list
+      let viewport = 40; // last computed visible line count (page size for PgUp/PgDn)
       // Snapshot ALL available skills (including disabled in settings.json) once when sidebar opens
       const allSkills = discoverAllSkills();
       const agents = () => Array.from(ctx.procs.values());
@@ -135,13 +138,17 @@ export function openSidebar(ctx: AgentTeamContext) {
       const component = {
         render(width: number): string[] {
           const lines: string[] = [];
+          let selectedLine = 0; // absolute index of the focused row (drives the scroll viewport)
           const allAgents = agents();
           const w = Math.min(width, overlayWidth);
           const teamNames = Object.keys(ctx.teams);
           const subLen = allAgents.length + allSkills.length;
 
+          const toolNames = ctx.allTools();
+
           // Clamp section indices against their (possibly shrunken) lists
           if (skillIdx >= allSkills.length) skillIdx = Math.max(0, allSkills.length - 1);
+          if (toolIdx >= toolNames.length) toolIdx = Math.max(0, toolNames.length - 1);
           if (teamIdx >= teamNames.length) teamIdx = Math.max(0, teamNames.length - 1);
           if (subIdx >= subLen) subIdx = Math.max(0, subLen - 1);
 
@@ -154,7 +161,46 @@ export function openSidebar(ctx: AgentTeamContext) {
           // Orchestrator skills (folded under the orchestrator header)
           for (let i = 0; i < allSkills.length; i++) {
             const sk = allSkills[i];
+            if (section === "orch" && i === skillIdx) selectedLine = lines.length;
             lines.push(skillRow(theme, w, sk, ctx.orchestratorSkills.has(sk.dir), section === "orch" && i === skillIdx));
+          }
+
+          // Orchestrator tools (what the orchestrator may call), 2 columns
+          lines.push(boxBorder(theme, w, "sep"));
+          lines.push(sidebarRow(theme, w, [{ t: "Tools (Enter to toggle)", c: "dim", b: true }]));
+          if (toolNames.length === 0) {
+            lines.push(sidebarRow(theme, w, [{ t: "No tools available", c: "dim" }]));
+          } else {
+            // Each column cell: "▸ ● name" padded to exactly colW cells so
+            // both columns align; long names truncate with "…" instead of
+            // bleeding into the neighboring column.
+            const colW = Math.floor((w - 3) / 2);
+            const maxName = Math.max(1, colW - 4 - 1); // reserve prefix+icon and "…"
+            const toolCell = (name: string | undefined, idx: number) => {
+              if (name === undefined) return [{ t: " ".repeat(colW), c: "text" }];
+              const on = !ctx.skipOrchestratorTools.some(t => t.toLowerCase() === name.toLowerCase());
+              const sel = section === "tools" && idx === toolIdx;
+              const c = sel ? "accent" : "text";
+              let nm = name;
+              if ([...nm].length > maxName) nm = [...nm].slice(0, maxName).join("") + "…";
+              const pad = Math.max(0, colW - 4 - [...nm].length);
+              return [
+                { t: sel ? "▸ " : "  ", c },
+                { t: on ? "● " : "○ ", c: on ? "success" : "dim" },
+                { t: nm, c: on ? c : "dim" },
+                { t: " ".repeat(pad), c: "text" },
+              ];
+            };
+            for (let r = 0; r * 2 < toolNames.length; r++) {
+              const li = r * 2;
+              const ri = li + 1;
+              const cells = [
+                ...toolCell(toolNames[li], li),
+                ...toolCell(ri < toolNames.length ? toolNames[ri] : undefined, ri),
+              ];
+              if (section === "tools" && (li === toolIdx || ri === toolIdx)) selectedLine = lines.length;
+              lines.push(sidebarRow(theme, w, cells, section === "tools" && (li === toolIdx || ri === toolIdx)));
+            }
           }
 
           // Mode section
@@ -163,6 +209,7 @@ export function openSidebar(ctx: AgentTeamContext) {
           {
             const creative = ctx.mode === "creative";
             const sel = section === "mode";
+            if (sel) selectedLine = lines.length;
             lines.push(sidebarRow(theme, w, [
               { t: sel ? "▸ " : "  ", c: sel ? "accent" : "text" },
               { t: creative ? "◆ " : "◇ ", c: creative ? "accent" : "dim" },
@@ -176,6 +223,7 @@ export function openSidebar(ctx: AgentTeamContext) {
           {
             const hasMem = !!ctx.memoryManager;
             const sel = section === "memory";
+            if (sel) selectedLine = lines.length;
             lines.push(sidebarRow(theme, w, [
               { t: sel ? "▸ " : "  ", c: sel ? "accent" : "text" },
               { t: hasMem ? "● " : "○ ", c: hasMem ? "success" : "dim" },
@@ -193,6 +241,7 @@ export function openSidebar(ctx: AgentTeamContext) {
               const tn = teamNames[i];
               const isActive = tn === ctx.activeTeam;
               const sel = section === "teams" && i === teamIdx;
+              if (sel) selectedLine = lines.length;
               const members = ctx.teams[tn] || [];
               const activeCount = members.filter(m => m.active !== false).length;
               lines.push(sidebarRow(theme, w, [{
@@ -211,6 +260,7 @@ export function openSidebar(ctx: AgentTeamContext) {
             for (let i = 0; i < allAgents.length; i++) {
               const ap = allAgents[i];
               const sel = section === "sub" && i === subIdx;
+              if (sel) selectedLine = lines.length;
               const isDisabled = ctx.disabledAgents.has(agentNameKey(ap.def.name));
               const icon = isDisabled ? "◌" : statusDisplay(ap.status).icon;
               const model = shortModel(ap.model);
@@ -226,6 +276,7 @@ export function openSidebar(ctx: AgentTeamContext) {
             lines.push(sidebarRow(theme, w, [{ t: "─".repeat(Math.max(4, w - 10)), c: "dim" }]));
             for (let i = 0; i < allSkills.length; i++) {
               const sel = section === "sub" && (allAgents.length + i) === subIdx;
+              if (sel) selectedLine = lines.length;
               lines.push(skillRow(theme, w, allSkills[i], ctx.subagentSkills.has(allSkills[i].dir), sel));
             }
           }
@@ -234,15 +285,25 @@ export function openSidebar(ctx: AgentTeamContext) {
           lines.push(boxBorder(theme, w, "sep"));
           for (const help of [
             "Tab Switch focus ↑↓ Navigate",
-            "Enter Select team / Toggle skill / agent / memory / mode",
-            "●=enabled ○=disabled (per group)",
+            "Enter Select team / Toggle skill / tool / agent / memory / mode",
+            "PgUp/PgDn Page · Home/End Jump · ●=enabled ○=disabled",
             "Esc/Ctrl+Q Close sidebar",
           ]) {
             lines.push(sidebarRow(theme, w, [{ t: help, c: "dim" }]));
           }
           lines.push(boxBorder(theme, w, "bottom"));
 
-          return lines;
+          // Scrollable viewport: cap the overlay at 80% of the terminal height
+          // and window the line list around the focused row. Mirrors the
+          // overlay's own maxHeight clamp (margin 1 top/bottom) so the host
+          // never clips a rendered line.
+          const termRows = tui?.terminal?.rows ?? 40;
+          const maxVisible = Math.max(1, Math.min(Math.floor(termRows * 0.8), Math.max(1, termRows - 2)));
+          viewport = maxVisible;
+          if (selectedLine < scrollTop) scrollTop = selectedLine;
+          else if (selectedLine >= scrollTop + maxVisible) scrollTop = selectedLine - maxVisible + 1;
+          scrollTop = Math.max(0, Math.min(scrollTop, Math.max(0, lines.length - maxVisible)));
+          return lines.slice(scrollTop, scrollTop + maxVisible);
         },
 
         handleInput(data: string) {
@@ -254,7 +315,18 @@ export function openSidebar(ctx: AgentTeamContext) {
             const clamp = (v: number, max: number) => Math.max(0, Math.min(Math.max(0, max), v));
             if (section === "teams") teamIdx = clamp(teamIdx + delta, teamNames.length - 1);
             else if (section === "orch") skillIdx = clamp(skillIdx + delta, allSkills.length - 1);
+            else if (section === "tools") toolIdx = clamp(toolIdx + delta, ctx.allTools().length - 1);
             else if (section === "sub") subIdx = clamp(subIdx + delta, subLen - 1);
+            tui.requestRender();
+          };
+
+          // Absolute jump within the focused section (Home/End; Infinity = last).
+          const jumpTo = (idx: number) => {
+            const clamp = (v: number, max: number) => Math.max(0, Math.min(Math.max(0, max), v));
+            if (section === "teams") teamIdx = clamp(idx, teamNames.length - 1);
+            else if (section === "orch") skillIdx = clamp(idx, allSkills.length - 1);
+            else if (section === "tools") toolIdx = clamp(idx, ctx.allTools().length - 1);
+            else if (section === "sub") subIdx = clamp(idx, subLen - 1);
             tui.requestRender();
           };
 
@@ -266,6 +338,15 @@ export function openSidebar(ctx: AgentTeamContext) {
             move(-1);
           } else if (matchesKey(data, Key.down)) {
             move(1);
+          } else if (matchesKey(data, Key.pageUp)) {
+            // Page up: move selection by a viewport page (render keeps it on-screen)
+            move(-Math.max(1, viewport - 4));
+          } else if (matchesKey(data, Key.pageDown)) {
+            move(Math.max(1, viewport - 4));
+          } else if (matchesKey(data, Key.home)) {
+            jumpTo(0);
+          } else if (matchesKey(data, Key.end)) {
+            jumpTo(Infinity); // clamped to the section's last index
           } else if (matchesKey(data, Key.enter) || matchesKey(data, Key.space)) {
             if (section === "memory") {
               // Toggle memory on/off (persists to teams.yaml)
@@ -292,6 +373,15 @@ export function openSidebar(ctx: AgentTeamContext) {
               // Toggle orchestrator skill
               if (skillIdx >= 0 && skillIdx < allSkills.length) {
                 toggleSkill(ctx, ctx.orchestratorSkills, allSkills[skillIdx]);
+                tui.requestRender();
+              }
+            } else if (section === "tools") {
+              // Toggle orchestrator tool on/off
+              const toolNames = ctx.allTools();
+              const name = toolNames[toolIdx];
+              if (name) {
+                const on = !ctx.skipOrchestratorTools.some(t => t.toLowerCase() === name.toLowerCase());
+                ctx.toggleOrchestratorTool(name, !on);
                 tui.requestRender();
               }
             } else if (subIdx >= 0 && subIdx < allAgents.length) {
@@ -327,6 +417,9 @@ export function openSidebar(ctx: AgentTeamContext) {
         offsetX: -2,
         offsetY: 0,
         margin: 1,
+        // Cap the overlay at 80% of the terminal; the component windows its
+        // own content to this height and scrolls the focused row into view.
+        maxHeight: "80%",
       },
       onHandle: (handle: any) => {
         sidebarOverlayHandle = handle;

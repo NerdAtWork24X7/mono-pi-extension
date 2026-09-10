@@ -20,7 +20,8 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { mkdirSync, existsSync, readFileSync } from "fs";
+import { getAgentDir } from "@mariozechner/pi-coding-agent";
+import { mkdirSync, existsSync, readFileSync, statSync } from "fs";
 import { readdir as readdirAsync, stat as statAsync, unlink as unlinkAsync } from "fs/promises";
 import { join } from "path";
 
@@ -95,6 +96,12 @@ export class AgentTeam implements AgentTeamContext {
   skipOrchestratorTools: string[] = [];
   private agentMutexes = new Map<string, Promise<unknown>>();
 
+  // Live external config sync: signature of the tool-affecting fields last
+  // applied from disk (see startConfigWatch), so the poll only re-applies on
+  // real changes instead of every tick.
+  private appliedConfigSig = "";
+  private configWatchTimer: ReturnType<typeof setInterval> | null = null;
+
   cachedExtPaths: string[] = []; // resolved once per session_start
 
   // Bound once so the same reference can be used for both `on` and `off`,
@@ -144,6 +151,55 @@ export class AgentTeam implements AgentTeamContext {
       () => this.invalidate(),
       this.logger,
     );
+
+    // External config changes (web Chat view toggles, hand edits) apply to the
+    // RUNNING process instead of only the next one.
+    this.startConfigWatch();
+  }
+
+  // ── Live external config sync ─────────────────────────────────────
+  // The web Chat view (Scope) toggles tools by rewriting agent-team-config.json
+  // (its POST /agent-team writes the same project-local file this extension
+  // reads). The extension only reads the config at construction, so without
+  // this poll a web-side toggle would never reach the RUNNING pi subprocess —
+  // it would only land on a restarted session. Watch the effective config
+  // file's mtime and, when a tool-affecting field changes on disk, re-apply
+  // the active tool allowlist immediately (the same call the sidebar's own
+  // toggle makes), so the next turn runs under the new denylist with the
+  // conversation intact.
+  startConfigWatch() {
+    this.stopConfigWatch();
+    this.appliedConfigSig = this.configFileSig();
+    this.configWatchTimer = setInterval(() => {
+      const sig = this.configFileSig();
+      if (sig === this.appliedConfigSig) return;
+      this.appliedConfigSig = sig;
+      const cfg = loadPersistedConfig();
+      const skip = Array.isArray(cfg.skipOrchestratorTools) ? cfg.skipOrchestratorTools.map(s => String(s)) : [];
+      const keyOf = (a: string[]) => a.map(s => s.toLowerCase()).sort().join(",");
+      if (keyOf(skip) !== keyOf(this.skipOrchestratorTools)) this.skipOrchestratorTools = skip;
+      if (typeof cfg.parallelDispatch === "boolean" && cfg.parallelDispatch !== this.parallelDispatch) {
+        this.parallelDispatch = cfg.parallelDispatch;
+      }
+      try {
+        this.pi.setActiveTools(this.activeToolList());
+      } catch { /* pi runtime not initialized yet — next tick retries */ }
+      this.invalidate();
+    }, 1500);
+    // Don't keep an otherwise-idle pi process alive just for the poll.
+    if (typeof this.configWatchTimer.unref === "function") this.configWatchTimer.unref();
+  }
+
+  stopConfigWatch() {
+    if (this.configWatchTimer) { clearInterval(this.configWatchTimer); this.configWatchTimer = null; }
+  }
+
+  /** Effective agent-team-config.json path + mtime — the change signature the
+   *  watcher polls on (mirrors loadPersistedConfig's read resolution). */
+  private configFileSig(): string {
+    const p = join(process.cwd(), ".pi", "settings", "agent-team-config.json");
+    const file = existsSync(p) ? p : join(getAgentDir(), "agent-team-config.json");
+    try { return `${file}:${statSync(file).mtimeMs}`; } catch { return "none"; }
   }
 
   // ── Orchestration delegation (ctx -> this.procMgr) ──
@@ -238,13 +294,6 @@ export class AgentTeam implements AgentTeamContext {
     // file rewrite, so without this merge any user edit to skipOrchestratorTools
     // (or other keys) gets clobbered by the stale construction-time snapshot.
     const onDisk = loadPersistedConfig();
-    // skipOrchestratorTools has no runtime setter: it is only ever read from
-    // the file (constructor). An empty runtime value means "no change", so
-    // prefer the on-disk value instead of dropping the key (JSON.stringify
-    // omits undefined, which previously deleted a non-empty file entry).
-    const skipOrchestratorTools = this.skipOrchestratorTools.length
-      ? this.skipOrchestratorTools
-      : onDisk.skipOrchestratorTools;
     savePersistedConfig({
       ...onDisk,
       activeTeam: this.activeTeam,
@@ -258,8 +307,34 @@ export class AgentTeam implements AgentTeamContext {
       disabledAgents: Array.from(this.disabledAgents),
       orchestratorSkills: Array.from(this.orchestratorSkills),
       subagentSkills: Array.from(this.subagentSkills),
-      skipOrchestratorTools,
+      // skipOrchestratorTools has a runtime setter now (sidebar tool toggles),
+      // so the runtime value always wins over the on-disk copy.
+      skipOrchestratorTools: this.skipOrchestratorTools,
     });
+  }
+
+  /** All tools available to the orchestrator. Excludes the dispatch routing
+   *  tools (dispatch_agent/dispatch_agents), which are governed by the
+   *  parallelDispatch setting rather than the sidebar tool list. */
+  allTools(): string[] {
+    return this.pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent" && n !== "dispatch_agents");
+  }
+
+  /** Enable/disable an orchestrator tool from the sidebar. Disabling adds it
+   *  to the skip denylist (hidden from the orchestrator prompt + allowlist);
+   *  enabling removes it. Persists and re-applies the active tool allowlist
+   *  immediately so the next turn sees the change. */
+  toggleOrchestratorTool(name: string, enabled: boolean) {
+    const key = name.toLowerCase();
+    const i = this.skipOrchestratorTools.findIndex(t => t.toLowerCase() === key);
+    if (enabled) {
+      if (i >= 0) this.skipOrchestratorTools.splice(i, 1);
+    } else if (i < 0) {
+      this.skipOrchestratorTools.push(name);
+    }
+    this.persist();
+    this.pi.setActiveTools(this.activeToolList());
+    this.invalidate();
   }
 
   /** Active tool allowlist. When parallel dispatch is on, only dispatch_agents is available;
