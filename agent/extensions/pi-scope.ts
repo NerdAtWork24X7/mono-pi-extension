@@ -261,6 +261,11 @@ function loadEnv(cwd: string) {
   }
 }
 
+// Load env files at module init so subprocesses spawned before
+// session_start still inherit .env variables. Safe to run here:
+// guarded by fs.existsSync, and session_start re-runs with ctx.cwd.
+try { loadEnv(process.cwd()); } catch { /* cwd may be unavailable */ }
+
 // Lightweight reachability check against the obs server's unauthenticated
 // /health endpoint. Short timeout so a dead server never stalls agent boot.
 async function probeServer(url: string): Promise<boolean> {

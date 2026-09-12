@@ -129,6 +129,9 @@ Add your own by dropping a `.md` file into `agent/agents/` with the same frontma
 | `Ctrl+Q` | Toggle the sidebar (agent grid, skills snapshot, team list) |
 | `Ctrl+Shift+E` | Toggle the agent team on/off |
 | `Ctrl+Shift+M` | Abort the running memory summarizer |
+| `Alt+T` (hold) | Speech-to-text: record while the key is held; release to transcribe via Groq Whisper |
+| `/listen` | Speech-to-text: start/stop a recording without holding `Alt+T` |
+| `/stt` | Speech-to-text status / `on` / `off` / `lang <code\|auto>` / `model <id>` |
 
 ---
 
@@ -156,6 +159,7 @@ agent/
     agent-team/            # Core orchestrator extension (TypeScript source)
     obscura/              # Web-fetch via Obscura headless browser (setup.sh extracts binaries)
     web_fetch_crawl4ai/    # Persistent-Chromium web fetch (Playwright, setup-web-fetch.sh)
+    speech-to-text/        # Alt+T dictation via the Groq Whisper API
     omni-router/           # OmniRoute gateway provider (localhost:20128/v1, live model catalog)
     browser.ts, context7.ts, modelcost.ts, pi-scope.ts, TokenRouter.ts, ...
   skills/                  # Reusable skills (flet, pyside6, electron-scaffold, ...)

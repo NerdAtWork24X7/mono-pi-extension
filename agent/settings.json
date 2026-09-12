@@ -26,18 +26,19 @@
   ],
   "enabledModels": [
     "xiaomi-token-plan-ams/mimo-v2.5-pro",
-    "kilo/inclusionai/ling-3.0-flash-fin:free",
     "kilo/stepfun/step-3.7-flash:free",
     "opencode-go/glm-5.3-flash",
-    "opencode-go/deepseek-flash",
     "opencode-go/muse-spark-1.3-contributor",
     "opencode-go/glm-5.3",
-    "opencode-go/kimi-k3"
+    "opencode-go/kimi-k3",
+    "opencode-go/deepseek-v4.1-flash",
+    "kilo/inclusionai/ling-3.0-flash-vl:free"
   ],
   "extensions": [
     "+extensions/agent-team/index.ts",
     "+extensions/custom-tools/index.ts",
     "+extensions/web_fetch/index.ts",
+    "+extensions/speech-to-text/index.ts",
     "+extensions/omni-router/index.ts",
     "-extensions/obscura/index.ts",
     "+extensions/browser.ts",
