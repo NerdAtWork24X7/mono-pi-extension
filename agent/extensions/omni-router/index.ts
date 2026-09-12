@@ -5,28 +5,30 @@
  * provider: one OpenAI-compatible endpoint in front of hundreds of providers
  * and 1200+ models, with quota-aware auto-fallback and combo routing.
  *
- * The router's model catalog is fetched live from its OpenAI-compatible
- * /v1/models endpoint at extension load, so every model OmniRoute knows about
- * (including the `auto/*` combos and every specific provider model) is
- * registered with the provider and appears in the cost picker (/modelcost),
- * where it can be selected directly. The provider is always "configured" (the
- * API key resolves to the real OMNI_ROUTER_API_KEY value, or a local
- * placeholder the router accepts), so its models are selectable without extra
- * setup. Nothing is auto-scoped: to use models in /model, scope the ones you
- * want manually (see commands below). When the router is unreachable, a small
+ * Only combo models are exposed. The router's catalog is fetched live from its
+ * OpenAI-compatible /v1/models endpoint at extension load and filtered to
+ * combos — entries OmniRoute tags `owned_by: "combo"`, which covers both the
+ * zero-config `auto/*` virtual combos and the persisted named combos (e.g.
+ * `kimi-k3`, `glm-5.3`). Raw provider models are dropped. All combos are
+ * auto-scoped into `enabledModels` as `omni-router/*`, so they appear in
+ * /model, /modelcost and /scoped-models without manual setup (the /omniroute
+ * commands still manage that scope). The provider is always "configured" (the
+ * API key resolves to the real key value (env alias or auth.json), or a local
+ * placeholder the router accepts). When the router is unreachable, a small
  * fallback list of `auto/*` combos keeps the provider usable.
  *
- * Usage (key resolution: OMNI_ROUTER_API_KEY env → OMNIROUTE_API_KEY env →
- * the omni-router credential in pi's auth.json, i.e. getAgentDir()/auth.json):
+ * Usage (key resolution: OMNI_ROUTER_API_KEY / OMNI_ROUTER_API env →
+ * OMNIROUTE_API_KEY env → the omni-router credential in pi's auth.json, i.e.
+ * getAgentDir()/auth.json):
  *   export OMNI_ROUTER_API_KEY=sk-...   # key from OmniRoute Dashboard -> Endpoints
  *   # …or let pi store it: auth.json entry for "omni-router" ({ type: "api_key", key })
  *   export OMNI_ROUTER_BASE_URL=http://localhost:20128/v1   # optional, this is the default
  *   pi
- *   # /modelcost → pick any omni-router model, or scope what you want for /model:
+ *   # combos are auto-scoped; /omniroute manages that scope if needed:
  *   /omniroute add auto/best-coding
  *   /omniroute add kimi-k3
  *
- * Commands (scope management is always manual):
+ * Commands (combos are auto-scoped; these manage the scope):
  *   /omniroute              # refresh the model catalog from the router + status
  *   /omniroute all          # scope ALL omni-router models (adds omni-router/* to enabledModels)
  *   /omniroute none         # remove every omni-router entry from enabledModels
@@ -34,9 +36,9 @@
  *   /omniroute add <id>     # scope a specific model, e.g. /omniroute add kimi-k3
  *   /omniroute rm <id>      # unscope a specific model
  *
- * The real key (OMNI_ROUTER_API_KEY, OMNIROUTE_API_KEY alias, or auth.json) is
- * only needed for the /v1/models catalog fetch; chat requests accept any
- * bearer.
+ * The real key (OMNI_ROUTER_API_KEY / OMNI_ROUTER_API, OMNIROUTE_API_KEY
+ * alias, or auth.json) is only needed for the /v1/models catalog fetch; chat
+ * requests accept any bearer.
  */
 
 import { getAgentDir, type ExtensionAPI, type ProviderModelConfig } from "@mariozechner/pi-coding-agent";
@@ -56,9 +58,10 @@ const BASE_URL = (
 // router accepts any bearer for chat; the real key is still required for the
 // /v1/models catalog fetch below.
 //
-// Key resolution: OMNI_ROUTER_API_KEY env → OMNIROUTE_API_KEY env → the
-// omni-router credential in pi's auth.json (getAgentDir()/auth.json, the
-// git-ignored store pi itself writes, format { type: "api_key", key }).
+// Key resolution: OMNI_ROUTER_API_KEY env → OMNI_ROUTER_API env →
+// OMNIROUTE_API_KEY env → the omni-router credential in pi's auth.json
+// (getAgentDir()/auth.json, the git-ignored store pi itself writes, format
+// { type: "api_key", key }).
 function readAuthJsonKey(): string {
 	try {
 		const authPath = join(getAgentDir(), "auth.json");
@@ -76,6 +79,7 @@ function readAuthJsonKey(): string {
 }
 const ENV_API_KEY =
 	process.env.OMNI_ROUTER_API_KEY ??
+	process.env.OMNI_ROUTER_API ??
 	process.env.OMNIROUTE_API_KEY ??
 	readAuthJsonKey();
 const API_KEY = ENV_API_KEY || "sk-omniroute-local";
@@ -87,6 +91,8 @@ const FETCH_TIMEOUT_MS = 10_000;
 
 interface OmniRouterModel {
 	id: string;
+	/** OmniRoute sets this to "combo" for every combo (virtual auto/* + named). */
+	owned_by?: string;
 	name?: string;
 	context_length?: number;
 	max_input_tokens?: number;
@@ -103,6 +109,15 @@ interface OmniRouterModel {
 		cached?: number;
 		cache_creation?: number;
 	};
+}
+
+/**
+ * Combos only: OmniRoute tags every combo (the zero-config `auto/*` virtual
+ * combos and the persisted named combos) with `owned_by: "combo"`. The id
+ * prefix is a fallback for router builds that omit the field.
+ */
+function isCombo(m: OmniRouterModel): boolean {
+	return m.owned_by === "combo" || m.id.startsWith("auto/");
 }
 
 function mapModel(m: OmniRouterModel): ProviderModelConfig {
@@ -145,7 +160,11 @@ async function fetchOmniRouterModels(): Promise<ProviderModelConfig[]> {
 	if (!json.data || !Array.isArray(json.data)) {
 		throw new Error("Invalid /v1/models response: missing data array");
 	}
-	return json.data.map(mapModel);
+	const combos = json.data.filter(isCombo);
+	if (combos.length === 0) {
+		throw new Error("OmniRoute /v1/models returned no combo models");
+	}
+	return combos.map(mapModel);
 }
 
 // Fallback combos used when the router is unreachable at load time. The live
@@ -210,6 +229,29 @@ function getOmniRouterScope(): string[] {
 	);
 }
 
+/** enabledModels glob that scopes every omni-router model. The provider only
+ *  registers combos, so this entry scopes exactly the combo catalog. */
+const COMBO_SCOPE = "omni-router/*";
+
+/**
+ * Auto-scope all combos into enabledModels. Idempotent: a no-op once
+ * `omni-router/*` is present, and replaces any individual omni-router entries
+ * with the single glob (superset). pi's enabledModels patterns support globs
+ * (minimatch on `provider/modelId`), so one entry covers the whole catalog.
+ */
+function ensureComboScope(): boolean {
+	try {
+		const list = getEnabledModels();
+		if (list.includes(COMBO_SCOPE)) return false;
+		setEnabledModels([COMBO_SCOPE, ...list.filter((e) => !e.startsWith("omni-router/"))]);
+		return true;
+	} catch {
+		// Non-fatal: never block extension load on a settings write. Scope can
+		// still be managed with the /omniroute commands.
+		return false;
+	}
+}
+
 // =============================================================================
 // Extension Entry Point
 // =============================================================================
@@ -217,12 +259,17 @@ function getOmniRouterScope(): string[] {
 export default function (pi: ExtensionAPI) {
 	let models: ProviderModelConfig[] = FALLBACK_MODELS;
 
+	// Auto-scope every combo so they appear in /model and /scoped-models.
+	// pi reads enabledModels at startup, so a fresh write lands next session.
+	ensureComboScope();
+
 	// Fetch the catalog at load time so the provider is immediately usable
-	// with the router's full model list.
+	// with the router's combo catalog.
 	fetchOmniRouterModels()
 		.then((fetched) => {
 			models = fetched;
 			pi.registerProvider("omni-router", makeConfig(fetched));
+			ensureComboScope();
 		})
 		.catch((error) => {
 			console.warn(
@@ -240,10 +287,11 @@ export default function (pi: ExtensionAPI) {
 			const fetched = await fetchOmniRouterModels();
 			models = fetched;
 			pi.registerProvider("omni-router", makeConfig(fetched));
+			ensureComboScope();
 			const theme = ctx.ui.theme;
 			ctx.ui.setStatus(
 				"omni-router",
-				theme.fg("accent", `🛰 ${fetched.length} models`),
+				theme.fg("accent", `🛰 ${fetched.length} combos`),
 			);
 		} catch {
 			const theme = ctx.ui.theme;
@@ -268,10 +316,8 @@ export default function (pi: ExtensionAPI) {
 			const rest = (args?.trim().split(/\s+/).slice(1).join(" ") ?? "").trim();
 
 			if (sub === "all") {
-				const list = getEnabledModels();
-				if (!list.includes("omni-router/*")) {
-					setEnabledModels(["omni-router/*", ...list.filter((e) => !e.startsWith("omni-router/"))]);
-					ctx.ui.notify("Scoped ALL omni-router models (omni-router/*). They now appear in /model, /modelcost, /scoped-models.", "info");
+				if (ensureComboScope()) {
+					ctx.ui.notify("Scoped ALL omni-router combos (omni-router/*). They now appear in /model, /modelcost, /scoped-models.", "info");
 				} else {
 					ctx.ui.notify("omni-router/* is already in enabledModels.", "info");
 				}
@@ -349,9 +395,10 @@ export default function (pi: ExtensionAPI) {
 				const fetched = await fetchOmniRouterModels();
 				models = fetched;
 				pi.registerProvider("omni-router", makeConfig(fetched));
+				ensureComboScope();
 				const scoped = getOmniRouterScope().length;
 				ctx.ui.notify(
-					`OmniRoute: ${fetched.length} models registered from ${BASE_URL} (${scoped} scope entr${scoped === 1 ? "y" : "ies"}).`,
+					`OmniRoute: ${fetched.length} combos registered from ${BASE_URL} (${scoped} scope entr${scoped === 1 ? "y" : "ies"}).`,
 					"info",
 				);
 			} catch (error) {
