@@ -15,13 +15,13 @@ import { piBin, trunc } from "./helpers";
  *  memory dir (replaces the former single project_memory.md). Stable names so
  *  write-detection and the orchestrator prompt stay aligned. */
 export const MEMORY_CATEGORIES = [
-  { key: "folder_structure", file: "folder_structure.md", heading: "Folder Structure" },
-  { key: "architecture", file: "architecture.md", heading: "Architecture" },
-  { key: "design_decisions", file: "design_decisions.md", heading: "Design Decisions" },
-  { key: "facts", file: "facts.md", heading: "Facts" },
-  { key: "user_taste_preferences", file: "user_taste_preferences.md", heading: "User Taste & Preferences" },
-  { key: "user_suggestions", file: "user_suggestions.md", heading: "User Suggestions" },
-  { key: "failures_solutions", file: "failures_solutions.md", heading: "Failures & Solutions" },
+  { key: "folder_structure", file: "folder_structure.md", heading: "Folder Structure of Project" },
+  { key: "architecture", file: "architecture.md", heading: "Architecture of Project" },
+  { key: "design_decisions", file: "design_decisions.md", heading: "Design Decisions of Project" },
+  { key: "facts", file: "facts.md", heading: "Facts of Project" },
+  { key: "user_taste_preferences", file: "user_taste_preferences.md", heading: "User Taste & Preferences for Project" },
+  { key: "user_suggestions", file: "user_suggestions.md", heading: "User Suggestions for Project" },
+  { key: "failures_solutions", file: "failures_solutions.md", heading: "Failures & Solutions occured in Project" },
 ] as const;
 
 /** Full paths of every per-category memory file under `memoryDir`. */
@@ -40,9 +40,9 @@ export function memoryFiles(memoryDir: string): Array<{ path: string; heading: s
 
 function buildMemorySystemPrompt(memoryDir: string): string {
   const files = memoryFiles(memoryDir)
-    .map((f) => `- \`${f.path}\` - **${f.heading}**`)
+    .map((f) => `- \`${f.path.replace(memoryDir + "/","")}\` - **${f.heading}**`)
     .join("\n");
-  return `You are a project memory consolidator. Analyze the latest conversation turn and update the project memory files under \`${memoryDir}\` with persistent project knowledge.
+  return `You are a project memory consolidator. Analyze the latest conversation turn and update the project memory files under folder \`${memoryDir}/\` with persistent project knowledge.
 
 ---
 
@@ -59,7 +59,10 @@ ${files}
 - No timestamps, conversational preamble, code fences, or meta-commentary.
 - Do not create new files or new top-level sections.
 - Keep each file concise (under 300 words).
-- Write output directly to the matching file(s); write at least one file when there is anything new.`;
+- Write output directly to the matching file(s); write at least one file when there is anything new.
+
+Project Directory : ${process.cwd()}
+`;
 }
 
 

@@ -13,7 +13,7 @@ export const BATCH_CONCURRENCY = envNum("WEB_FETCH_CONCURRENCY", 4); // parallel
 export const MAX_RESULT_CHARS = envNum("WEB_FETCH_MAX_CHARS", 50_000); // per-page markdown cap
 export const MAX_RAW_CHARS = envNum("WEB_FETCH_MAX_RAW_CHARS", 50_000); // raw-HTML cap (raw bypasses the markdown cap)
 export const PAGE_DELAY_S = envNum("WEB_FETCH_PAGE_DELAY_S", 2); // per-page settle delay (full fetches)
-export const SCAN_FULL_PAGE = (process.env.WEB_FETCH_SCAN_FULL_PAGE ?? "1") !== "0";
+export const SCAN_FULL_PAGE = (process.env.WEB_FETCH_SCAN_FULL_PAGE ?? "0") !== "1";
 // Headroom above the markdown cap for the DDG search page: link extraction
 // needs more text than any single result section gets.
 export const SEARCH_TEXT_CHARS = Math.max(MAX_RESULT_CHARS * 5, 50_000);

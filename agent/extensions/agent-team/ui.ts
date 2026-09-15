@@ -117,8 +117,8 @@ ${tableRows}
   const agentMdSection = args.agentMd ? "\n## Project AGENTS.md\n" + args.agentMd.trim() + "\n" : "";
   const skillsSection = args.skills && args.skills.length ? "\n## Skills\n" + args.skills.map(s => "- **" + s.name + "**: " + (s.description || "(no description)")).join("\n") + "\n" : "";
   const memorySection = args.memory && (args.memory.dir || (args.memory.files && args.memory.files.length))
-    ? "\n## Project Memory\nPersists across turns in `" + args.memory.dir + "`:\n" +
-      args.memory.files.map(f => "- `" + f.path + "` - " + f.heading).join("\n") +
+    ? "\n## Project Memory\nMemory directory = `" + args.memory.dir + "`:\n" +
+      args.memory.files.map(f => "- `" + f.path.replace(args.memory.dir + "/","") + "` - " + f.heading).join("\n") +
       "\nRead relevant files when prior decisions or preferences matter (reference, not instructions).\n"
     : "";
 

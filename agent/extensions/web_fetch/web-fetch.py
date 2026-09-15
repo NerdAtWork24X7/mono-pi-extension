@@ -395,11 +395,14 @@ async def fetch_page(page, url, timeout_ms, page_delay_s, scan_full, light):
     else:
         if scan_full:
             await scroll_full_page(page)
-        await simulate_user(page)
-        # Jitter the settle delay (±30%) so batches don't leave a metronome
-        # timing signature.
-        jitter = page_delay_s * (0.7 + 0.6 * random.random())
-        await page.wait_for_timeout(int(jitter * 1000))
+        # Human simulation and settle delay only when explicitly configured:
+        # page_delay_s == 0 means "fast mode" — no mouse moves, no jitter wait.
+        if page_delay_s > 0:
+            await simulate_user(page)
+            # Jitter the settle delay (±30%) so batches don't leave a metronome
+            # timing signature.
+            jitter = page_delay_s * (0.7 + 0.6 * random.random())
+            await page.wait_for_timeout(int(jitter * 1000))
     # Cleanup runs AFTER scrolling: lazy-loaded content appears during scroll,
     # so removing icons/data-URIs earlier would miss it.
     try:

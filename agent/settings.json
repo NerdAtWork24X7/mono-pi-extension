@@ -40,6 +40,7 @@
     "+extensions/web_fetch/index.ts",
     "+extensions/speech-to-text/index.ts",
     "+extensions/omni-router/index.ts",
+    "+extensions/tokenharbor.ts",
     "-extensions/obscura/index.ts",
     "+extensions/browser.ts",
     "+extension/pi-scope.ts",
