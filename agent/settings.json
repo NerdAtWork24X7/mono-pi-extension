@@ -32,14 +32,14 @@
     "opencode-go/glm-5.3",
     "opencode-go/kimi-k3",
     "opencode-go/deepseek-v4.1-flash",
-    "kilo/inclusionai/ling-3.0-flash-vl:free"
+    "kilo/inclusionai/ling-3.0-flash-vl:free",
+    "xiaomi-token-plan-ams/mimo-v2.5"
   ],
   "extensions": [
     "+extensions/agent-team/index.ts",
     "+extensions/custom-tools/index.ts",
     "+extensions/web_fetch/index.ts",
     "+extensions/speech-to-text/index.ts",
-    "+extensions/omni-router/index.ts",
     "+extensions/tokenharbor.ts",
     "-extensions/obscura/index.ts",
     "+extensions/browser.ts",

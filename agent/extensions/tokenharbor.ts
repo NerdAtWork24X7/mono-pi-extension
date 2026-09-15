@@ -39,6 +39,11 @@ const TOKENHARBOR_BASE_URL = (
 ).replace(/\/+$/, "");
 const TOKENHARBOR_TOS_URL = "https://tokenharbor.ai/terms";
 const FETCH_TIMEOUT_MS = 10_000;
+// Versioned because the disk cache stores the *mapped* ProviderModelConfig[]
+// (reasoning/cost/compat already applied), not the raw catalog: a mapping
+// change must not be shadowed by a still-fresh 12h-old entry. Bump on any
+// change to mapTokenHarborModel.
+const TOKENHARBOR_CACHE_KEY = "tokenharbor-models-v2";
 
 // =============================================================================
 // API key resolution
@@ -79,22 +84,36 @@ function resolveApiKey(): string {
 
 /**
  * TokenHarbor pricing is USD per million tokens, matching pi's `cost` unit.
- * Price fields are nullable when the catalog omits them (e.g. some `:free`
- * variants) — pi's cost is informational here (gateway bills upstream
- * per-token usage), so omitted prices map to 0.
+ * The live /v1/models catalog returns `input_usd_per_1m` / `output_usd_per_1m`
+ * (numbers, 0 on `:free` ids); the OpenRouter-shaped `prompt`/`completion`/
+ * `input_cache_*` keys are kept as fallbacks for shape changes. Price fields
+ * are nullable when the catalog omits them — pi's cost is informational here
+ * (the gateway bills upstream per-token usage), so omitted prices map to 0.
+ *
+ * The catalog carries no capability metadata: no `supported_parameters`, no
+ * `architecture`, only `label`, `tier`, `blurb`, `tool_call`, and
+ * `supports_prompt_cache`. Reasoning therefore cannot be detected from it.
  */
 interface TokenHarborModel {
   id: string;
+  label?: string;
   name?: string;
-  context_length?: number;
+  blurb?: string;
+  tier?: string;
+  context_length?: number | null;
   max_completion_tokens?: number | null;
   max_output_tokens?: number | null;
+  supports_prompt_cache?: boolean;
+  tool_call?: boolean;
+  function_call?: boolean;
   architecture?: {
     input_modalities?: string[] | null;
     output_modalities?: string[] | null;
   };
   supported_parameters?: string[];
   pricing?: {
+    input_usd_per_1m?: string | number | null;
+    output_usd_per_1m?: string | number | null;
     prompt?: string | number | null;
     completion?: string | number | null;
     input_cache_read?: string | number | null;
@@ -111,22 +130,33 @@ function parsePrice(price: string | number | null | undefined): number {
 function mapTokenHarborModel(m: TokenHarborModel): ProviderModelConfig {
   const inputModalities = m.architecture?.input_modalities ?? ["text"];
   const supportsImages = inputModalities.includes("image");
-  const supportsReasoning =
-    m.supported_parameters?.includes("reasoning") ?? false;
   const contextWindow = m.context_length || 200_000;
   const maxTokens =
     m.max_completion_tokens ?? m.max_output_tokens ?? Math.min(65_536, contextWindow);
+  const pricing = m.pricing ?? {};
 
   return {
     id: m.id,
-    name: m.name ?? m.id,
-    reasoning: supportsReasoning,
+    name: m.label ?? m.name ?? m.id,
+    // Every model the gateway exposes is reasoning-capable, but the catalog
+    // does not say so: it omits `supported_parameters` (and `architecture`),
+    // so capability probing returns nothing and pi would offer no thinking
+    // levels at all. TokenHarbor's own pi adapter marks every catalog entry
+    // `reasoning: true`; the gateway accepts (and translates) the resulting
+    // `reasoning_effort` for each upstream. With no `thinkingLevelMap`, pi
+    // exposes off/minimal/low/medium/high and sends the level verbatim.
+    reasoning: true,
+    // Pi would otherwise send the OpenAI `developer` role for reasoning
+    // models. This gateway fronts many vendors and also speaks the Anthropic
+    // Messages shape (which has no `developer` role), so the universally
+    // accepted `system` role is the safe hop.
+    compat: { supportsDeveloperRole: false },
     input: supportsImages ? ["text", "image"] : ["text"],
     cost: {
-      input: parsePrice(m.pricing?.prompt),
-      output: parsePrice(m.pricing?.completion),
-      cacheRead: parsePrice(m.pricing?.input_cache_read),
-      cacheWrite: parsePrice(m.pricing?.input_cache_write),
+      input: parsePrice(pricing.input_usd_per_1m ?? pricing.prompt),
+      output: parsePrice(pricing.output_usd_per_1m ?? pricing.completion),
+      cacheRead: parsePrice(pricing.input_cache_read),
+      cacheWrite: parsePrice(pricing.input_cache_write),
     },
     contextWindow,
     maxTokens,
@@ -206,31 +236,6 @@ function setEnabledModels(list: string[]): void {
   writeSettings(settings);
 }
 
-/** enabledModels glob that scopes every registered tokenharbor model. */
-const PROVIDER_SCOPE = "tokenharbor/*";
-
-/**
- * Auto-scope the whole tokenharbor catalog into enabledModels so the models
- * appear in /model, /modelcost and /scoped-models without manual setup.
- * Idempotent: a no-op once `tokenharbor/*` is present, and replaces any
- * individual tokenharbor entries with the single glob (superset). pi reads
- * enabledModels at startup, so a fresh write lands next session.
- */
-function ensureProviderScope(): boolean {
-  try {
-    const list = getEnabledModels();
-    if (list.includes(PROVIDER_SCOPE)) return false;
-    setEnabledModels([
-      PROVIDER_SCOPE,
-      ...list.filter((e) => !e.startsWith("tokenharbor/")),
-    ]);
-    return true;
-  } catch {
-    // Non-fatal: never block extension load on a settings write. Scope can
-    // still be managed via /modelcost (ctrl+s) or by editing settings.json.
-    return false;
-  }
-}
 
 // =============================================================================
 // Provider config
@@ -266,7 +271,7 @@ export default async function (pi: ExtensionAPI) {
   let models: ProviderModelConfig[] = [];
   if (token) {
     try {
-      models = await loadCachedModels("tokenharbor-models", () =>
+      models = await loadCachedModels(TOKENHARBOR_CACHE_KEY, () =>
         fetchTokenHarborModels(token),
       );
     } catch (error) {
@@ -283,8 +288,6 @@ export default async function (pi: ExtensionAPI) {
 
   pi.registerProvider("tokenharbor", makeConfig(models));
 
-  // Auto-scope so the models are selectable via /model without manual setup.
-  if (models.length > 0) ensureProviderScope();
 
   // Refresh the catalog when a session starts (models and prices change; the
   // free tier requires no key, so the refresh runs even when unconfigured).
@@ -301,12 +304,11 @@ export default async function (pi: ExtensionAPI) {
     }
 
     try {
-      const fetched = await loadCachedModels("tokenharbor-models", () =>
+      const fetched = await loadCachedModels(TOKENHARBOR_CACHE_KEY, () =>
         fetchTokenHarborModels(token),
       );
       models = fetched;
       pi.registerProvider("tokenharbor", makeConfig(fetched));
-      ensureProviderScope();
       ctx.ui.setStatus(
         "tokenharbor",
         theme.fg("accent", `⚓ ${fetched.length} models`),
@@ -338,7 +340,7 @@ export default async function (pi: ExtensionAPI) {
       }
       try {
         const fetched = await loadCachedModels(
-          "tokenharbor-models",
+          TOKENHARBOR_CACHE_KEY,
           () => fetchTokenHarborModels(token),
           // Commands are explicit user actions — always hit the network so a
           // manual refresh isn't silently served from a 12h-old cache.
@@ -346,7 +348,6 @@ export default async function (pi: ExtensionAPI) {
         );
         models = fetched;
         pi.registerProvider("tokenharbor", makeConfig(fetched));
-        ensureProviderScope();
         ctx.ui.notify(
           `TokenHarbor: ${fetched.length} models registered from ${TOKENHARBOR_BASE_URL}.`,
           "info",

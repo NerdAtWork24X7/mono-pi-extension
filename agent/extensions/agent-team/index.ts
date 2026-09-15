@@ -347,6 +347,9 @@ export class AgentTeam implements AgentTeamContext {
       const block = new Set(this.skipOrchestratorTools.map(t => t.toLowerCase()));
       base = base.filter(n => !block.has(n.toLowerCase()));
     }
+    base.unshift("dispatch_agent");
+    base.unshift("dispatch_agents");
+    /*
     if (this.parallelDispatch) {
       // Parallel ON: dispatch_agents only, dispatch_agent disabled
       base.unshift("dispatch_agents");
@@ -354,6 +357,7 @@ export class AgentTeam implements AgentTeamContext {
       // Parallel OFF: dispatch_agent only, dispatch_agents disabled
       base.unshift("dispatch_agent");
     }
+    */
     return base;
   }
 

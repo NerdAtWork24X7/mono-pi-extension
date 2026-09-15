@@ -1,14 +1,24 @@
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@mariozechner/pi-ai";
-import { MAX_RAW_CHARS, MAX_RESULT_CHARS, SEARCH_TEXT_CHARS, runBatch, shutdownRunner, type Job, type JobResult, type Update } from "./runner";
-import { extractUrlsFromDDGMarkdown } from "./ddg";
+import {
+	MAX_RAW_CHARS,
+	MAX_RESULT_CHARS,
+	MAX_SEARCH_TOTAL_CHARS,
+	runBatch,
+	shutdownRunner,
+	type Job,
+	type JobResult,
+	type Update,
+} from "./runner";
+import { SEARCH_ENGINES, selectSources, toKeywords, type SerpRecord } from "./search";
 
-// ── Result helpers ───────────────────────────────────────────────────────
+// Floor for the per-source markdown cap when the search budget is split wide.
+const MIN_SOURCE_CHARS = 4_000;
+const MAX_RESULTS_CAP = 10;
+
 function errRes(text: string) {
 	return { content: [{ type: "text" as const, text }], details: { error: text } };
 }
-
-const SEARCH_URL = (q: string) => `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`;
 
 /** Normalize a URL and require http(s); returns null when invalid. */
 function validHttpUrl(u: string): string | null {
@@ -20,6 +30,17 @@ function validHttpUrl(u: string): string | null {
 	}
 }
 
+/** One query's search outcome, kept small: what we asked, where it came from,
+ *  what we picked, and why it failed when it did. */
+interface QueryOutcome {
+	query: string;
+	keywords: string;
+	engine: string | null; // engine that answered
+	blocked: string[]; // engines that served a bot check
+	error: string | null; // last engine-level failure
+	sources: SerpRecord[];
+}
+
 export default function (pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		shutdownRunner();
@@ -29,28 +50,30 @@ export default function (pi: ExtensionAPI) {
 		name: "web-fetch",
 		label: "Web Fetch",
 		description:
-			"Fetch web pages as Markdown via a persistent headless browser (one shared session across calls), or search DuckDuckGo via 'query'. " +
+			"Fetch web pages as Markdown via a persistent headless browser (one shared session across calls), or search with 'query'/'queries'. " +
+			"Search extracts your keywords, queries DuckDuckGo, and fetches the top 'maxResults' results (ad slots and duplicate URLs dropped, titles/snippets/sources returned). " +
 			"Pass 'urls' (array) and/or 'queries' (array) to batch many fetches/searches in ONE tool call — everything is crawled in parallel in the same browser session. Singular 'url'/'query' still work.",
 		parameters: Type.Object({
 			url: Type.Optional(Type.String({ description: "A single URL to fetch (omit if using query/queries)", default: "" })),
 			urls: Type.Optional(Type.Array(Type.String({ description: "Multiple URLs to fetch in one batch (parallel, shared session)", default: [] }))),
 			raw: Type.Optional(Type.Boolean({ description: "Return raw HTML instead of markdown (default false)", default: false })),
-			query: Type.Optional(Type.String({ description: "A single search query to find and fetch top DuckDuckGo results (omit if using url/urls)", default: "" })),
-			queries: Type.Optional(Type.Array(Type.String({ description: "Multiple search queries, each returning its top results, all in one batch", default: [] }))),
-			maxResults: Type.Optional(Type.Number({ description: "Max search results to fetch per query (1-5, default 5)", default: 5 })),
+			query: Type.Optional(Type.String({ description: "A search query; its keywords are searched and the top results fetched (omit if using url/urls)", default: "" })),
+			queries: Type.Optional(Type.Array(Type.String({ description: "Multiple search queries, each searched and fetched, all in one batch", default: [] }))),
+			maxResults: Type.Optional(Type.Number({ description: "How many search results to fetch per query (1-10, default 5)", default: 5 })),
 		}),
 
 		async execute(_toolCallId: unknown, params: { url?: string; urls?: string[]; raw?: boolean; query?: string; queries?: string[]; maxResults?: number }, signal?: AbortSignal, onUpdate?: (u: Update) => void) {
 			const raw = params.raw ?? false;
-			const maxResults = Math.min(Math.max(params.maxResults ?? 5, 1), 5);
+			const maxResults = Math.min(Math.max(Math.trunc(params.maxResults ?? 5), 1), MAX_RESULTS_CAP);
 
 			// Collect + dedupe queries and direct URLs (plural + singular forms).
-			const queries = [...(params.query ? [params.query] : []), ...(params.queries ?? [])]
-				.map((q) => q.trim()).filter((q) => q.length > 0);
+			const queryInputs = [...(params.query ? [params.query] : []), ...(params.queries ?? [])]
+				.map((q) => q.replace(/\s+/g, " ").trim()).filter((q) => q.length > 0);
+			const seenQ = new Set<string>();
+			const queries = queryInputs.filter((q) => { const k = q.toLowerCase(); if (seenQ.has(k)) return false; seenQ.add(k); return true; });
+
 			const urlInputs = [...(params.url ? [params.url] : []), ...(params.urls ?? [])]
 				.map((u) => u.trim()).filter((u) => u.length > 0);
-			const seenQ = new Set<string>();
-			const qList = queries.filter((q) => { const k = q.toLowerCase(); if (seenQ.has(k)) return false; seenQ.add(k); return true; });
 			const seenU = new Set<string>();
 			const urls: string[] = [];
 			const badUrls: string[] = [];
@@ -62,116 +85,143 @@ export default function (pi: ExtensionAPI) {
 				urls.push(norm);
 			}
 
-			if (qList.length === 0 && urls.length === 0) {
+			if (queries.length === 0 && urlInputs.length === 0) {
 				return errRes("Error: provide 'url', 'urls', 'query', or 'queries'.");
 			}
+			// Checked before "nothing to do": an all-invalid input list must say
+			// WHY it was rejected, not that nothing was provided.
 			if (badUrls.length > 0) {
 				return errRes(`Error: invalid URL(s): ${badUrls.join(", ")} (must be valid http(s) URLs).`);
 			}
 
 			const details: Record<string, any> = { urlsFetched: 0, urlsFailed: 0 };
-			if (qList.length) details.queries = qList;
+			if (queries.length) details.queries = queries;
 			if (urls.length) details.urls = urls;
 
-			type Target = { key: number; url: string; raw: boolean; kind: "search" | "source" | "direct"; max: number };
+			type Target = { key: number; url: string; raw: boolean; light: boolean; max: number; extract?: "serp" };
 			const targets: Target[] = [];
 			const results = new Map<number, JobResult>();
 			const keyUrl = new Map<number, string>();
 			const byUrl = new Map<string, number>();
 			let seq = 0;
 
-			// Register a target for fetching (deduped by URL — two queries that
-			// return the same source, or a direct URL that is also a search hit,
-			// are crawled ONCE). `max` is the per-job text cap the Python crawler
-			// enforces before writing to the pipe.
-			const reg = (u: string, r: boolean, kind: Target["kind"]): number => {
+			// Register a target for fetching, deduped by URL — the same page found
+			// by two queries, or a search hit that is also a direct URL, is crawled
+			// exactly once.
+			const reg = (u: string, opts: { raw: boolean; light: boolean; max: number; extract?: "serp" }): number => {
 				const existing = byUrl.get(u);
 				if (existing !== undefined) return existing;
 				const k = seq++;
 				byUrl.set(u, k);
 				keyUrl.set(k, u);
-				targets.push({
-					key: k, url: u, raw: r, kind,
-					max: kind === "search" ? SEARCH_TEXT_CHARS : (r ? MAX_RAW_CHARS : MAX_RESULT_CHARS),
-				});
+				targets.push({ key: k, url: u, ...opts });
 				return k;
 			};
 
-			// Crawl every registered target as ONE batch on the warm runner
+			// Crawl every not-yet-fetched target as ONE batch on the warm runner
 			// (single Chromium, parallel tabs, shared session).
 			const fetchMissing = async () => {
 				const need = targets.filter((t) => !results.has(t.key));
 				if (need.length === 0) return;
-				const jobs: Job[] = need.map((t) => ({ key: t.key, url: t.url, raw: t.raw, light: t.kind === "search", max: t.max }));
+				const jobs: Job[] = need.map((t) => ({ key: t.key, url: t.url, raw: t.raw, light: t.light, max: t.max, extract: t.extract }));
 				try {
 					const got = await runBatch(jobs, signal, onUpdate);
 					for (const t of need) {
 						const r = got.get(t.key);
-						if (r && (r.ok || r.text)) {
+						if (r && (r.ok || r.text || r.results)) {
 							results.set(t.key, r);
 						} else {
-							results.set(t.key, { ok: false, text: "", error: r?.error ?? "no result from crawler" });
+							results.set(t.key, { ok: false, text: "", error: r?.error ?? "no result from crawler", blocked: r?.blocked, status: r?.status });
 						}
 					}
 				} catch (e) {
-					// Batch-level failure (timeout/abort/crash): record the reason
-					// on every pending target so sections can show it, then rethrow.
+					// Batch-level failure (timeout/abort/crash): record the reason on
+					// every pending target so sections can show it, then rethrow.
 					const msg = e instanceof Error ? e.message : "batch failed";
 					for (const t of need) results.set(t.key, { ok: false, text: "", error: msg });
 					throw e;
 				}
 			};
 
-			// ── Register all work up front: every search page + every direct URL ──
-			const searchKeys = qList.map((q) => reg(SEARCH_URL(q), false, "search"));
-			urls.forEach((u) => reg(u, raw, "direct"));
+			urls.forEach((u) => reg(u, { raw, light: false, max: raw ? MAX_RAW_CHARS : MAX_RESULT_CHARS }));
 
-			if (qList.length) {
-				onUpdate?.({ content: [{ type: "text", text: `Searching DuckDuckGo for: ${qList.join(" | ")}` }], details: { queries: qList, phase: "search" } });
-			}
-			if (urls.length) {
-				onUpdate?.({ content: [{ type: "text", text: `Fetching ${urls.length} URL(s): ${urls.join(", ")}` }], details: { phase: "fetch", urls } });
+			// ── 1. Search: keywords -> engine -> top results (engine fallback) ──
+			const outcomes: QueryOutcome[] = queries.map((q) => ({
+				query: q, keywords: toKeywords(q), engine: null, blocked: [], error: null, sources: [],
+			}));
+			const serpKey = (qi: number, engineIdx: number): number =>
+				reg(SEARCH_ENGINES[engineIdx].searchUrl(outcomes[qi].keywords), { raw: false, light: true, max: 0, extract: "serp" });
+
+			// Read one engine's SERP into the query outcome: hits, or the reason it
+			// has none (bot check vs plain "no results" drives the next engine).
+			const collectSerp = (qi: number, engineIdx: number, records: SerpRecord[]): void => {
+				const o = outcomes[qi];
+				const r = results.get(serpKey(qi, engineIdx));
+				const got = r?.results ?? [];
+				if (got.length > 0) {
+					o.engine = SEARCH_ENGINES[engineIdx].label;
+					records.push(...got);
+					return;
+				}
+				if (r?.blocked) o.blocked.push(SEARCH_ENGINES[engineIdx].label);
+				else if (!r || r.error) o.error = `${SEARCH_ENGINES[engineIdx].label}: ${r?.error ?? "no result from crawler"}`;
+			};
+
+			// One engine at a time, only for the queries still without results.
+			const hits: SerpRecord[][] = queries.map(() => []);
+			const pending = () => queries.map((_, qi) => hits[qi].length === 0);
+			for (let engineIdx = 0; engineIdx < SEARCH_ENGINES.length; engineIdx++) {
+				const todo = pending();
+				if (!todo.some(Boolean)) break;
+				if (engineIdx === 0 && queries.length) {
+					onUpdate?.({
+						content: [{ type: "text", text: `Searching ${SEARCH_ENGINES[0].label}: ${outcomes.map((o) => o.keywords).join(" | ")}` }],
+						details: { queries, phase: "search" },
+					});
+				}
+				for (let qi = 0; qi < queries.length; qi++) if (todo[qi]) serpKey(qi, engineIdx);
+				try {
+					await fetchMissing();
+				} catch { /* recorded per query below; search is best-effort */ }
+				for (let qi = 0; qi < queries.length; qi++) if (todo[qi]) collectSerp(qi, engineIdx, hits[qi]);
 			}
 
+			// ── 2. Pick the sources to fetch: top N per query ──
+			for (let qi = 0; qi < queries.length; qi++) outcomes[qi].sources = selectSources(hits[qi], maxResults);
+
+			if (urls.length === 0 && outcomes.length > 0 && outcomes.every((o) => o.sources.length === 0)) {
+				const why = outcomes
+					.map((o) => {
+						const bits = [...(o.blocked.length ? [`bot check from ${o.blocked.join(", ")}`] : []), ...(o.error ? [o.error] : [])];
+						return `"${o.query}" — ${bits.join("; ") || "no results"}`;
+					})
+					.join("\n");
+				return errRes(`No search results.\n${why}\nTry different keywords, or pass 'url'/'urls' directly.`);
+			}
+
+			// One markdown budget is shared across all search-derived pages, so a
+			// 5-result search can't dump 5 x MAX_RESULT_CHARS into the context.
+			const selected = new Set<string>();
+			for (const o of outcomes) for (const s of o.sources) selected.add(s.url);
+			const sourceMax = Math.min(MAX_RESULT_CHARS, Math.max(MIN_SOURCE_CHARS, Math.floor(MAX_SEARCH_TOTAL_CHARS / Math.max(1, selected.size))));
+			for (const o of outcomes) for (const s of o.sources) reg(s.url, { raw, light: false, max: sourceMax });
+
+			if (selected.size > 0) {
+				onUpdate?.({
+					content: [{ type: "text", text: `Fetching ${selected.size} result page(s)${urls.length ? ` + ${urls.length} direct URL(s)` : ""}` }],
+					details: { phase: "fetch", urls: [...selected, ...urls] },
+				});
+			}
+			// ── 3. Fetch the selected pages (plus any direct URLs) ──
 			try {
 				await fetchMissing();
 			} catch (e) {
-				// A dead crawler can't serve anything: report the batch error.
-				if (qList.length === 0 && urls.length > 0) {
+				if (queries.length === 0) {
 					return errRes(`Error fetching ${urls.join(", ")}: ${e instanceof Error ? e.message : "batch failed"}`);
 				}
 			}
 
-			// ── Parse each search page; register its top results as sources ──
-			// Per-query outcome: { keys: source keys, hard: hard failure, empty: no results }
-			type QueryOutcome = { q: string; keys: number[]; hard: string | null; empty: string | null };
-			const outcomes: QueryOutcome[] = [];
-			let anySources = false;
-			for (let i = 0; i < qList.length; i++) {
-				const sr = results.get(searchKeys[i]);
-				if (!sr || !sr.ok) {
-					outcomes.push({ q: qList[i], keys: [], hard: `Error searching "${qList[i]}": ${sr?.error ?? "unknown"}`, empty: null });
-					continue;
-				}
-				const resultUrls = extractUrlsFromDDGMarkdown(sr.text, maxResults);
-				if (resultUrls.length === 0) {
-					outcomes.push({
-						q: qList[i], keys: [], hard: null,
-						empty: `DuckDuckGo search for "${qList[i]}" returned no extractable results.\n\n${sr.text.slice(0, 2000)}`,
-					});
-					continue;
-				}
-				const keys = resultUrls.map((ru) => reg(ru, raw, "source"));
-				if (keys.length) anySources = true;
-				outcomes.push({ q: qList[i], keys, hard: null, empty: null });
-			}
-
-			// Second batch: all extracted result pages (sources only).
-			try {
-				if (anySources) await fetchMissing();
-			} catch { /* per-key failures are captured in `results`; surfaced below */ }
-
-			// ── Assemble output ──
+			// ── 4. Report ──
 			const sections: string[] = [];
 			const counted = new Set<number>();
 			const count = (k: number, ok: boolean) => {
@@ -179,63 +229,66 @@ export default function (pi: ExtensionAPI) {
 				counted.add(k);
 				if (ok) details.urlsFetched++; else details.urlsFailed++;
 			};
+			const searchDetails: Array<Record<string, any>> = [];
+			// One page can be the top result for two queries. It is fetched once and
+			// its text rendered once; later sections point at it instead of dumping
+			// the same 30k characters into the context again.
+			const rendered = new Map<number, { query: string; n: number }>();
 
 			for (const o of outcomes) {
-				sections.push(`# Search: ${o.q}`);
-				if (o.hard) {
-					sections.push(`\n_Search failed: ${o.hard}_`);
-				} else if (o.empty) {
-					sections.push(`\n_${o.empty}_`);
-				} else if (o.keys.length === 0) {
-					sections.push("\n_No results._");
-				} else {
-					let n = 0;
-					for (const k of o.keys) {
-						const r = results.get(k);
-						const url = keyUrl.get(k) ?? "?";
-						if (r && r.ok && r.text) {
-							sections.push(`## Source ${++n}: ${url}\n\n${r.text}`);
-							count(k, true);
-						} else {
-							sections.push(`## Source ${++n}: ${url}\n\n_Fetch failed: ${r?.error ?? "unknown"}_`);
-							count(k, false);
-						}
+				const body: string[] = [];
+				if (o.sources.length === 0) {
+					body.push(`_No results. ${[...(o.blocked.length ? [`bot check from ${o.blocked.join(", ")}`] : []), ...(o.error ? [o.error] : [])].join("; ") || "the engine returned nothing"}._`);
+					searchDetails.push({ query: o.query, keywords: o.keywords, error: o.blocked.length ? "blocked" : "no results" });
+					sections.push(`# Search: ${o.query}\n\n${body.join("\n")}`);
+					continue;
+				}
+				body.push(`_Keywords: ${o.keywords} — ${o.sources.length} result(s) from ${o.engine}._`);
+				if (o.blocked.length) body.push(`_Note: ${o.blocked.join(", ")} served a bot check._`);
+				let n = 0;
+				for (const s of o.sources) {
+					const k = byUrl.get(s.url)!;
+					const r = results.get(k);
+					body.push(`\n## Result ${++n}: ${s.title || s.url}\n\n${s.url}${s.snippet ? `\n\n> ${s.snippet}` : ""}`);
+					const prev = rendered.get(k);
+					if (prev) {
+						body.push(`\n_Already fetched above for "${prev.query}" (result ${prev.n}) — not repeated here._`);
+						continue;
+					}
+					if (r && r.ok && r.text) {
+						body.push(`\n${r.text}`);
+						count(k, true);
+						rendered.set(k, { query: o.query, n });
+					} else {
+						body.push(`\n_Fetch failed: ${r?.error || "unknown error"}_`);
+						count(k, false);
 					}
 				}
-			}
-
-			// With no direct URL to fall back on, search failures are fatal.
-			if (urls.length === 0 && outcomes.length > 0) {
-				const hard = outcomes.find((o) => o.hard);
-				const empty = outcomes.find((o) => o.empty);
-				if (hard && outcomes.every((o) => o.hard || o.empty)) return errRes(hard.hard!);
-				if (empty && outcomes.every((o) => o.hard || o.empty)) {
-					return { content: [{ type: "text", text: empty.empty! }], details: { ...details, urlsFound: 0 } };
-				}
+				searchDetails.push({
+					query: o.query, keywords: o.keywords, engine: o.engine,
+					results: o.sources.map((s) => ({ url: s.url, title: s.title })),
+				});
+				sections.push(`# Search: ${o.query}\n\n${body.join("\n")}`);
 			}
 
 			for (const u of urls) {
-				const k = byUrl.get(u)!;
-				const r = results.get(k);
-				sections.push(`# Fetch: ${u}`);
+				const r = results.get(byUrl.get(u)!);
+				const body: string[] = [];
 				if (r && r.ok && r.text) {
-					sections.push(`\n${r.text}`);
-					count(k, true);
+					body.push(r.text);
+					count(byUrl.get(u)!, true);
 				} else {
-					sections.push(`\n_Fetch failed: ${r?.error ?? "unknown"}_`);
-					count(k, false);
+					body.push(`_Fetch failed: ${r?.error || "unknown error"}_`);
+					count(byUrl.get(u)!, false);
 				}
+				sections.push(`# Fetch: ${u}\n\n${body.join("\n")}`);
 			}
 
 			if (sections.length === 0) {
 				return errRes(`Error: nothing to fetch (${badUrls.length ? `invalid URLs: ${badUrls.join(", ")}` : "no usable inputs"}).`);
 			}
-
-			const header = qList.length ? `# Search${qList.length > 1 ? "es" : ""}: ${qList.join(" | ")}` : `# Fetch: ${urls.join(", ")}`;
-			return {
-				content: [{ type: "text", text: `${header}\n\n${sections.join("\n\n---\n\n")}` }],
-				details,
-			};
+			if (searchDetails.length) details.search = searchDetails;
+			return { content: [{ type: "text", text: sections.join("\n\n---\n\n") }], details };
 		},
 	});
 }

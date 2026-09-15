@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "fs";
 import { join, dirname, delimiter } from "path";
+import type { SerpRecord } from "./search";
 
 // ── Config ──────────────────────────────────────────────────────────────
 function envNum(name: string, fallback: number): number {
@@ -14,9 +15,10 @@ export const MAX_RESULT_CHARS = envNum("WEB_FETCH_MAX_CHARS", 50_000); // per-pa
 export const MAX_RAW_CHARS = envNum("WEB_FETCH_MAX_RAW_CHARS", 50_000); // raw-HTML cap (raw bypasses the markdown cap)
 export const PAGE_DELAY_S = envNum("WEB_FETCH_PAGE_DELAY_S", 2); // per-page settle delay (full fetches)
 export const SCAN_FULL_PAGE = (process.env.WEB_FETCH_SCAN_FULL_PAGE ?? "0") !== "1";
-// Headroom above the markdown cap for the DDG search page: link extraction
-// needs more text than any single result section gets.
-export const SEARCH_TEXT_CHARS = Math.max(MAX_RESULT_CHARS * 5, 50_000);
+// Total markdown budget shared across ALL pages fetched from search results, so
+// a 5-result search can't dump 5 x MAX_RESULT_CHARS of context. Direct URL
+// fetches (the caller named them explicitly) keep the per-page MAX_RESULT_CHARS.
+export const MAX_SEARCH_TOTAL_CHARS = envNum("WEB_FETCH_MAX_SEARCH_CHARS", 60_000);
 // How long the warm Python/Chromium runner may idle before shutdown. Keeping
 // it alive is the main perf win: Python import + browser launch take seconds
 // and used to be paid on EVERY batch. Set 0 to disable keep-warm.
@@ -44,13 +46,22 @@ export interface JobResult {
 	ok: boolean;
 	text: string;
 	error: string;
+	/** Structured SERP records (only for `extract: "serp"` jobs). */
+	results?: SerpRecord[];
+	/** Engine served a bot check / rate limit instead of results. */
+	blocked?: boolean;
+	/** HTTP status of the navigation, when the crawler got one. */
+	status?: number | null;
+	/** Document title — used to explain empty/blocked fetches. */
+	title?: string;
 }
 export interface Job {
 	key: number;
 	url: string;
 	raw: boolean;
-	light: boolean; // cheap config (no human simulation) — used for the search page
+	light: boolean; // cheap config (no human simulation) — used for search pages
 	max?: number; // per-job text cap, enforced by Python BEFORE the pipe transfer
+	extract?: "serp"; // return structured result records instead of page text
 }
 
 // ── Python runtime resolution ────────────────────────────────────────────
@@ -238,10 +249,19 @@ class Runner {
 			return;
 		}
 		if (typeof o.key === "number") {
-			f.out.set(o.key, { ok: !!o.ok, text: o.text ?? "", error: o.error ?? "" });
+			const r: JobResult = {
+				ok: !!o.ok,
+				text: o.text ?? "",
+				error: o.error ?? "",
+				results: Array.isArray(o.results) ? o.results : undefined,
+				blocked: !!o.blocked,
+				status: typeof o.status === "number" ? o.status : null,
+				title: typeof o.title === "string" ? o.title : undefined,
+			};
+			f.out.set(o.key, r);
 			f.onUpdate?.({
-				content: [{ type: "text", text: `${o.ok ? "Fetched" : "Failed"}: ${o.url ?? "?"}` }],
-				details: { phase: "fetch", url: o.url, ok: !!o.ok, error: o.error ?? "" },
+				content: [{ type: "text", text: `${o.results ? (r.ok ? `${o.results.length} results` : "no results") : r.ok ? "Fetched" : "Failed"}: ${o.url ?? "?"}` }],
+				details: { phase: "fetch", url: o.url, ok: r.ok, error: r.error, results: r.results?.length, blocked: r.blocked, status: r.status },
 			});
 		}
 	}

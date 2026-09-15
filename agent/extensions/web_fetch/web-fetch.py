@@ -19,11 +19,19 @@ Protocol (newline-delimited JSON) — unchanged from the previous runner.
 stdin : one request per line:
         {"batch": int, "concurrency": int, "timeout_ms": int,
          "page_delay_s": float, "scan_full_page": bool,
-         "jobs": [{"key": int, "url": str, "raw": bool, "light": bool}, ...]}
+         "jobs": [{"key": int, "url": str, "raw": bool, "light": bool,
+                   "max": int, "extract": "serp"|absent}, ...]}
         stdin EOF -> graceful shutdown.
 stdout: one result per completed job:
-        {"batch": int, "key": int, "url": str, "ok": true,  "text": str}
+        {"batch": int, "key": int, "url": str, "ok": true,  "text": str,
+         "status": int|null, "title": str}
         {"batch": int, "key": int, "url": str, "ok": false, "error": str}
+        For `extract: "serp"` jobs, `text` is "" and the payload is instead:
+        {"batch": int, "key": int, "url": str, "ok": bool,
+         "results": [{"url": str, "title": str, "snippet": str}],
+         "blocked": bool, "status": int|null, "error": str}
+        Page jobs whose extraction yields nothing report WHY in `error`
+        (bot check, HTTP status, empty shell) instead of returning a blank page.
         then a batch terminator: {"batch": int, "done": true}
 exit  : 0 on EOF, 1 on fatal/browser error (TS respawns lazily on next batch).
 """
@@ -34,6 +42,7 @@ import random
 import re
 import sys
 import traceback
+from html import unescape as html_unescape
 
 from playwright.async_api import async_playwright
 from html_to_markdown import convert, ConversionOptions
@@ -82,19 +91,156 @@ CLEANUP_JS = (
 # link-table chrome, even when the chrome wraps it (GitHub's <article>
 # nested in <main>). Falls back to the whole body when no container
 # dominates, so forum/table layouts and SPAs lose nothing.
+# `bl>1200` guard: on thin pages (SPA shells, interstitials, bot-check pages)
+# the "densest container" is usually the interstitial itself, and replacing
+# body with it is how a page that HAD text came back empty. Below the guard
+# the whole body is kept — noise costs less than a silently blank fetch.
 MAIN_CONTENT_JS = (
     "let best=null,bestScore=0;"
     "const bl=(document.body.innerText||'').length;"
+    "if(bl>1200){"
     "for(const c of document.querySelectorAll('main,article,[role=\"main\"]')){"
     "const l=(c.innerText||'').length;"
     "if(l>500 && l>=bl*0.25){const s=l/(1+c.querySelectorAll('*').length);"
-    "if(s>bestScore){best=c;bestScore=s;}}}"
+    "if(s>bestScore){best=c;bestScore=s;}}}}"
     "if(best){"
     "const t=document.createElement('template');"
     "t.content.appendChild(best.cloneNode(true));"
     "document.body.replaceChildren(t.content);"
     "}"
 )
+
+# ── SERP extraction ──────────────────────────────────────────────────────
+# Structured search-result extraction, run in the page instead of regexing
+# URLs out of rendered markdown. Returns [{url,title,snippet,ad}].
+#
+# Why: markdown-regex extraction has no notion of a result record — it picks
+# up ad links, sidebar/related-search links and bare URLs inside snippets, and
+# throws away titles/snippets (the only relevance signal a SERP actually has).
+# Reading the DOM gives title + snippet per result, lets us drop ad slots, and
+# lets us unwrap DuckDuckGo's click-tracking redirect to the real URL.
+#
+# Selectors: DuckDuckGo's result containers first (html + lite endpoints), then
+# a generic block heuristic, so a markup change degrades to slightly noisier
+# results instead of none.
+SERP_JS = r"""
+(ctx) => {
+  ctx = ctx || {};
+  const base = ctx.base || location.href;
+  const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+  // Engine-owned hosts are chrome, never sources.
+  const ENGINE_HOSTS = ["duckduckgo.com", "google.com", "bing.com", "googleadservices.com", "doubleclick.net"];
+  const isEngineHost = (h) => ENGINE_HOSTS.some((d) => h === d || h.endsWith("." + d));
+  // Unwrap DuckDuckGo's click-tracking redirect (//duckduckgo.com/l/?uddg=REAL).
+  const unwrap = (raw) => {
+    let u;
+    try { u = new URL(raw, base); } catch (e) { return null; }
+    const uddg = u.searchParams.get("uddg");
+    if (uddg) { try { u = new URL(uddg); } catch (e) { return null; } }
+    return u.href;
+  };
+  const CONTAINERS = [".result:not(.result--ad)", "tr:has(a.result-link)", ".web-result"];
+  const TITLE_SEL = ".title, h1, h2, h3, h4";
+  const SNIPPET_SEL = ".result__snippet, .result-snippet, .snippet-description, .content";
+  const AD_SEL = ".result--ad,[data-ad],.ads-ad,.ad";
+  const AD_HREF = /(\/y\.js|ad_provider=|ad_domain=)/i;
+  const NAV_TEXT = /^(images?|videos?|news|maps?|shopping|more|settings|sign in|log ?in|help|feedback|privacy|terms|about|cookies?|preferences|next|previous|all|web|search)$/i;
+
+  const titleOf = (a) => {
+    const h = a.querySelector(TITLE_SEL) || a.closest(TITLE_SEL);
+    const ht = h ? norm(h.textContent) : "";
+    return (ht.length >= 8 && ht.length <= 300) ? ht : norm(a.textContent).slice(0, 300);
+  };
+  const snippetOf = (node, title) => {
+    let s = "";
+    for (const el of node.querySelectorAll(SNIPPET_SEL)) {
+      const t = norm(el.textContent);
+      if (t.length > s.length && !t.includes(title)) s = t;
+      if (s.length > 400) break;
+    }
+    if (!s) {
+      s = norm(node.textContent);
+      if (s.startsWith(title)) s = s.slice(title.length);
+    }
+    return s.replace(/\s+/g, " ").trim().slice(0, 500);
+  };
+
+  let nodes = [];
+  for (const sel of CONTAINERS) {
+    try { nodes = Array.from(document.querySelectorAll(sel)); } catch (e) { nodes = []; }
+    if (nodes.length) break;
+  }
+  if (!nodes.length) {
+    // Fallback: outermost blocks holding a plausible result link + text, so a
+    // SERP redesign degrades to slightly noisier results instead of none.
+    const all = Array.from(document.querySelectorAll("main li,main div,#links li,#links div,li,div"));
+    nodes = all.filter((n) => {
+      const len = norm(n.textContent).length;
+      if (len < 40 || len > 4000) return false;
+      const a = n.querySelector("a[href]");
+      if (!a) return false;
+      const raw = a.getAttribute("href") || "";
+      return /^(https?:)?\/\//i.test(raw) || /^\/(l|url)[?/]/i.test(raw);
+    });
+    nodes = nodes.filter((n) => !nodes.some((o) => o !== n && o.contains(n)));
+  }
+
+  const out = [];
+  const seen = new Set();
+  for (const n of nodes) {
+    // The title link is the one in a heading — not the favicon/site-name link
+    // sitting next to it.
+    let best = null, bestScore = -1;
+    for (const a of n.querySelectorAll("a[href]")) {
+      const raw = a.getAttribute("href") || "";
+      if (!/^(https?:)?\/\//i.test(raw) && !/^\/(l|url)[?/]/i.test(raw)) continue;
+      const t = norm(a.textContent);
+      if (t.length < 8 || t.length > 400 || NAV_TEXT.test(t)) continue;
+      const inHeading = !!(a.closest("h1,h2,h3,h4") || a.querySelector("h1,h2,h3,h4"));
+      const score = t.length + (inHeading ? 500 : 0);
+      if (score > bestScore) { bestScore = score; best = a; }
+    }
+    if (!best) continue;
+    const url = unwrap(best.getAttribute("href"));
+    if (!url) continue;
+    let u; try { u = new URL(url); } catch (e) { continue; }
+    if (isEngineHost(u.hostname.toLowerCase())) continue;
+    const key = u.hostname.toLowerCase().replace(/^www\./, "") + u.pathname.replace(/\/$/, "");
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const title = titleOf(best);
+    out.push({
+      url: u.href,
+      title: title,
+      snippet: snippetOf(n, title),
+      ad: !!n.closest(AD_SEL) || AD_HREF.test(best.getAttribute("href") || ""),
+    });
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+"""
+
+# Visible-text markers of bot checks / rate limits. Used to tell "this engine
+# blocked us" apart from "this engine genuinely had no results", so the caller
+# can fall back to another engine instead of reporting an empty SERP.
+BLOCK_RE = re.compile(
+    r"(bots use duckduckgo|select all squares|unusual traffic|verify you are human|are you a robot|"
+    r"complete the following challenge|checking your browser|enable javascript and cookies to continue|"
+    r"please verify you are a human|access to this page has been denied|too many requests|"
+    r"if this persists, please email us|automated queries)",
+    re.I,
+)
+
+# Below this many extracted chars a page is treated as empty (shell / blocked /
+# paywall) instead of being passed off to the caller as content. Kept low so
+# genuinely short pages (e.g. example.com, ~170 chars) still count as content.
+MIN_PAGE_CHARS = 80
+
+# Used by the extraction ladder in extract_text().
+SCRIPT_RE = re.compile(r"<(script|style|noscript|template)\b[^>]*>.*?</\1\s*>", re.I | re.S)
+BODY_RE = re.compile(r"<body\b[^>]*>(.*?)</body\s*>", re.I | re.S)
+TAG_RE = re.compile(r"<[^>]*>")
 
 # Comprehensive stealth init script. Runs in every frame (main + iframes)
 # before any page JS, patching the surfaces anti-bot stacks probe:
@@ -247,7 +393,10 @@ RESOLVE_LINKS_JS = (
 # One evaluate() per phase instead of four: each roundtrip to the browser
 # costs ~ms; combining cuts IPC by half without changing behavior.
 PREPARE_JS = JS_CODE + "\n;\n" + RESOLVE_LINKS_JS
-FINISH_JS = CLEANUP_JS + "\n;\n" + MAIN_CONTENT_JS
+# FINISH_JS ends with an expression: evaluate() returns the rendered text length
+# AFTER container selection, which the caller uses as the reference for "did the
+# markdown conversion actually keep the page's text?" (see extract_text ladder).
+FINISH_JS = CLEANUP_JS + "\n;\n" + MAIN_CONTENT_JS + "\n;\n(document.body.innerText||'').length"
 
 # Boilerplate pruning. html-to-markdown strips script/style by default; we also
 # drop nav/footer/aside so the fetched markdown is content-focused. `extract_metadata`
@@ -315,17 +464,53 @@ def clean_markdown(md, page_url=None):
     return md.strip()
 
 
-def extract_text(html, raw, page_url=None):
+def extract_text(html, raw, page_url=None, expected_chars=0):
+    """HTML -> markdown for LLM consumption.
+
+    Some pages defeat the converter outright: it returns a few hundred chars for
+    a body with tens of thousands (huge inline <script>/JSON-LD, unusual markup),
+    or nothing at all. Silently shipping that is how a fetch "succeeds" with no
+    content — the classic blank-page bug. So the extraction is verified against
+    the page's own rendered text length and retried with progressively more
+    aggressive inputs until the text is actually there.
+
+    `expected_chars` = rendered text length (0 when unknown, e.g. raw fetches).
+    """
     if raw:
         return html or ""
     if not html:
         return ""
-    try:
-        result = convert(html, CONVERT_OPTIONS)
-        return clean_markdown(result.content or "", page_url)
-    except Exception:
-        # Conversion failure should not lose the page; degrade to raw HTML.
-        return html or ""
+
+    def to_md(source):
+        try:
+            return clean_markdown(convert(source, CONVERT_OPTIONS).content or "", page_url)
+        except Exception:
+            return ""
+
+    text = to_md(html)
+    # Markdown is normally LONGER than rendered text (link syntax, headings); at
+    # half of it something was dropped. Below MIN_PAGE_CHARS nothing usable came
+    # back regardless.
+    threshold = max(MIN_PAGE_CHARS, int(expected_chars * 0.5))
+    if len(text) >= threshold:
+        return text
+
+    body = BODY_RE.search(html)
+    for candidate in (SCRIPT_RE.sub(" ", html), body.group(1) if body else ""):
+        if not candidate:
+            continue
+        alt = to_md(candidate)
+        if len(alt) > len(text):
+            text = alt
+        if len(text) >= threshold:
+            return text
+
+    # Last resort: strip tags so the caller gets the words rather than a blank.
+    # Script/style/noscript come out FIRST — their source text is not content and
+    # would otherwise make an empty JS shell look like a page with text.
+    plain_src = SCRIPT_RE.sub(" ", body.group(1) if body else html)
+    plain = re.sub(r"\s+", " ", html_unescape(TAG_RE.sub(" ", plain_src))).strip()
+    return plain if len(plain) > len(text) else text
 
 
 async def scroll_full_page(page):
@@ -368,15 +553,51 @@ async def simulate_user(page):
         pass
 
 
-async def fetch_page(page, url, timeout_ms, page_delay_s, scan_full, light):
-    """Navigate one page and return (html, error). Per-page failures are returned
-    as errors, NOT raised — so one bad URL doesn't fail the whole batch."""
+async def page_visible_text(page, limit=1500):
+    """First `limit` chars of rendered text — used only to CLASSIFY a page
+    (bot check vs genuinely empty), never as content."""
+    try:
+        return (await page.evaluate("(n) => (document.body && document.body.innerText || '').slice(0, n)", limit)) or ""
+    except Exception:
+        return ""
+
+
+async def extract_serp(page):
+    """Structured SERP records from the loaded page. Retries once for engines
+    that hydrate results after first paint. Returns [] when the page holds no
+    results (bot check, consent wall, or a genuinely empty result set)."""
+    recs = []
+    for attempt in (0, 1):
+        try:
+            recs = await page.evaluate(SERP_JS, {}) or []
+        except Exception:
+            recs = []
+        if recs:
+            return recs
+        if attempt == 0:
+            try:
+                await page.wait_for_timeout(800)
+            except Exception:
+                pass
+    return recs
+
+
+async def fetch_page(page, url, timeout_ms, page_delay_s, scan_full, light, want_html=True):
+    """Navigate one page and return (html, error, meta). Per-page failures are
+    returned as errors, NOT raised — so one bad URL doesn't fail the whole
+    batch. `meta` carries {status, title, blocked} so the caller can explain
+    WHY a page produced nothing instead of reporting a silent blank.
+    `want_html=False` skips DOM cleanup + serialization (SERP jobs read the
+    live DOM instead, so shipping the HTML over the pipe would be pure waste)."""
+    meta = {"status": None, "title": "", "blocked": False}
     try:
         # domcontentloaded: don't block on images/subresources — the networkidle
         # wait below covers JS-rendered content, and images are disabled anyway.
-        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        resp = await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        if resp is not None:
+            meta["status"] = resp.status
     except Exception as e:
-        return None, "navigation failed: %s" % e
+        return None, "navigation failed: %s" % e, meta
     try:
         await page.wait_for_load_state("networkidle", timeout=5000 if light else min(timeout_ms, 10000))
     except Exception:
@@ -390,7 +611,7 @@ async def fetch_page(page, url, timeout_ms, page_delay_s, scan_full, light):
     except Exception:
         pass
     if light:
-        # Cheap config: no scrolling / human-simulation, used for the search page.
+        # Cheap config: no scrolling / human-simulation, used for search pages.
         await page.wait_for_timeout(300)
     else:
         if scan_full:
@@ -403,17 +624,40 @@ async def fetch_page(page, url, timeout_ms, page_delay_s, scan_full, light):
             # timing signature.
             jitter = page_delay_s * (0.7 + 0.6 * random.random())
             await page.wait_for_timeout(int(jitter * 1000))
-    # Cleanup runs AFTER scrolling: lazy-loaded content appears during scroll,
-    # so removing icons/data-URIs earlier would miss it.
     try:
-        await page.evaluate(FINISH_JS if not light else CLEANUP_JS)
+        meta["title"] = ((await page.title()) or "").strip()[:200]
     except Exception:
         pass
+    if not want_html:
+        return None, None, meta
+    # Cleanup runs AFTER scrolling: lazy-loaded content appears during scroll,
+    # so removing icons/data-URIs earlier would miss it. The evaluate returns the
+    # rendered text length, used as the reference for extraction sanity checks.
+    try:
+        meta["text_len"] = int(await page.evaluate(FINISH_JS if not light else CLEANUP_JS) or 0)
+    except Exception:
+        meta["text_len"] = 0
     try:
         html = await page.content()
     except Exception as e:
-        return None, "extract failed: %s" % e
-    return html, None
+        return None, "extract failed: %s" % e, meta
+    return html, None, meta
+
+
+def empty_reason(meta, text_len):
+    """Human-readable cause for an unusable extraction (drives the caller's
+    error message — never a bare 'unknown')."""
+    status = meta.get("status")
+    bits = "HTTP %s, title %r, %d chars extracted" % (status, meta.get("title") or "", text_len)
+    if meta.get("blocked"):
+        return "blocked by a bot check / captcha (%s)" % bits
+    if status in (401, 402, 403):
+        return "access denied by the site (%s)" % bits
+    if status == 404:
+        return "page not found (%s)" % bits
+    if status and status >= 400:
+        return "HTTP error from the site (%s)" % bits
+    return "no readable text — JS-only shell, paywall, or empty page (%s)" % bits
 
 
 async def run_group(context, jobs, concurrency, batch_id, timeout_ms, page_delay_s, scan_full):
@@ -436,22 +680,10 @@ async def run_group(context, jobs, concurrency, batch_id, timeout_ms, page_delay
                       "ok": False, "text": "", "error": "browser error: %s" % e})
                 return
             try:
-                html, err = await fetch_page(
-                    page, job["url"], timeout_ms, page_delay_s, scan_full,
-                    bool(job.get("light")))
-                if err:
-                    emit({"batch": batch_id, "key": job["key"], "url": job["url"],
-                          "ok": False, "text": "", "error": err})
+                if job.get("extract") == "serp":
+                    await one_serp(page, job)
                 else:
-                    text = extract_text(html, bool(job.get("raw")), job["url"])
-                    # Truncate HERE, before the pipe: the TS side asked for a
-                    # per-job cap, so oversized pages never cross the process
-                    # boundary (fewer bytes serialized, parsed, and buffered).
-                    cap = int(job.get("max") or 0)
-                    if cap and len(text) > cap:
-                        text = text[:cap]
-                    emit({"batch": batch_id, "key": job["key"], "url": job["url"],
-                          "ok": True, "text": text, "error": ""})
+                    await one_page(page, job)
             except Exception as e:
                 emit({"batch": batch_id, "key": job["key"], "url": job["url"],
                       "ok": False, "text": "", "error": "crawl error: %s" % e})
@@ -460,6 +692,68 @@ async def run_group(context, jobs, concurrency, batch_id, timeout_ms, page_delay
                     await page.close()
                 except Exception:
                     pass
+
+    async def one_serp(page, job):
+        """Search-engine result page: return structured records, and say whether
+        the engine BLOCKED us — the caller uses that to pick another engine."""
+        _html, err, meta = await fetch_page(
+            page, job["url"], timeout_ms, page_delay_s, scan_full, True, want_html=False)
+        if err:
+            emit({"batch": batch_id, "key": job["key"], "url": job["url"],
+                  "ok": False, "text": "", "error": err, "status": meta["status"]})
+            return
+        results = await extract_serp(page)
+        if not results:
+            vis = await page_visible_text(page)
+            meta["blocked"] = bool(BLOCK_RE.search(vis)) or meta["status"] in (403, 429)
+        if results:
+            # Ads are dropped here: they are never what the caller asked for.
+            results = [r for r in results if not r.get("ad")]
+        emit({
+            "batch": batch_id, "key": job["key"], "url": job["url"],
+            "ok": bool(results), "text": "", "results": results,
+            "blocked": meta["blocked"], "status": meta["status"],
+            "error": "" if results else ("bot check / captcha" if meta["blocked"] else "no results found"),
+        })
+
+    async def one_page(page, job):
+        """Normal page fetch: markdown/HTML text plus an honest failure reason."""
+        raw = bool(job.get("raw"))
+        html, err, meta = await fetch_page(
+            page, job["url"], timeout_ms, page_delay_s, scan_full, bool(job.get("light")))
+        if err:
+            emit({"batch": batch_id, "key": job["key"], "url": job["url"],
+                  "ok": False, "text": "", "error": err, "status": meta["status"],
+                  "title": meta["title"]})
+            return
+        expected = int(meta.get("text_len") or 0)
+        text = extract_text(html, raw, job["url"], expected)
+        # Truncate HERE, before the pipe: the TS side asked for a per-job cap,
+        # so oversized pages never cross the process boundary (fewer bytes
+        # serialized, parsed, and buffered).
+        cap = int(job.get("max") or 0)
+        if cap and len(text) > cap:
+            text = text[:cap]
+        if len(text) < MIN_PAGE_CHARS:
+            # One recovery attempt: late-hydrating SPAs (and pages whose content
+            # arrives after networkidle) fill in if given a moment.
+            try:
+                await page.wait_for_timeout(1500)
+                expected = int(await page.evaluate(FINISH_JS if not job.get("light") else CLEANUP_JS) or 0) or expected
+                retry = extract_text(await page.content(), raw, job["url"], expected)
+                if len(retry) > len(text):
+                    text = retry[:cap] if cap else retry
+            except Exception:
+                pass
+        if len(text) < MIN_PAGE_CHARS:
+            vis = await page_visible_text(page)
+            meta["blocked"] = bool(BLOCK_RE.search(vis)) or meta["status"] in (403, 429)
+            emit({"batch": batch_id, "key": job["key"], "url": job["url"],
+                  "ok": False, "text": "", "error": empty_reason(meta, len(text)),
+                  "blocked": meta["blocked"], "status": meta["status"], "title": meta["title"]})
+            return
+        emit({"batch": batch_id, "key": job["key"], "url": job["url"],
+              "ok": True, "text": text, "error": "", "status": meta["status"], "title": meta["title"]})
 
     await asyncio.gather(*(one(j) for j in jobs))
     return not fatal
@@ -520,7 +814,7 @@ async def launch_browser(p):
     site state, both across the jobs of one batch and across batches and even
     across process restarts (the profile persists on disk)."""
     opts = dict(
-        headless=True,
+        headless=False,
         viewport=random.choice(VIEWPORTS),  # same size every session is a fingerprint
         user_agent=USER_AGENT,
         locale="en-US",
