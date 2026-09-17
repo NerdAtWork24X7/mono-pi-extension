@@ -12,16 +12,26 @@
  * How the key is detected: extensions receive raw terminal input *before* the
  * editor, via `ctx.ui.onTerminalInput`. pi asks the terminal for the Kitty
  * keyboard protocol with flags 1|2|4 (`CSI > 7 u`), so on Kitty/Ghostty/
- * WezTerm/foot/Alacritty etc. we get explicit press, repeat and **release**
- * events (`isKeyRelease`). Terminals that fall back to xterm modifyOtherKeys
- * never report a release, so there auto-repeat acts as the "still held" signal
- * and recording stops `holdReleaseGapMs` after the last repeat.
+ * WezTerm/foot/Alacritty etc. the release arrives as an explicit event and ends
+ * the clip the instant it lands.
+ *
+ * That release is a fast path, never the only plan. Key events travel through
+ * layers that cannot report one at all — xterm modifyOtherKeys, legacy
+ * terminals, and remote pipelines that re-encode presses (VS Code, Herdr, a
+ * browser terminal in the middle). Those layers may even label a press with a
+ * Kitty event type, which proves nothing about releases. So *every* alt+t event
+ * of a hold re-arms the `holdReleaseGapMs` watchdog: auto-repeat keeps pushing
+ * it out while the key is down, and it fires once the key comes up.
+ *
+ * While a clip is live, a widget in the row above the prompt shows the state —
+ * a pulsing dot, a live level meter read straight from the WAV the recorder is
+ * still writing, the elapsed time, and how to stop:
+ *
+ *   ● listening ▓▓▓▓░░░░ 0:05 — release alt+t to transcribe
+ *
+ * (Why a widget and not `ui.setStatus`: see the header of `view.ts`.)
  *
  * Setup:  export GROQ_API_KEY=gsk_...      (https://console.groq.com/keys)
- *
- * While recording, the footer shows a live level meter (`████░░░░ 0:05`) read
- * straight from the WAV the recorder is writing, plus a "no signal?" hint if
- * nothing has been picked up for a couple of seconds.
  *
  * Optional overrides, either via environment or a JSON config file
  * (`<agentDir>/speech-to-text.json`, overridden by `.pi/speech-to-text.json`):
@@ -43,7 +53,7 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Key, isKeyRelease, isKeyRepeat, matchesKey } from "@mariozechner/pi-tui";
+import { Key, isKeyRelease, isKeyRepeat, matchesKey, parseKey } from "@mariozechner/pi-tui";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -51,6 +61,7 @@ import { DEFAULT_MODEL, globalConfigPath, loadConfig, projectConfigPath, type St
 import { transcribe } from "./groq";
 import { AudioLevelMeter } from "./level";
 import { detectRecorder, hasAudio, startRecorder, stopRecorder, type RecorderHandle } from "./recorder";
+import { ListeningView } from "./view";
 
 type Phase = "idle" | "recording" | "transcribing";
 type NotifyType = "info" | "warning" | "error";
@@ -60,43 +71,61 @@ const LISTEN_KEY = Key.alt("t");
 /** Last-resort guard so a transcript can never blow past the editor. */
 const MAX_TRANSCRIPT_CHARS = 4000;
 
-/** Cells in the level meter bar. */
-const METER_SEGMENTS = 8;
-/** Status refresh while recording: fast enough for a live meter. */
-const METER_TICK_MS = 120;
-/** Plain status refresh when the meter is off. */
+/** Repaint cadence while a clip is live: fast enough for a live meter. */
+const TICK_MS = 120;
+/** Repaint cadence for a clip when the meter is off (only the clock moves). */
 const PLAIN_TICK_MS = 1000;
-/** Show the "no signal" hint after this long without audio. */
-const NO_SIGNAL_MS = 2500;
 
-/** Kitty reports the event type as `:<n>u` (1 = press, 2 = repeat, 3 = release).
- *  Its presence on a press means the terminal will also send a release. */
-const KITTY_EVENT_TYPE = /:\d+u$/;
+/** Modifiers a release of the dictation key may still carry: by the time the
+ *  letter is up the terminal may only report the modifiers still held (often
+ *  none of them). */
+const LISTEN_RELEASE_MODIFIERS = new Set(["alt", "shift"]);
 
-function formatElapsed(ms: number): string {
-	const total = Math.floor(ms / 1000);
-	return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+/** Gap used once this terminal has proven it reports key releases: long enough
+ *  that auto-repeat can never trip it, short enough that a lost release cannot
+ *  strand a clip. */
+const RELEASE_SAFETY_MS = 4000;
+
+/** Does this key-release event end a dictation hold?
+ *
+ *  Matched on the key itself rather than on `alt+t`: terminals disagree about
+ *  which modifiers they attach to a release, and letting go of the held letter
+ *  can only mean the hold is over. Ctrl/Super releases are ignored so a stray
+ *  chord cannot cut the clip. */
+function isDictationKeyRelease(data: string): boolean {
+	const id = parseKey(data);
+	if (!id) return false;
+	const parts = id.split("+");
+	if (parts.pop() !== "t") return false;
+	return parts.every((modifier) => LISTEN_RELEASE_MODIFIERS.has(modifier));
 }
+
+const HOLD_HINT = "release alt+t to transcribe";
+const TOGGLE_HINT = "alt+t or /listen to stop";
 
 class SpeechToText {
 	private cfg: SttConfig;
 	private phase: Phase = "idle";
 	private handle: RecorderHandle | null = null;
 	private startedAt = 0;
-	private statusTimer: ReturnType<typeof setInterval> | null = null;
+	private tickTimer: ReturnType<typeof setInterval> | null = null;
 	private maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
-	/** Fires `holdReleaseGapMs` after the last alt+t event when the terminal
-	 *  cannot report key releases (auto-repeat keeps re-arming it). */
+	/** Fires the hold gap after the last alt+t event of the current clip;
+	 *  auto-repeat keeps re-arming it while the key is down. */
 	private releaseWatchdog: ReturnType<typeof setTimeout> | null = null;
-	/** True for the current recording when the terminal reports event types,
-	 *  i.e. the release event will arrive and stop us. */
-	private eventTypes = false;
+	/** True once a key release has ended a hold in this session — the only
+	 *  proof that this terminal reports releases at all. */
+	private releasesSeen = false;
 	/** True when the current recording was started by holding alt+t, so a key
 	 *  release (or the repeat-gap watchdog) is expected to stop it. False for
 	 *  /listen-style toggles, which stop on the next press instead. */
 	private waitForRelease = false;
+	/** Stop instruction shown in the widget for the current clip. */
+	private hint = HOLD_HINT;
 	/** Live level meter reading the WAV the recorder is still writing. */
 	private meter: AudioLevelMeter | null = null;
+	/** The "● listening" widget above the prompt. */
+	private view = new ListeningView();
 	/** Unsubscribe for the raw terminal input listener (TUI only). */
 	private unsubscribe: (() => void) | null = null;
 	/** True while a stop we initiated is in flight, so the recorder's own exit
@@ -125,30 +154,38 @@ class SpeechToText {
 	/** Runs before the editor sees the key. Returns `{ consume: true }` for
 	 *  alt+t so the editor never inserts it and the shortcut can't double-fire. */
 	private handleTerminalInput(data: string): { consume?: boolean } | undefined {
-		if (!matchesKey(data, LISTEN_KEY)) return undefined;
-		this.lastKeyEventAt = Date.now();
-
-		// Explicit release: stop immediately.
+		// Explicit release: the fast path, and the only signal a re-encoding
+		// pipeline cannot fake with auto-repeat.
 		if (isKeyRelease(data)) {
-			this.eventTypes = true;
+			if (!this.isHolding || !isDictationKeyRelease(data)) return undefined;
+			this.lastKeyEventAt = Date.now();
+			this.releasesSeen = true;
 			this.cancelWatchdog();
 			void this.stopAndTranscribe();
 			return { consume: true };
 		}
 
-		// Auto-repeat: the key is still held. Ignore it so holding records
-		// continuously instead of toggling on every repeat.
+		if (!matchesKey(data, LISTEN_KEY)) return undefined;
+		this.lastKeyEventAt = Date.now();
+
+		// Auto-repeat: the key is still held, or a pipeline re-encoded the held
+		// key as a fresh press. Either way the clip lives on and the release gap
+		// is pushed out — only a release (or the gap itself) ends it.
 		if (isKeyRepeat(data)) {
-			this.eventTypes = true;
-			this.cancelWatchdog();
+			this.armHoldWatchdog();
 			return { consume: true };
 		}
 
-		this.onPress(KITTY_EVENT_TYPE.test(data));
+		this.onPress();
 		return { consume: true };
 	}
 
-	private onPress(reportsEventTypes: boolean): void {
+	/** True while a hold-style clip is waiting for alt+t to come back up. */
+	private get isHolding(): boolean {
+		return this.phase === "recording" && this.waitForRelease;
+	}
+
+	private onPress(): void {
 		if (this.phase === "transcribing") {
 			this.notify("Still transcribing the previous clip…", "info");
 			return;
@@ -159,22 +196,18 @@ class SpeechToText {
 				void this.stopAndTranscribe();
 				return;
 			}
-			if (this.eventTypes) {
-				// The release will stop us; a press here is spurious.
-				return;
-			}
-			// No release events: a repeated byte-identical press means the key
-			// is still held, so treat it as "hold continues" and re-arm the
-			// watchdog instead of stopping.
-			this.armWatchdog();
+			// The hold continues: the key is still down, or this terminal reports
+			// its auto-repeat as fresh presses. Push the release gap out instead
+			// of assuming a release event is on its way — it may never come.
+			this.armHoldWatchdog();
 			return;
 		}
-		void this.start("hold", reportsEventTypes);
+		void this.start("hold");
 	}
 
 	// ── Recording ───────────────────────────────────────────────────────
 
-	private async start(mode: "hold" | "toggle", reportsEventTypes = false): Promise<void> {
+	private async start(mode: "hold" | "toggle"): Promise<void> {
 		if (!this.cfg.enabled) {
 			this.notify("Speech-to-text is off. Run /stt on to enable it.", "warning");
 			return;
@@ -196,9 +229,9 @@ class SpeechToText {
 		this.handle = handle;
 		this.phase = "recording";
 		this.waitForRelease = mode === "hold";
-		this.eventTypes = mode === "hold" && reportsEventTypes;
 		this.ownStop = false;
 		this.startedAt = Date.now();
+		this.hint = mode === "hold" ? HOLD_HINT : TOGGLE_HINT;
 
 		// The recorder can end on its own (sox silence detection, unplugged
 		// device, ffmpeg crash). Only treat that as an auto-stop while this
@@ -211,19 +244,15 @@ class SpeechToText {
 			}
 		});
 
-		// Terminals without event types only tell us the key was released
-		// indirectly: auto-repeat stops arriving. Toggle recordings (/listen)
-		// have no held key, so they must not arm the watchdog.
-		if (mode === "hold" && !reportsEventTypes) this.armWatchdog();
+		// Every hold arms the release gap: terminals that report a release end
+		// the clip the moment it lands, terminals that never do rely on the gap
+		// alone. /listen toggles have no held key, so they must not arm it.
+		if (mode === "hold") this.armHoldWatchdog();
 
-		// Live level meter: sample the growing WAV and repaint the status line.
-		const stopHint = mode === "hold" ? "release alt+t to transcribe" : "alt+t or /listen to stop";
+		// Live level meter: sample the growing WAV and repaint the widget.
 		if (this.cfg.levelMeter) this.meter = new AudioLevelMeter(file, this.cfg.sampleRate);
-		this.renderStatus(stopHint);
-		this.statusTimer = setInterval(
-			() => this.renderStatus(stopHint),
-			this.cfg.levelMeter ? METER_TICK_MS : PLAIN_TICK_MS,
-		);
+		if (this.view.install(this.ctx)) this.paint();
+		this.startTick(this.cfg.levelMeter ? TICK_MS : PLAIN_TICK_MS);
 
 		if (this.cfg.maxDurationSeconds > 0) {
 			this.maxDurationTimer = setTimeout(() => {
@@ -233,27 +262,46 @@ class SpeechToText {
 		}
 	}
 
-	/** Repaint the recording status: level bar, elapsed time, stop hint. */
-	private renderStatus(stopHint: string): void {
-		const elapsed = formatElapsed(Date.now() - this.startedAt);
-		let meter = "";
-		if (this.meter) {
-			const level = this.meter.sample();
-			const filled = Math.min(METER_SEGMENTS, Math.max(0, Math.round(level * METER_SEGMENTS)));
-			meter = `${"█".repeat(filled)}${"░".repeat(METER_SEGMENTS - filled)}`;
-			if (this.meter.silentForMs() > NO_SIGNAL_MS) meter += " no signal?";
-			meter += " ";
-		}
-		this.setStatus(`🎤 ${meter}${elapsed} — ${stopHint}`);
+	/** Publish the current state to the widget. */
+	private paint(): void {
+		if (this.phase === "idle") return;
+		this.view.update({
+			phase: this.phase,
+			elapsedMs: Date.now() - this.startedAt,
+			level: this.meter?.sample(),
+			silentMs: this.meter?.silentForMs(),
+			hint: this.hint,
+		});
 	}
 
-	private armWatchdog(): void {
+	private startTick(ms: number): void {
+		this.stopTick();
+		this.tickTimer = setInterval(() => this.paint(), ms);
+	}
+
+	private stopTick(): void {
+		if (!this.tickTimer) return;
+		clearInterval(this.tickTimer);
+		this.tickTimer = null;
+	}
+
+	/** (Re)arm "alt+t must still be down" for the current hold.
+	 *
+	 *  Until a release has been seen this gap *is* the release signal, so it
+	 *  stays tight (`holdReleaseGapMs`). Once a terminal has proven it sends
+	 *  releases, the gap only has to rescue a lost one and can be generous —
+	 *  auto-repeat keeps re-arming it either way. */
+	private armHoldWatchdog(): void {
+		if (!this.isHolding) return;
 		this.cancelWatchdog();
+		const gap = this.releasesSeen
+			? Math.max(this.cfg.holdReleaseGapMs, RELEASE_SAFETY_MS)
+			: this.cfg.holdReleaseGapMs;
 		this.releaseWatchdog = setTimeout(() => {
 			this.releaseWatchdog = null;
 			// No alt+t event for the gap → the key was released.
 			void this.stopAndTranscribe();
-		}, this.cfg.holdReleaseGapMs);
+		}, gap);
 	}
 
 	private cancelWatchdog(): void {
@@ -273,16 +321,22 @@ class SpeechToText {
 		this.phase = "transcribing";
 		this.ownStop = true;
 		this.clearTimers();
+		this.closeMeter();
 
 		const handle = this.handle;
 		this.handle = null;
 		const file = handle.file;
 
+		// The widget clock now tracks the request, not the clip.
+		this.hint = "";
+		this.startedAt = Date.now();
+		this.paint();
+		this.startTick(TICK_MS);
+
 		try {
 			await stopRecorder(handle);
 		} catch { /* best effort — use whatever was captured */ }
 
-		this.setStatus("🎤 transcribing…");
 		try {
 			if (!hasAudio(file)) {
 				const detail = handle.stderr.trim() ? ` (${handle.stderr.trim().split("\n").pop()})` : "";
@@ -302,20 +356,20 @@ class SpeechToText {
 		} catch (err) {
 			this.notify(`Speech-to-text: ${err instanceof Error ? err.message : String(err)}`, "error");
 		} finally {
-			this.closeMeter();
+			this.clearTimers();
+			this.view.remove(this.ctx);
 			this.cleanupAudio(file);
 			this.phase = "idle";
 			this.ownStop = false;
 			this.waitForRelease = false;
-			this.eventTypes = false;
-			this.setStatus(undefined);
+			this.hint = HOLD_HINT;
 		}
 	}
 
 	// ── Fallback entry point (/listen, and the registered shortcut when the
 	//    terminal listener isn't what received the key) ──────────────────
 
-	async toggle(ctx: any, opts: { hold?: boolean } = {}): Promise<void> {
+	async toggle(ctx: any): Promise<void> {
 		this.ctx = ctx;
 		if (this.phase === "recording") {
 			void this.stopAndTranscribe();
@@ -325,7 +379,7 @@ class SpeechToText {
 			this.notify("Still transcribing the previous clip…", "info");
 			return;
 		}
-		await this.start(opts.hold ? "hold" : "toggle");
+		await this.start("toggle");
 	}
 
 	// ── Prompt insertion ────────────────────────────────────────────────
@@ -381,14 +435,16 @@ class SpeechToText {
 				return `unavailable — ${err instanceof Error ? err.message : String(err)}`;
 			}
 		})();
-		const mode = this.unsubscribe ? "push-to-talk (release detected)" : `push-to-talk (release gap ${this.cfg.holdReleaseGapMs}ms)`;
+		const input = this.unsubscribe
+			? `alt+t (raw input; ${this.releasesSeen ? "key releases detected" : `the ${this.cfg.holdReleaseGapMs}ms gap ends a hold`})`
+			: "shortcut only — /listen records";
 		return [
 			`state:    ${this.cfg.enabled ? "enabled" : "disabled"} (now: ${this.phase})`,
 			`key:      ${this.hasApiKey ? "GROQ_API_KEY set" : "MISSING — set GROQ_API_KEY"}`,
 			`model:    ${this.cfg.model}${this.cfg.model === DEFAULT_MODEL ? "" : ` (default ${DEFAULT_MODEL})`}`,
 			`language: ${this.language}`,
 			`recorder: ${rec}`,
-			`input:    ${mode}, meter ${this.cfg.levelMeter ? "on" : "off"}`,
+			`input:    ${input}, meter ${this.cfg.levelMeter ? "on" : "off"}`,
 			`limit:    ${this.cfg.maxDurationSeconds}s${this.cfg.silenceAutoStop ? ", silence auto-stop on" : ""}`,
 			`config:   ${projectConfigPath(process.cwd())} (fallback ${globalConfigPath()})`,
 			`keys:     hold alt+t to record · /listen to toggle · /stt on|off · /stt lang <code|auto>`,
@@ -417,14 +473,8 @@ class SpeechToText {
 		} catch { /* no UI (print/rpc) — nothing to do */ }
 	}
 
-	private setStatus(text: string | undefined): void {
-		try {
-			this.ctx?.ui?.setStatus?.("speech-to-text", text);
-		} catch { /* no UI available */ }
-	}
-
 	private clearTimers(): void {
-		if (this.statusTimer) { clearInterval(this.statusTimer); this.statusTimer = null; }
+		this.stopTick();
 		if (this.maxDurationTimer) { clearTimeout(this.maxDurationTimer); this.maxDurationTimer = null; }
 		this.cancelWatchdog();
 	}
@@ -443,6 +493,7 @@ class SpeechToText {
 	async dispose(): Promise<void> {
 		this.clearTimers();
 		this.closeMeter();
+		this.view.remove(this.ctx);
 		try { this.unsubscribe?.(); } catch { /* ignore */ }
 		this.unsubscribe = null;
 		const handle = this.handle;
@@ -452,7 +503,6 @@ class SpeechToText {
 			try { await stopRecorder(handle); } catch { /* ignore */ }
 			this.cleanupAudio(handle.file);
 		}
-		this.setStatus(undefined);
 	}
 }
 
@@ -485,18 +535,20 @@ export default function (pi: ExtensionAPI) {
 		stt = null;
 	});
 
-	// ── Shortcut: hold Alt+T to record, release to transcribe ───────────
+	// ── Shortcut: press alt+t to record, press again to transcribe ──────
 	// In the TUI the terminal input listener above consumes alt+t and handles
 	// press/repeat/release precisely, so this handler only runs when that
 	// listener isn't the one that saw the key (non-TUI modes, or another
-	// handler consuming input first). The timestamp guard keeps the two paths
-	// from double-handling the same keystroke.
+	// handler consuming input first). That path has no key-release signal, so
+	// it toggles instead of holding — a hold would stop on the release-gap
+	// watchdog while the key is still down. The timestamp guard keeps the two
+	// paths from double-handling the same keystroke.
 	pi.registerShortcut(LISTEN_KEY, {
-		description: "Speech-to-text: hold to record, release to transcribe (Groq Whisper)",
+		description: "Speech-to-text: start/stop recording (Groq Whisper)",
 		handler: async (ctx: any) => {
 			if (!stt) stt = get(ctx);
 			if (Date.now() - stt.lastKeyEventAt < 300) return;
-			await stt.toggle(ctx, { hold: true });
+			await stt.toggle(ctx);
 		},
 	});
 

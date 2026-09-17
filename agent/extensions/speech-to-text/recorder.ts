@@ -86,13 +86,12 @@ function buildArgs(kind: RecorderKind, cfg: SttConfig, file: string): string[] {
 export function startRecorder(cfg: SttConfig, file: string): RecorderHandle {
 	const kind = detectRecorder(cfg.recorder);
 	const bin = binFor(kind);
-	const handle: RecorderHandle = { kind, bin, file, stopped: false, stderr: "", proc: undefined as unknown as ChildProcess };
 
 	// ffmpeg is stopped gracefully by writing "q" to stdin; the others only
 	// need a signal, so keep their stdio minimal.
 	const stdin = kind === "ffmpeg" ? "pipe" : "ignore";
 	const proc = spawn(bin, buildArgs(kind, cfg, file), { stdio: [stdin, "ignore", "pipe"] });
-	handle.proc = proc;
+	const handle: RecorderHandle = { kind, bin, file, proc, stopped: false, stderr: "" };
 	proc.stderr?.on("data", (chunk: Buffer) => {
 		handle.stderr = (handle.stderr + chunk.toString()).slice(-2000);
 	});

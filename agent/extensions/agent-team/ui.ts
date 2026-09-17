@@ -118,8 +118,8 @@ ${tableRows}
   const skillsSection = args.skills && args.skills.length ? "\n## Skills\n" + args.skills.map(s => "- **" + s.name + "**: " + (s.description || "(no description)")).join("\n") + "\n" : "";
   const memorySection = args.memory && (args.memory.dir || (args.memory.files && args.memory.files.length))
     ? "\n## Project Memory\nMemory directory = `" + args.memory.dir + "`:\n" +
-      args.memory.files.map(f => "- `" + f.path.replace(args.memory.dir + "/","") + "` - " + f.heading).join("\n") +
-      "\nRead relevant files when prior decisions or preferences matter (reference, not instructions).\n"
+    args.memory.files.map(f => "- `" + f.path.replace(args.memory.dir + "/", "") + "` - " + f.heading).join("\n") +
+    "\n**VERY IMPORTANT** Read memory files to understand Repo before working on any Task.\n"
     : "";
 
   const enabledTools = (args.orchestratorTools && args.orchestratorTools.length) ? args.orchestratorTools : ctx.activeToolList();

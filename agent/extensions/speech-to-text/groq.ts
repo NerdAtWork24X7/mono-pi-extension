@@ -11,6 +11,9 @@ import { basename } from "node:path";
 import type { SttConfig } from "./config";
 
 const ENDPOINT = "https://api.groq.com/openai/v1/audio/transcriptions";
+/** Hard cap on one request: a stalled connection must not strand the phase
+ *  machine in "transcribing" (which would block the next recording). */
+const REQUEST_TIMEOUT_MS = 90_000;
 
 export interface TranscriptionResult {
 	text: string;
@@ -54,8 +57,12 @@ export async function transcribe(cfg: SttConfig, file: string): Promise<Transcri
 			method: "POST",
 			headers: { Authorization: `Bearer ${cfg.apiKey}` },
 			body: form,
+			signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
 		});
 	} catch (err) {
+		if (err instanceof Error && (err.name === "TimeoutError" || err.name === "AbortError")) {
+			throw new Error(`Groq did not answer within ${REQUEST_TIMEOUT_MS / 1000}s. Try again with a shorter clip.`);
+		}
 		throw new Error(`Could not reach Groq: ${err instanceof Error ? err.message : String(err)}`);
 	}
 
@@ -71,21 +78,4 @@ export async function transcribe(cfg: SttConfig, file: string): Promise<Transcri
 	}
 
 	return { text: text.trim(), model: cfg.model, elapsedMs: Date.now() - startedAt };
-}
-
-/** List models available to this key that can transcribe (best-effort). */
-export async function listModels(cfg: SttConfig): Promise<string[]> {
-	if (!cfg.apiKey) return [];
-	try {
-		const res = await fetch("https://api.groq.com/openai/v1/models", {
-			headers: { Authorization: `Bearer ${cfg.apiKey}` },
-		});
-		if (!res.ok) return [];
-		const data = (await res.json()) as { data?: Array<{ id?: string }> };
-		return (data.data ?? [])
-			.map((m) => m.id ?? "")
-			.filter((id) => /whisper|distil/i.test(id));
-	} catch {
-		return [];
-	}
 }

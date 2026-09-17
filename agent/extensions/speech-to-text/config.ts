@@ -30,9 +30,11 @@ export interface SttConfig {
 	prompt: string;
 	/** Hard cap on a single recording, in seconds. */
 	maxDurationSeconds: number;
-	/** How long to wait, in ms, after the last alt+t auto-repeat before
-	 *  deciding the key was released. Only used on terminals that do not speak
-	 *  the Kitty keyboard protocol (no explicit key-release events). */
+	/** How long to wait, in ms, after the last alt+t event of a hold before
+	 *  deciding the key was released. This gap is the only release signal on
+	 *  terminals that never report key releases (xterm modifyOtherKeys, legacy
+	 *  terminals, re-encoding pipelines); where releases do arrive they end the
+	 *  clip immediately and the gap becomes a safety net. */
 	holdReleaseGapMs: number;
 	/** Stop automatically when sox hears trailing silence. */
 	silenceAutoStop: boolean;

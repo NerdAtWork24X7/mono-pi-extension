@@ -52,6 +52,8 @@ export class AudioLevelMeter {
 	private level = 0;
 	/** Last time the level was above the silence threshold. */
 	private lastLoudAt = Date.now();
+	/** Read buffer, reused across the ~8 samples per second of a clip. */
+	private buffer: Buffer | null = null;
 
 	constructor(private readonly file: string, private readonly sampleRate: number) {}
 
@@ -74,12 +76,12 @@ export class AudioLevelMeter {
 			if (size - from > windowBytes) from = Math.max(this.dataOffset, size - windowBytes);
 
 			const len = size - from;
-			const buf = Buffer.allocUnsafe(len);
+			const buf = this.bufferFor(len);
 			const read = readSync(this.fd, buf, 0, len, from);
 			this.readOffset = size;
 			if (read <= 0) return this.decay();
 
-			const { rms } = analyze(read === len ? buf : buf.subarray(0, read));
+			const { rms } = analyze(buf.subarray(0, read));
 			const level = normalize(rms);
 			if (level >= SILENCE_LEVEL) this.lastLoudAt = Date.now();
 			this.level = Math.max(level, this.level * DECAY);
@@ -89,6 +91,14 @@ export class AudioLevelMeter {
 			// mid-flush. Treat it as silence and try again next tick.
 			return this.decay();
 		}
+	}
+
+	/** A buffer large enough for `len` bytes, kept for the next tick. */
+	private bufferFor(len: number): Buffer {
+		const buf = this.buffer;
+		if (buf && buf.length >= len) return buf;
+		this.buffer = Buffer.allocUnsafe(len);
+		return this.buffer;
 	}
 
 	/** How long the signal has been at/below the silence threshold, in ms. */
