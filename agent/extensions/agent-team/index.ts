@@ -82,7 +82,7 @@ export class AgentTeam implements AgentTeamContext {
   /** Debug verbosity for the dispatch pipeline (0 off, 1 lifecycle, 2 raw JSONL).
    *  See DebugLevel in core.ts. Persisted in agent-team-config.json. */
   debugLevel = 0;
-  destructiveTools: string[] = ["custom_edit", "custom_write"];
+  destructiveTools: string[] = ["custom_edit", "custom_write", "edit", "write", "web-fetch"];
   dispatchLock: RwLock = new RwLock();
   batchClones = new Set<AgentProc>();
   /** Set of agent names that are temporarily disabled by the user */
@@ -127,7 +127,7 @@ export class AgentTeam implements AgentTeamContext {
     this.maxParallel = this.saved.maxParallel ?? 5;
     this.debugLevel = this.saved.debugLevel ?? 0;
     this.mode = this.saved.mode ?? "standard";
-    this.destructiveTools = this.saved.destructiveTools ?? ["write", "custom_edit"];
+    this.destructiveTools = this.saved.destructiveTools ?? ["custom_edit", "custom_write", "edit", "write", "web-fetch"];
     this.disabledAgents = new Set(this.saved.disabledAgents ?? []);
     this.orchestratorSkills = new Set(this.saved.orchestratorSkills ?? []);
     this.subagentSkills = new Set(this.saved.subagentSkills ?? []);
