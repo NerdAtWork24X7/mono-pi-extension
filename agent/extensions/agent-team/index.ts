@@ -28,21 +28,21 @@ import { join } from "path";
 import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, BatchDispatchResult, AgentMode } from "./core";
 import { displayName, shortModel, SessionLogger, RwLock, filterSkills } from "./core";
 import { loadPersistedConfig, savePersistedConfig, scanAgents, loadTeamsYaml, discoverEnabledSkills, loadAgentMd, teamsYamlPath, persistTeams } from "./config";
-import { scanExtensionPaths } from "./extensions";
-import { ProcessManager, dispatch as dispatchImpl, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchMany as dispatchManyImpl, dispatchAgentMany as dispatchAgentManyImpl } from "./orchestration";
+import { scanExtensionPaths, refreshExtensionSettings, extensionSettingsSignature, orchestratorHiddenTools } from "./extensions";
+import { ProcessManager, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchTasks as dispatchTasksImpl } from "./orchestration";
 import { MemoryManager, createMemoryManager, extractLastAssistantText, installMemoryEscEditor, memoryFiles } from "./memory";
 import { buildSystemPrompt, initWidget as initWidgetImpl, invalidate as invalidateImpl, closeSidebar } from "./ui";
-import { registerDispatchAgentTool, registerDispatchAgentsTool, registerCommands, registerShortcut } from "./integrations";
+import { registerDispatchTool, registerCommands, registerShortcut } from "./integrations";
 import { fullModelId } from "./helpers";
 
 /** Remove session files older than 24 hours to prevent unbounded disk growth
  *  when the CLI exits abruptly and leaves orphaned files behind.
  *  Uses async I/O to avoid blocking the event loop. */
-/** All tool names except the dispatch tools — the active-tool set restored
+/** All tool names except the dispatch tool — the active-tool set restored
  *  whenever the agent team is disabled. Shared by disableAgentTeam and the
  *  disabled session_start path so the exclusion list can't drift apart. */
 function nonDispatchTools(pi: ExtensionAPI): string[] {
-  return pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent" && n !== "dispatch_agents");
+  return pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agents");
 }
 
 async function cleanupOldSessionFiles(sessionDir: string) {
@@ -93,12 +93,12 @@ export class AgentTeam implements AgentTeamContext {
   subagentSkills = new Set<string>();
   /** Orchestrator tool denylist. Tools listed are hidden from the orchestrator. Empty = all tools shown. */
   skipOrchestratorTools: string[] = [];
-  private agentMutexes = new Map<string, Promise<unknown>>();
 
   // Live external config sync: signature of the tool-affecting fields last
   // applied from disk (see startConfigWatch), so the poll only re-applies on
   // real changes instead of every tick.
   private appliedConfigSig = "";
+  private appliedExtSettingsSig = "";
   private configWatchTimer: ReturnType<typeof setInterval> | null = null;
 
   cachedExtPaths: string[] = []; // resolved once per session_start
@@ -169,7 +169,18 @@ export class AgentTeam implements AgentTeamContext {
   startConfigWatch() {
     this.stopConfigWatch();
     this.appliedConfigSig = this.configFileSig();
+    this.appliedExtSettingsSig = extensionSettingsSignature(this.cachedExtPaths);
     this.configWatchTimer = setInterval(() => {
+      // Per-extension extension.json edits are watched separately from the
+      // agent-team config so a change applies on the next dispatch (subagents)
+      // or repaint (orchestrator tools) instead of needing a restart.
+      const extSig = extensionSettingsSignature(this.cachedExtPaths);
+      if (extSig !== this.appliedExtSettingsSig) {
+        this.appliedExtSettingsSig = extSig;
+        refreshExtensionSettings(this.cachedExtPaths);
+        try { this.pi.setActiveTools(this.activeToolList()); } catch { /* not ready yet */ }
+        this.invalidate();
+      }
       const sig = this.configFileSig();
       if (sig === this.appliedConfigSig) return;
       this.appliedConfigSig = sig;
@@ -235,30 +246,8 @@ export class AgentTeam implements AgentTeamContext {
 
   // ── Dispatch / RPC delegation ──
 
-  async dispatch(agentName: string, task: string) {
-    return dispatchImpl(this, agentName, task);
-  }
-
-  async dispatchMany(tasks: Array<{ agent: string; task: string }>, signal?: AbortSignal): Promise<BatchDispatchResult> {
-    return dispatchManyImpl(this, tasks, signal);
-  }
-  async dispatchAgentMany(agentName: string, tasks: string[], signal?: AbortSignal): Promise<BatchDispatchResult> {
-    return dispatchAgentManyImpl(this, agentName, tasks, signal);
-  }
-
-  /** Serialize dispatches to the same agent so its shared AgentProc state never collides. */
-  serializeAgent(name: string, fn: () => Promise<any>): Promise<any> {
-    const prev = this.agentMutexes.get(name) ?? Promise.resolve();
-    const next = prev.then(fn, fn);
-    // Store a settled reference that doesn't hold fn's closure.
-    // Once the previous chain resolves, remove the entry if it's still
-    // the one we stored (avoids unbounded Map growth over long sessions).
-    const settled = next.then(() => { }, () => { });
-    settled.then(() => {
-      if (this.agentMutexes.get(name) === settled) this.agentMutexes.delete(name);
-    });
-    this.agentMutexes.set(name, settled);
-    return next;
+  async dispatchTasks(tasks: Array<{ agent: string; task: string }>, signal?: AbortSignal): Promise<BatchDispatchResult> {
+    return dispatchTasksImpl(this, tasks, signal);
   }
 
   async activateTeam(name: string) {
@@ -313,10 +302,10 @@ export class AgentTeam implements AgentTeamContext {
   }
 
   /** All tools available to the orchestrator. Excludes the dispatch routing
-   *  tools (dispatch_agent/dispatch_agents), which are governed by the
-   *  parallelDispatch setting rather than the sidebar tool list. */
+   *  tool (dispatch_agents), which is governed by the parallelDispatch setting
+   *  rather than the sidebar tool list. */
   allTools(): string[] {
-    return this.pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agent" && n !== "dispatch_agents");
+    return this.pi.getAllTools().map(t => t.name).filter(n => n !== "dispatch_agents");
   }
 
   /** Enable/disable an orchestrator tool from the sidebar. Disabling adds it
@@ -336,28 +325,20 @@ export class AgentTeam implements AgentTeamContext {
     this.invalidate();
   }
 
-  /** Active tool allowlist. When parallel dispatch is on, only dispatch_agents is available;
-   *  when off, only dispatch_agent is available (mutually exclusive). */
+  /** Active tool allowlist. The single `dispatch_agents` routing tool is always
+   *  exposed; whether a batch runs in parallel is decided at dispatch time from
+   *  `parallelDispatch` rather than by swapping tools.
+   *
+   *  Two denylists apply: tools the user switched off in the sidebar, and tools
+   *  whose extension declares `orchestrator: false` in its extension.json. */
   activeToolList(): string[] {
     const all = this.pi.getAllTools().map(t => t.name);
     // Start from full PI tool set, remove internal routing tools
-    let base = all.filter(n => n !== "dispatch_agent" && n !== "dispatch_agents");
-    // If skipOrchestratorTools is non-empty, exclude those tools (denylist)
-    if (this.skipOrchestratorTools.length) {
-      const block = new Set(this.skipOrchestratorTools.map(t => t.toLowerCase()));
-      base = base.filter(n => !block.has(n.toLowerCase()));
-    }
-    base.unshift("dispatch_agent");
+    let base = all.filter(n => n !== "dispatch_agents");
+    const block = new Set(this.skipOrchestratorTools.map(t => t.toLowerCase()));
+    for (const t of orchestratorHiddenTools(this.cachedExtPaths)) block.add(t);
+    if (block.size) base = base.filter(n => !block.has(n.toLowerCase()));
     base.unshift("dispatch_agents");
-    /*
-    if (this.parallelDispatch) {
-      // Parallel ON: dispatch_agents only, dispatch_agent disabled
-      base.unshift("dispatch_agents");
-    } else {
-      // Parallel OFF: dispatch_agent only, dispatch_agents disabled
-      base.unshift("dispatch_agent");
-    }
-    */
     return base;
   }
 
@@ -381,6 +362,10 @@ export class AgentTeam implements AgentTeamContext {
 
     this.allDefs = scanAgents(cwd);
     this.cachedExtPaths = scanExtensionPaths(cwd);
+    // Prime the extension.json cache for this session (and adopt the current
+    // signature) so per-dispatch lookups never touch the filesystem.
+    refreshExtensionSettings(this.cachedExtPaths);
+    this.appliedExtSettingsSig = extensionSettingsSignature(this.cachedExtPaths);
     this.skillsCache = discoverEnabledSkills();
     this.agentMdCache = loadAgentMd(cwd);
 
@@ -442,7 +427,7 @@ export class AgentTeam implements AgentTeamContext {
     this.persist();
     await this.killAll();
     this.wCtx = ctx;
-    // Restore all tools EXCEPT dispatch_agent / dispatch_agents
+    // Restore all tools EXCEPT dispatch_agents
     this.pi.setActiveTools(nonDispatchTools(this.pi));
     this.invalidate();
     setAgentTeamHeader(ctx, false, false);
@@ -625,8 +610,7 @@ export default function (pi: ExtensionAPI) {
   // custom_write / custom_edit) are registered by the standalone custom-tools
   // extension, not here — subagents exclude agent-team from their extension
   // paths, so those tools must live outside this extension to be available.
-  registerDispatchAgentTool(pi, team);
-  registerDispatchAgentsTool(pi, team);
+  registerDispatchTool(pi, team);
   registerCommands(pi, team);
   registerShortcut(pi, team);
 }

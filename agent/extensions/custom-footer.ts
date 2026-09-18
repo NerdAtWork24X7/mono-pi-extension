@@ -99,12 +99,28 @@ export default function (pi: ExtensionAPI) {
   const cwdParts = process.cwd().split(/[/\\]/);
   const cwdShort = cwdParts.length > 2 ? cwdParts.slice(-2).join("/") : process.cwd();
 
+  // Handles for the current footer's timer/branch subscription, so a new
+  // session replaces them instead of leaking one interval per session_switch.
+  let footerTimer: ReturnType<typeof setInterval> | undefined;
+  let footerUnsub: (() => void) | undefined;
+
   pi.on("session_start", async (_event, ctx) => {
     sessionStart = Date.now();
 
+    // TUI only: footer + its 30 s usage refresh only exist for an interactive
+    // session. Spawned subagents run `--mode rpc` (headless) and a JSON/print
+    // run has no footer either — wiring the right-side `--right` refresh+render
+    // there was pure wasted work (and a network call) per process.
+    if (ctx?.mode !== "tui") return;
+
+    // Release the previous session's footer wiring before installing new one.
+    if (footerTimer) { clearInterval(footerTimer); footerTimer = undefined; }
+    footerUnsub?.();
+    footerUnsub = undefined;
+
     ctx.ui.setFooter((tui, theme, footerData) => {
-      const unsub = footerData.onBranchChange(() => tui.requestRender());
-      const timer = setInterval(() => {
+      footerUnsub = footerData.onBranchChange(() => tui.requestRender());
+      footerTimer = setInterval(() => {
         void refreshGoApiUsage();
         tui.requestRender();
       }, 30000);
@@ -285,8 +301,11 @@ export default function (pi: ExtensionAPI) {
 
       return {
         dispose() {
-          unsub();
-          clearInterval(timer);
+          // Owned by the outer session_start handler so a later session can
+          // replace them; clear whichever handles this footer installed.
+          footerUnsub?.();
+          footerUnsub = undefined;
+          if (footerTimer) { clearInterval(footerTimer); footerTimer = undefined; }
         },
         invalidate() {},
         render(width: number): string[] {

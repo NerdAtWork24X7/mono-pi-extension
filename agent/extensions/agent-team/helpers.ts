@@ -22,21 +22,31 @@ import { ansiRe, displayName, hrPad } from "./core";
 
 // ── Text measure / transform ──
 
+/** Matches any code point outside 7-bit ASCII. Pure-ASCII strings need no
+ *  grapheme accounting (code units === code points === cells), so the `[...s]`
+ *  spread can be skipped entirely — and these three helpers run for every cell
+ *  of every widget/sidebar frame (agent cards, log panels, sidebar rows), where
+ *  log text is overwhelmingly ASCII. Same fast-path idea as hrPad in core.ts. */
+const NON_ASCII_RE = /[^\x00-\x7F]/;
+
 /** Visible cell count of a (possibly ANSI-colored) string. */
 export function visLen(s: string): number {
-  return [...s.replace(ansiRe, "")].length;
+  const plain = s.replace(ansiRe, "");
+  return NON_ASCII_RE.test(plain) ? [...plain].length : plain.length;
 }
 
 /** Truncate to at most `n` graphemes, including a 1-char "…" when cut. */
 export function trunc(s: string, n: number): string {
   if (!s || n <= 0) return "";
+  if (!NON_ASCII_RE.test(s)) return s.length > n ? s.slice(0, Math.max(0, n - 1)) + "…" : s;
   const cells = [...s];
   return cells.length > n ? cells.slice(0, Math.max(0, n - 1)).join("") + "…" : s;
 }
 
 /** Pad a coloured string to exactly `targetW` visible cells with trailing spaces. */
 export function padToVis(colored: string, targetW: number): string {
-  return colored + " ".repeat(Math.max(0, targetW - visLen(colored)));
+  const pad = targetW - visLen(colored);
+  return pad > 0 ? colored + " ".repeat(pad) : colored;
 }
 
 // ── Status presentation ──

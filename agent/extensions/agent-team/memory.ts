@@ -408,7 +408,7 @@ export class MemoryManager {
     const cliArgs = [
       "--mode", "rpc",
       "-p",
-      ...buildExtensionCliArgs(extPaths),
+      ...buildExtensionCliArgs(extPaths, { tools: memoryAp.def.tools, provider }),
       ...(provider ? ["--provider", provider] : []),
       "--no-skills",
       "--no-context-files",
@@ -457,6 +457,9 @@ export class MemoryManager {
       const sub = spawnRpcSubprocess({
         bin,
         args: cliArgs,
+        // Same spawned-worker marker (and extension routing) the dispatch
+        // clones use: the summarizer only needs read/write/edit.
+        env: { ...process.env, PI_SUBAGENT: "1" },
         logger: this.logger,
         onLine: (line) => {
           lastLineAt = Date.now();

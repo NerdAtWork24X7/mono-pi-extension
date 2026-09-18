@@ -41,6 +41,9 @@ export interface AgentProc {
   elapsed: number;
   lastWork: string;
   runCount: number;
+  /** Owned interval timer. Memory summarizer runs use it for their card's
+   *  elapsed display; dispatched subagents share one global ticker instead
+   *  (see startElapsedTicker in orchestration.ts). */
   timer?: ReturnType<typeof setInterval>;
   dispatchTimeout?: ReturnType<typeof setTimeout>;
   lastActivity: number;          // timestamp of last received RPC event
@@ -99,7 +102,8 @@ export interface TeamConfig {
   enabled: boolean;
   /** Orchestrator system-prompt mode: "standard" (strict) or "creative". */
   mode?: AgentMode;
-  /** Master toggle for parallel batched subagent dispatch (dispatch_agents). */
+  /** Master toggle for batched subagent dispatch (dispatch_agents): on = run
+   *  independent read-only tasks in parallel, off = run every batch serially. */
   parallelDispatch?: boolean;
   /** Debug verbosity for the dispatch pipeline.
    *  0 = off, 1 = lifecycle log lines, 2 = raw JSONL protocol trace. */
@@ -171,12 +175,11 @@ export interface AgentTeamContext {
   killProc: (ap: AgentProc, immediate?: boolean) => void;
   killAll: () => Promise<void>;
   persist: () => void;
-  dispatch: (agentName: string, task: string) => Promise<{ output: string; code: number; elapsed: number }>;
   activateTeam: (name: string) => Promise<void>;
   handleEvent: (ap: AgentProc, line: string) => void;
   enableAgentTeam: (ctx: any) => Promise<void>;
   disableAgentTeam: (ctx: any) => Promise<void>;
-  /** Current active tool allowlist (includes dispatch_agents when parallel is on). */
+  /** Current active tool allowlist (includes the dispatch tool). */
   activeToolList: () => string[];
   /** All tools available to the orchestrator (excludes the dispatch routing tools). */
   allTools: () => string[];
@@ -188,12 +191,9 @@ export interface AgentTeamContext {
   /** Orchestrator tool denylist. Tools listed are hidden from the orchestrator. Empty = all tools shown. */
   skipOrchestratorTools: string[];
   dispatchLock: RwLock;
-  /** Serialize dispatches to the SAME agent so its shared AgentProc state never collides. */
-  serializeAgent: (name: string, fn: () => Promise<any>) => Promise<any>;
-  /** Batched parallel dispatch of read-only subagents. */
-  dispatchMany: (tasks: Array<{ agent: string; task: string }>, signal?: AbortSignal) => Promise<BatchDispatchResult>;
-  /** Run the SAME agent across many tasks (one isolated clone per task). */
-  dispatchAgentMany: (agentName: string, tasks: string[], signal?: AbortSignal) => Promise<BatchDispatchResult>;
+  /** Dispatch a batch of {agent, task} pairs — parallel when `parallelDispatch`
+   *  is on and every task is read-only, otherwise strictly serialized. */
+  dispatchTasks: (tasks: Array<{ agent: string; task: string }>, signal?: AbortSignal) => Promise<BatchDispatchResult>;
 }
 
 // ── Utilities ──
@@ -338,11 +338,18 @@ export interface BatchDispatchResult {
   results: BatchTaskResult[];
 }
 
-/** Classify an agent as writable (can mutate files → serialized) vs read-only
- *  (parallel) by inspecting its tool allowlist against `destructiveTools`. */
-export function isWritable(def: AgentDef, destructiveTools: string[]): boolean {
+/** Classify a raw tool allowlist as writable (can mutate files → serialized)
+ *  vs read-only (parallel) by testing it against `destructiveTools`. Shared by
+ *  the dispatch scheduler and the orchestrator prompt's routing table so both
+ *  agree on which agents are parallel-eligible. */
+export function toolsAreWritable(tools: string, destructiveTools: string[]): boolean {
   const destructive = new Set(destructiveTools.map(s => s.trim().toLowerCase()).filter(Boolean));
-  return def.tools.split(",").some(tool => destructive.has(tool.trim().toLowerCase()));
+  return tools.split(",").some(tool => destructive.has(tool.trim().toLowerCase()));
+}
+
+/** Classify an agent as writable by inspecting its tool allowlist. */
+export function isWritable(def: AgentDef, destructiveTools: string[]): boolean {
+  return toolsAreWritable(def.tools, destructiveTools);
 }
 
 /** Async reader/writer lock.
@@ -468,7 +475,12 @@ export const LOG_RING_MAX = 300;
  *  carriage returns, and other control characters. Tabs become two spaces. */
 export const ansiRe = /\x1b\[[0-9;]*m/g;
 const ctrlRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+/** Scan-only probe for "this line needs sanitizing": ANSI escape intro, CR, tab,
+ *  or any control char. Pure-plain log lines (the overwhelming majority) skip
+ *  all four global regex passes below. */
+const dirtyRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\r\t\x1b]/;
 export function sanitizeLine(s: string): string {
+  if (!dirtyRe.test(s)) return s.trimEnd();
   let t = s.replace(ansiRe, "");   // drop colour/style escapes
   t = t.replace(/\r/g, "");        // drop CR (progress bars, \r\n)
   t = t.replace(/\t/g, "  ");      // tabs -> 2 spaces
@@ -562,14 +574,19 @@ export class SessionLogger {
     for (const ln of trimmed.split("\n")) this.push(ap, ln);
   }
 
+  /** Append streamed assistant text, pushing only COMPLETE lines.
+   *
+   *  Fast path: a delta without a newline just accumulates — the previous
+   *  implementation re-scanned the whole pending line on every delta
+   *  (indexOf over the buffer, per token), which is O(line²) characters for a
+   *  long line. Now the scan is confined to the incoming chunk and the buffer
+   *  is split once per batch of newlines. */
   logStreamingText(ap: AgentProc, chunk: string) {
     ap.streamLineBuf += chunk;
-    let idx: number;
-    while ((idx = ap.streamLineBuf.indexOf("\n")) >= 0) {
-      const line = ap.streamLineBuf.slice(0, idx);
-      ap.streamLineBuf = ap.streamLineBuf.slice(idx + 1);
-      this.push(ap, line);
-    }
+    if (chunk.indexOf("\n") < 0) return;
+    const parts = ap.streamLineBuf.split("\n");
+    ap.streamLineBuf = parts.pop() ?? "";
+    for (const line of parts) this.push(ap, line);
   }
 
   flushStreamBuf(ap: AgentProc) {
@@ -617,9 +634,10 @@ export class SessionLogger {
     // buffer rollover, and never corrupts a different line. The word
     // boundary check keeps a `▶ Task #…` header from matching a tool
     // whose name is a prefix of another string.
+    const prefix = `▶ ${tool}`;
     for (let i = ap.logLines.length - 1; i >= 0; i--) {
       const line = ap.logLines[i];
-      if (line.startsWith(`▶ ${tool}`) && (line.length === tool.length + 2 || line[tool.length + 2] === " ")) {
+      if (line.startsWith(prefix) && (line.length === prefix.length || line[prefix.length] === " ")) {
         ap.logLines[i] = tag + line.slice(1) + dur;
         return;
       }
@@ -743,7 +761,11 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
         // process liveness or pipe closure. Safe: JSON.parse only succeeds on
         // a fully-formed object, never on a partial streamed line, and a
         // concatenation of two objects fails parse, so we cannot emit early.
-        if (stdoutBuf.length > 0) {
+        // Cheap shape guard before the parse: only a buffer that starts with
+        // `{` and ends with `}` can be a complete JSON object, so a mid-line
+        // chunk of a large payload never pays for a doomed JSON.parse of the
+        // whole accumulated buffer.
+        if (stdoutBuf.length > 1 && stdoutBuf.charCodeAt(0) === 0x7b && stdoutBuf.endsWith("}")) {
           try {
             const parsed = JSON.parse(stdoutBuf);
             if (parsed && typeof parsed === "object") {

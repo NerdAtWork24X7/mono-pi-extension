@@ -160,10 +160,21 @@ function teamsYamlWritePath(): string {
 }
 
 /** Resolve a skill short name to an absolute SKILL.md path.
- *  Returns undefined if the skill directory does not exist. */
+ *  Returns undefined if the skill directory does not exist.
+ *
+ *  Cached for the process lifetime: this runs once per skill per subagent
+ *  spawn (see ProcessManager.spawnProc), and the skills directory does not
+ *  change under a running session — the freshly scanned `discoverEnabledSkills`
+ *  list already gates which names can reach here. */
+const skillPathCache = new Map<string, string | undefined>();
+
 export function resolveSkillPath(name: string): string | undefined {
+  const cached = skillPathCache.get(name);
+  if (cached !== undefined || skillPathCache.has(name)) return cached;
   const p = join(getAgentDir(), "skills", name, "SKILL.md");
-  return existsSync(p) ? p : undefined;
+  const resolved = existsSync(p) ? p : undefined;
+  skillPathCache.set(name, resolved);
+  return resolved;
 }
 
 // Extension discovery (scanExtensionPaths / loadDisabledExtensions / isDisabled)

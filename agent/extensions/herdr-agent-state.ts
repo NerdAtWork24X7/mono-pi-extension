@@ -2,7 +2,7 @@
 // managed by herdr; reinstalling or updating the integration overwrites this file.
 // add custom hooks/plugins beside this file instead of editing it.
 // HERDR_INTEGRATION_ID=pi
-// HERDR_INTEGRATION_VERSION=8
+// HERDR_INTEGRATION_VERSION=9
 // @ts-nocheck
 
 import net from "node:net";
@@ -75,7 +75,10 @@ function updateSessionRef(ctx: any): void {
   try {
     const file = ctx?.sessionManager?.getSessionFile?.();
     currentAgentSessionPath =
-      typeof file === "string" && path.isAbsolute(file) ? file : undefined;
+      typeof file === "string" &&
+      (path.posix.isAbsolute(file) || path.win32.isAbsolute(file))
+        ? file
+        : undefined;
   } catch {
     currentAgentSessionPath = undefined;
   }

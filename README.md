@@ -38,7 +38,7 @@ Most "multi-agent" setups on the internet do one of two things: (a) run every ag
 
 1. **Session start** — The extension loads agent definitions (`agent/agents/*.md`) and teams (`agent/agents/teams.yaml`). Nothing is spawned yet.
 2. **Plan** — The orchestrator (frontier model) breaks the request into tasks.
-3. **Delegate** — For each task it calls `dispatch_agent(agent, task)`. A fresh `pi --mode rpc` subprocess boots for that specialist, runs with only its allowed tools, and streams results back.
+3. **Delegate** — It calls `dispatch_agents(tasks: [{agent, task}, ...])` — one entry per task. A fresh `pi --mode rpc` subprocess boots for each task, runs with only that specialist's allowed tools, and streams results back. Read-only tasks run in parallel when parallel dispatch is ON, and tasks are run one at a time when it is OFF or when any entry targets a writable (edit/write) agent.
 4. **Gate** — Worker output goes to `harsh_critic`. It loops until `VERDICT: APPROVED`.
 5. **Verify** — Approved work is handed to `tester` with exact commands; pass/fail evidence is captured.
 6. **Remember** — Each turn is summarized into project memory for the next session.
@@ -96,6 +96,28 @@ This unpacks the tarballs next to `agent/extensions/obscura/index.ts` and makes 
 
 ---
 
+## Shared page cache (parallel `web-fetch`)
+
+Parallel dispatch runs every subagent as its own pi process, so two agents researching the same page used to crawl it twice — two browser sessions, twice the wall clock. The `web_fetch` extension now coordinates through `<project>/.pi/web-fetch-cache/`, which all agents share because they inherit the project root as their working directory:
+
+- The **first agent to reach a URL** takes a lock, crawls it, and publishes the page text.
+- **Every other agent asking for the same URL waits** for that page and reuses it instead of launching a second crawl. They report `Not re-crawled: served from the shared web-fetch cache` in the result.
+- URLs are matched after canonicalization (fragment, `www.`, host case and tracking params such as `utm_*` / `gclid` collapsed), so the same page under four different link forms is crawled once. Raw-HTML and Markdown variants are cached separately.
+- A page truncated at a smaller cap than a later caller needs is treated as a **miss**, so the caller re-crawls for full text rather than silently returning a short page.
+- If the holder crashes or overruns the wait budget its lock is reclaimed (stale after 2 min); locks are always released on success, failure, and abort, and a waiter that gives up never overwrites a page a live holder is about to publish.
+- Search-engine SERP pages are **never** cached — they are query-specific and volatile.
+
+Nothing is cached to disk unless this extension runs. Tuning knobs (all env vars, milliseconds):
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `WEB_FETCH_CACHE_TTL_MS` | `600000` (10 min) | How long a crawled page stays reusable. `0` disables caching and dedupe entirely. |
+| `WEB_FETCH_CACHE_WAIT_MS` | `45000` | How long to wait on another agent's in-flight crawl before crawling the URL yourself. |
+| `WEB_FETCH_CACHE_STALE_MS` | `120000` | Age at which a lock is assumed abandoned (holder killed). |
+| `WEB_FETCH_CACHE_DIR` | `<project>/.pi/web-fetch-cache` | Cache location. |
+
+---
+
 ## Subagents at a glance
 
 | Agent | Tools | Role |
@@ -121,11 +143,9 @@ Add your own by dropping a `.md` file into `agent/agents/` with the same frontma
 | `/agents-list` | List agents with process status and run counts |
 | `/agents-grid <1-6>` | Set UI grid columns for the agent status widgets |
 | `/agents-team-toggle on|off|status` | Enable/disable the agent team |
-| `/agents-parallel [on|off|status] [max N]` | Toggle global parallelism: ON → only `dispatch_agents` (parallel); OFF → only `dispatch_agent` (serial) |
+| `/agents-parallel [on|off|status] [max N]` | Toggle global parallelism: ON → independent read-only tasks run in parallel (up to `max N`); OFF → every dispatch is serialized, in the order given |
 | `/agents-debug <0\|1\|2\|status>` | Dispatch-pipeline debug level: 0 off, 1 lifecycle log to `~/.pi/agent-team-log/agent-sessions/agent-team-debug.log`, 2 + raw per-agent JSONL traces |
-| `dispatch_agent(agent, task)` | Send one task to a specialist (available only when parallel is OFF) |
-| `dispatch_agent(agent, tasks: [...])` | Fan the same agent across many tasks — available only when parallel is OFF |
-| `dispatch_agents(tasks: [...])` | Run multiple read-only tasks concurrently — available only when parallel is ON |
+| `dispatch_agents(tasks: [{agent, task}, ...])` | Delegate tasks to specialists — one `{agent, task}` entry per task (a single task is a one-entry array). Read-only entries run in parallel when parallel dispatch is ON; any edit/write entry is always serialized |
 | `Ctrl+Q` | Toggle the sidebar (agent grid, skills snapshot, team list) |
 | `Ctrl+Shift+E` | Toggle the agent team on/off |
 | `Ctrl+Shift+M` | Abort the running memory summarizer |
@@ -157,17 +177,42 @@ agent/
     *.md                   # Per-subagent definitions (frontmatter + prompt)
   extensions/
     agent-team/            # Core orchestrator extension (TypeScript source)
+    web_fetch/             # Persistent-Chromium web fetch + search (Playwright)
     obscura/              # Web-fetch via Obscura headless browser (setup.sh extracts binaries)
-    web_fetch_crawl4ai/    # Persistent-Chromium web fetch (Playwright, setup-web-fetch.sh)
     speech-to-text/        # Alt+T dictation via the Groq Whisper API
-    omni-router/           # OmniRoute gateway provider (localhost:20128/v1, live model catalog)
-    browser.ts, context7.ts, modelcost.ts, pi-scope.ts, TokenRouter.ts, ...
+    browser.ts, context7.ts, modelcost.ts, pi-scope.ts, ...
+    extensions.json        # Which extension runs for the orchestrator / subagents
   skills/                  # Reusable skills (flet, pyside6, electron-scaffold, ...)
 .pi/                      # Project configuration
 .pi_memory/               # Generated project-memory summaries
 ```
 
 See `agent/extensions/agent-team/` for the full orchestrator source, and `agent/AGENTS.md` for the subagent contract.
+
+---
+
+## Extension settings (which extension runs where)
+
+One manifest beside the extensions it configures — **`agent/extensions/extensions.json`** (a project that keeps its own extensions gets its own copy under `.pi/extensions/`):
+
+```jsonc
+{
+  "custom-tools":   { "orchestrator": true, "subagent": true },
+  "web_fetch":      { "orchestrator": true, "subagent": true },
+  "browser":        { "orchestrator": true, "subagent": true },
+  "speech-to-text": { "orchestrator": true, "subagent": false }
+}
+```
+
+Keys are extension names — the directory name for a directory extension (`web_fetch`), the file stem for a single-file one (`browser`). Per entry:
+
+- **`subagent: false`** — the extension is dropped from every spawned child (dispatch clones and the memory summarizer), so it costs nothing per dispatch.
+- **`orchestrator: false`** — the extension's tools are removed from the orchestrator's active tool list (hidden from its prompt and allowlist). A tool stays available if another still-enabled extension provides the same name.
+- An extension **omitted** from the manifest, a **missing file**, or **invalid JSON** all mean *enabled for both* — the safe default. `agent-team` itself is orchestrator-only by design and is never passed to children.
+
+This file is only a yes/no gate — it never lists tool names. **What a subagent may call comes from its own `.md` frontmatter** (`tools: bash, custom_read, grep, ...`), which is passed to the child as its `--tools` allowlist. That same list also decides which tool-providing extensions the child needs, so enabling `web_fetch` here does not load it into a `file_reader` that can't call `web-fetch`:
+
+The manifest is re-read live: the orchestrator re-applies its tool list within ~1.5 s of an edit, and subagents pick the change up on their next dispatch. Only the *module load* inside the running orchestrator process still needs `agent/settings.json` (`"extensions"`, applied at startup) — that list decides what the host loads at all.
 
 ---
 

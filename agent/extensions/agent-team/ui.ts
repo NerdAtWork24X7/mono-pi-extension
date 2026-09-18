@@ -2,7 +2,7 @@
 
 import { Text } from "@mariozechner/pi-tui";
 import type { AgentProc, AgentTeamContext } from "./core";
-import { agentNameKey, displayName, fmtTok, shortModel } from "./core";
+import { agentNameKey, displayName, fmtTok, shortModel, toolsAreWritable } from "./core";
 import { boxBorder, cardTitleLine, padToVis, statusDisplay, trunc, visLen } from "./helpers";
 
 // The sidebar overlay lives in ./sidebar — re-exported here so existing
@@ -39,9 +39,11 @@ export function buildSystemPrompt(args: {
   const creative = mode === "creative";
   const enabled = Array.from(ctx.procs.values()).filter(a => !ctx.disabledAgents.has(agentNameKey(a.def.name)));
 
+  // How dispatch_agents schedules this agent's tasks: read-only agents are
+  // parallel-eligible, edit/write agents are always serialized, and the global
+  // parallel-dispatch setting can force every agent onto the serialized path.
   const dispatchMode = (tools: string): string =>
-    tools.split(",").map(t => t.trim().toLowerCase()).filter(Boolean)
-      .some(t => t === "write" || t === "edit") ? "single" : "parallel";
+    toolsAreWritable(tools, ctx.destructiveTools) || !ctx.parallelDispatch ? "serialized" : "parallel";
 
   const tableRows = enabled.map(a =>
     "| " + a.def.name + " | " + (a.def.description || "(no description)").replace(/\s+/g, " ") + " | " + (a.def.tools || "") + " | " + dispatchMode(a.def.tools) + " |"
@@ -62,8 +64,9 @@ export function buildSystemPrompt(args: {
   const fileGenNote = docGen ? `dispatch \`${docGen}\`` : "write directly (no chat dumps)";
 
   const readers = [fileReader, searcher].filter((n): n is string => !!n);
+  // Only promise parallelism when the global switch actually allows it.
   const ctxGap = readers.length
-    ? "dispatch " + readers.map(tick).join("/") + " in parallel"
+    ? "dispatch " + readers.map(tick).join("/") + (ctx.parallelDispatch ? " in parallel" : " (one at a time — parallelism is off)")
     : "inspect directly";
 
   const qualityGateStep = harsh
@@ -82,10 +85,13 @@ export function buildSystemPrompt(args: {
   const creativeVerifyPhrase = tester ? `verify via \`${tester}\`` : `run checks directly`;
   const taskRouting = (!enabled || enabled.length === 0) ? "Execute directly" : "Dispatch specialized subagents from the table";
 
+  const dispatchToolNote = !enabled || enabled.length === 0 ? "" :
+    `- **Dispatch Tool**: \`dispatch_agents(tasks: [{agent, task}, ...])\` is the only delegation tool — always send the whole batch in ONE call, one entry per task, in execution order (a single task is a one-entry array). Concurrency is not your decision: the scheduler runs independent read-only tasks in parallel when parallel dispatch is ON (currently ${ctx.parallelDispatch ? "ON" : "OFF"}) and one at a time when OFF. Destructive agents (edit/write) are always serialized regardless of the setting — never rely on parallel writes to the same file.\n`;
+
   const subagentsSection = (!enabled || enabled.length === 0) ? "" : `## Subagents & Delegation
 Subagents are stateless, isolated workers. You own architecture, integration, and final decisions.
 - **Plan First**: Formulate subtasks and dependencies before dispatching. Provide specific objective, non-overlapping scope (files/paths/symbols), relevant context, and acceptance criteria.
-- **Parallel Strategy**: Run independent read-only searches/lookups in parallel (${ctxGap}). Batch file edits into single dispatches; NEVER edit or write to the same file concurrently.
+${dispatchToolNote}- **Parallel Strategy**: Run independent read-only searches/lookups in parallel (${ctxGap}). Batch file edits into single dispatches; NEVER edit or write to the same file concurrently.
 - **Delegation Guidelines**: Research requires primary sources & exact versions; image tasks need absolute paths; UI tasks must include the Visual Standard in context.
 - **Failure Protocol**: Non-zero exit, timeout, or BLOCKED = failure. Never invent success. Edit mismatch? Re-read file and send exact whitespace. Retry once with narrowed scope (max 2 retries total), then resolve directly or report blocker.
 
@@ -103,16 +109,19 @@ ${tableRows}
 
   const workflowSection = creative
     ? `## Execution Workflow
-1. **Plan & Explore**: Understand outcome and constraints; close context gaps: ${ctxGap}.
-2. **Delegate & Execute**: ${taskRouting}. Choose the highest-quality approach, giving subagents clear context.
-3. **Refine & Verify**: Critically iterate. ${creativeCritiquePhrase}. ${creativeVerifyPhrase}. Ensure edge cases and the Craft Bar are cleared.
-4. **Finalize**: Inspect final diff, ensure execution evidence, and summarize decisions.`
+1. Read files in .pi_memory/ folder to understand the current architecture, task breakdown, and previous steps.
+2. **Research**: Research the problem space to understand the best approach to solve the problem from web search.
+3. **Plan and Architect**: Determine the best approach to solve the problem; close context gaps: ${ctxGap}; update architecture and high-level task breakdown in .pi_memory/architecture.md
+4. **Delegate & Execute**: ${taskRouting}. Choose the highest-quality approach, giving subagents clear context.
+5. **Refine & Verify**: Critically iterate. ${creativeCritiquePhrase}. ${creativeVerifyPhrase}. Ensure edge cases and the Craft Bar are cleared.
+6. **Finalize**: Inspect final diff, ensure execution evidence, and summarize decisions.`
     : `## Execution Workflow
-1. **Plan**: Define acceptance criteria, identify edge cases, and map required subagents and dependencies.
-2. **Inspect**: Check relevant files and close context gaps (${ctxGap}). ${creative ? "" : "Read targeted line ranges; never read full files when grep/range suffices."}
-3. **Delegate & Execute**: ${taskRouting}. Provide explicit scope and acceptance criteria. Synthesize outputs and reconcile conflicts.
-4. **Audit & Verify**: ${qualityGateStep} ${verifyStep} Confirm edge cases are tested and execution evidence is captured.
-5. **Finalize**: ${docsStep} Inspect diff against the Craft Bar. Ensure no unverified claims or regressions remain.`;
+1. Read files in .pi_memory/ folder to understand the current architecture, task breakdown, and previous steps.
+2. **Plan**: Define acceptance criteria, identify edge cases, and map required subagents and dependencies.
+3. **Inspect**: Check relevant files and close context gaps (${ctxGap}). ${creative ? "" : "Read targeted line ranges; never read full files when grep/range suffices."}
+4. **Delegate & Execute**: ${taskRouting}. Provide explicit scope and acceptance criteria. Synthesize outputs and reconcile conflicts.
+5. **Audit & Verify**: ${qualityGateStep} ${verifyStep} Confirm edge cases are tested and execution evidence is captured.
+6. **Finalize**: ${docsStep} Inspect diff against the Craft Bar. Ensure no unverified claims or regressions remain.`;
 
   const agentMdSection = args.agentMd ? "\n## Project AGENTS.md\n" + args.agentMd.trim() + "\n" : "";
   const skillsSection = args.skills && args.skills.length ? "\n## Skills\n" + args.skills.map(s => "- **" + s.name + "**: " + (s.description || "(no description)")).join("\n") + "\n" : "";

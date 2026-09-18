@@ -16,7 +16,7 @@ const SPAWN_READY_TIMEOUT_MS = 15_000;
  *  thrashing when a subagent emits many rapid text_delta events. */
 const STREAM_INVALIDATE_THROTTLE_MS = 100;
 
-export const MAX_RESPONSE_LENGTH = 600000; // Subagent tool-result cap. Keep the marker string in dispatch_agent in sync.
+export const MAX_RESPONSE_LENGTH = 600000; // Subagent tool-result cap. Keep the truncation marker in formatBatchParts (integrations.ts) in sync.
 export const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
 
 /** Post-process a subagent's static system prompt before it is handed to the
@@ -58,6 +58,44 @@ export function postProcessAgentPrompt(prompt: string, mode: AgentMode): string 
  *  working — so large tasks aren't killed at their first sign of pressure.
  *  Only an aborted compaction or exceeding this cap is treated as a bail. */
 const MAX_AUTO_COMPACTIONS = 2;
+
+/** Shared elapsed-time ticker for every in-flight dispatch.
+ *  Previously each subagent owned its own `setInterval(500ms)` purely to
+ *  refresh its elapsed-seconds label, so a 5-task batch ran 5 timers that each
+ *  triggered a full-widget repaint (10 renders/s) on top of the streaming
+ *  repaints. One timer now refreshes every running proc and repaints once.
+ *
+ *  Entries are self-healing: a proc is dropped as soon as it leaves
+ *  running/starting, so no cleanup call site can leak a tick or keep the timer
+ *  alive. The timer is unref'd so it never holds the process open. */
+const activeRuns = new Map<AgentProc, number>(); // proc → start timestamp
+let elapsedTicker: ReturnType<typeof setInterval> | undefined;
+let elapsedTickerCtx: AgentTeamContext | null = null;
+
+export function startElapsedTicker(ctx: AgentTeamContext, ap: AgentProc, t0: number) {
+  activeRuns.set(ap, t0);
+  elapsedTickerCtx = ctx;
+  if (elapsedTicker) return;
+  elapsedTicker = setInterval(() => {
+    if (activeRuns.size === 0) { stopElapsedTicker(); return; }
+    const now = Date.now();
+    for (const [proc, start] of activeRuns) {
+      if (proc.status !== "running" && proc.status !== "starting") { activeRuns.delete(proc); continue; }
+      proc.elapsed = now - start;
+    }
+    if (activeRuns.size === 0) { stopElapsedTicker(); return; }
+    elapsedTickerCtx?.invalidate();
+  }, 500);
+  // Don't keep an otherwise-idle pi process alive just for the label.
+  if (typeof (elapsedTicker as any)?.unref === "function") (elapsedTicker as any).unref();
+}
+
+/** Stop the shared ticker and forget every tracked run. Used on teardown. */
+export function stopElapsedTicker() {
+  if (elapsedTicker) { clearInterval(elapsedTicker); elapsedTicker = undefined; }
+  activeRuns.clear();
+  elapsedTickerCtx = null;
+}
 
 // Map of event type → log message formatter for simple delegation
 const simpleLogEvents: Record<string, (ev: any) => string> = {
@@ -222,9 +260,13 @@ export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
   }
 }
 
-/** Per-agent streaming invalidation timestamps. Using a WeakMap keeps the
- *  AgentProc interface unchanged and avoids cross-agent update suppression. */
-const lastStreamInvalidate = new WeakMap<AgentProc, number>();
+/** Timestamp of the last streaming-driven repaint. Deliberately GLOBAL rather
+ *  than per-agent: a per-agent throttle let N concurrent clones each spend
+ *  their own budget, so a 5-task batch repainted up to 50×/s — every one of
+ *  which re-renders every agent's card and log panel. One global budget caps
+ *  total repaints (and therefore total render work) regardless of fan-out,
+ *  with the same 100 ms staleness bound per agent. */
+let lastStreamInvalidate = 0;
 
 export function handleMessageStart(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
   if (ev.message?.role !== "assistant") return;
@@ -267,15 +309,15 @@ export function handleMessageUpdate(ctx: AgentTeamContext, ap: AgentProc, ev: an
     ap.currentMessageText = ap.currentMessageText.slice(-MAX_COLLECTED_TEXT);
   }
   ctx.logger.logStreamingText(ap, chunk);
-  const lastNl = chunk.lastIndexOf("\n");
-  const tail = lastNl >= 0 ? chunk.slice(lastNl + 1) : chunk;
-  if (tail.trim()) ap.lastWork = tail.slice(0, 80);
-  // Throttle UI invalidation during streaming to avoid burning CPU on every
-  // token. The final state is still rendered on message_end / agent_end.
+  // Throttle the once-per-token work ("last work" label + UI invalidation) to
+  // one pass per STREAM_INVALIDATE_THROTTLE_MS. Doing it per token also
+  // allocated a fresh label string on every delta. The final state is still
+  // rendered on message_end / agent_end.
   const now = Date.now();
-  const last = lastStreamInvalidate.get(ap) ?? 0;
-  if (now - last > STREAM_INVALIDATE_THROTTLE_MS) {
-    lastStreamInvalidate.set(ap, now);
+  if (now - lastStreamInvalidate > STREAM_INVALIDATE_THROTTLE_MS) {
+    lastStreamInvalidate = now;
+    const tail = chunk.slice(chunk.lastIndexOf("\n") + 1);
+    if (tail.trim()) ap.lastWork = tail.slice(0, 80);
     ctx.invalidate();
   }
 }
@@ -369,7 +411,8 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
   // If we already terminated the subagent because it auto-compacted, ignore
   // any late completion event and don't overwrite the TASK_TOO_LARGE signal.
   if (ap.autoCompacted) return;
-  clearInterval(ap.timer);
+  // The shared elapsed ticker drops this proc on the next tick (status flips
+  // to "done" below) — no per-dispatch timer to clear here.
   ctx.logger.flushStreamBuf(ap);
 
   const output = capturedText(ap) || "(no output)";
@@ -446,30 +489,9 @@ function resolveAgent(ctx: AgentTeamContext, name: string): { ap: AgentProc } | 
   return { ap };
 }
 
-export async function dispatch(
-  ctx: AgentTeamContext,
-  agentName: string,
-  task: string,
-): Promise<{ output: string; code: number; elapsed: number }> {
-  const r = resolveAgent(ctx, agentName);
-  if ("error" in r) return { output: r.error, code: 1, elapsed: 0 };
-  const ap = r.ap;
-  // Read-only agents run concurrently under the read lock; writable agents
-  // (any allowlist containing a destructive tool) take the exclusive write
-  // lock so writes/edits are NEVER parallel. serializeAgent guards the shared
-  // AgentProc so two concurrent dispatches to the SAME agent can't clobber
-  // each other's mutable run state.
-  const writable = isWritable(ap.def, ctx.destructiveTools);
-  return ctx.serializeAgent(agentName.toLowerCase(), () =>
-    writable
-      ? ctx.dispatchLock.write(() => runAgent(ctx, ap, task))
-      : ctx.dispatchLock.read(() => runAgent(ctx, ap, task)),
-  );
-}
-
 /** Run a single subagent to completion. Safe to call concurrently for distinct
  *  AgentProc instances (ephemeral clones or different team members). Callers
- *  are responsible for locking (see `dispatch` / `dispatchMany`). */
+ *  are responsible for locking (see `dispatchTasks`). */
 export async function runAgent(
   ctx: AgentTeamContext,
   ap: AgentProc,
@@ -515,10 +537,7 @@ export async function runAgent(
   ctx.invalidate();
 
   const t0 = Date.now();
-  ap.timer = setInterval(() => {
-    ap.elapsed = Date.now() - t0;
-    ctx.invalidate();
-  }, 500);
+  startElapsedTicker(ctx, ap, t0);
 
   // ── Activity-based timeout ──
   // Resets on every RPC event (streaming, tool calls, responses, etc.)
@@ -544,7 +563,6 @@ export async function runAgent(
   const cmdPayload = { type: "prompt", message: task };
   const failDispatch = (msg: string): { output: string; code: number; elapsed: number } => {
     clearTimers(ap);
-    ap.timer = undefined;
     ap.resetPongTimeout = undefined;
     ap.resolveDispatch = null;
     ap.status = "error";
@@ -627,8 +645,8 @@ interface CloneSpec {
 }
 
 /** Run clone subprocesses through a worker pool (at most `max` concurrent),
- *  with abort handling and per-task result capture. Shared by dispatchMany
- *  and dispatchAgentMany so the two batch paths can't drift apart. Tasks
+ *  with abort handling and per-task result capture. `max = 1` makes the pool
+ *  strictly sequential in `specs` order (the serialized dispatch path). Tasks
  *  still queued when an abort arrives are marked Aborted instead of
  *  spawning new work. */
 async function runClonePool(
@@ -675,68 +693,40 @@ async function runClonePool(
   }
 }
 
-/** Run many read-only agents concurrently (capped at `maxParallel`), each in
- *  its own subprocess. Returns aggregated per-task results. */
-export async function dispatchMany(
+/** Dispatch a batch of {agent, task} pairs, each in its own isolated clone
+ *  subprocess. A single-task call is just a one-element batch.
+ *
+ *  Concurrency is driven by the `parallelDispatch` setting plus whether any
+ *  task targets a writable (file-mutating) agent:
+ *    - parallel ON and every task read-only → up to `maxParallel` clones run
+ *      at once under the shared read lock, so independent batches overlap.
+ *    - parallel OFF, or any writable task → one task at a time, in the
+ *      caller's order, under the exclusive write lock. The write lock also
+ *      serializes concurrent dispatch calls issued in the same turn.
+ *  Writes are therefore NEVER parallel, regardless of the setting. */
+export async function dispatchTasks(
   ctx: AgentTeamContext,
   tasks: Array<{ agent: string; task: string }>,
   signal?: AbortSignal,
 ): Promise<BatchDispatchResult> {
-  // Validate: every task must resolve to a known, READ-ONLY agent. Writable
-  // agents are rejected wholesale — they must go through dispatch_agent and
-  // are always serialized, never parallel.
   const specs: CloneSpec[] = [];
+  let anyWritable = false;
   for (const t of tasks) {
     const r = resolveAgent(ctx, t.agent);
     if ("error" in r) return { ok: false, error: r.error, results: [] };
-    if (isWritable(r.ap.def, ctx.destructiveTools)) {
-      return {
-        ok: false,
-        error: `Agent "${t.agent}" can write/edit files and must be dispatched via dispatch_agent (single, serialized) — never inside dispatch_agents. Move it out of the batch.`,
-        results: [],
-      };
-    }
+    if (isWritable(r.ap.def, ctx.destructiveTools)) anyWritable = true;
     specs.push({ agent: t.agent, task: t.task, def: r.ap.def, model: r.ap.model, teamModel: r.ap.teamModel });
   }
 
   if (signal?.aborted) return { ok: false, error: "Aborted", results: [] };
 
-  const max = Math.max(1, Math.min(ctx.maxParallel || 5, specs.length));
-  // All read-only → run under the shared read lock so they stay exclusive
-  // against any in-flight writable (write-locked) dispatch.
-  return ctx.dispatchLock.read(async () => {
-    if (signal?.aborted) return { ok: false, error: "Aborted", results: [] };
-    return { ok: true, results: await runClonePool(ctx, specs, max, signal) };
-  });
-}
-
-/** Run the SAME agent across many tasks, each in its own isolated clone
- *  subprocess (never the shared team-member AgentProc). Read-only agents run
- *  concurrently (capped at maxParallel, or 1 when parallel dispatch is off);
- *  writable agents (edit/write) are always serialized under the write lock. */
-export async function dispatchAgentMany(
-  ctx: AgentTeamContext,
-  agentName: string,
-  tasks: string[],
-  signal?: AbortSignal,
-): Promise<BatchDispatchResult> {
-  const r = resolveAgent(ctx, agentName);
-  if ("error" in r) return { ok: false, error: r.error, results: [] };
-  const ap = r.ap;
-  const writable = isWritable(ap.def, ctx.destructiveTools);
-
-  if (signal?.aborted) return { ok: false, error: "Aborted", results: [] };
-
-  const specs: CloneSpec[] = tasks.map(task => ({ agent: agentName, task, def: ap.def, model: ap.model, teamModel: ap.teamModel }));
-  // Writable agents — or parallel dispatch turned off — run one clone at a time.
-  const max = writable || !ctx.parallelDispatch ? 1 : Math.max(1, Math.min(ctx.maxParallel || 5, tasks.length));
+  const parallel = ctx.parallelDispatch && !anyWritable;
+  const max = parallel ? Math.max(1, Math.min(ctx.maxParallel || 5, specs.length)) : 1;
   const run = async (): Promise<BatchDispatchResult> => {
     if (signal?.aborted) return { ok: false, error: "Aborted", results: [] };
     return { ok: true, results: await runClonePool(ctx, specs, max, signal) };
   };
-  // Writable agents take the exclusive write lock so file mutations never
-  // run alongside any other dispatch; read-only agents share the read lock.
-  return writable ? ctx.dispatchLock.write(run) : ctx.dispatchLock.read(run);
+  return parallel ? ctx.dispatchLock.read(run) : ctx.dispatchLock.write(run);
 }
 
 export async function activateTeam(ctx: AgentTeamContext, name: string) {
@@ -920,7 +910,9 @@ export class ProcessManager {
     const args = [
       "--mode", "rpc",
       "-p",
-      ...buildExtensionCliArgs(extPaths),
+      // Route extensions to this child's tools/provider so a dispatch doesn't
+      // pay for modules its agent can never call.
+      ...buildExtensionCliArgs(extPaths, { tools: ap.def.tools, provider }),
       ...skillFlags,
       ...(provider ? ["--provider", provider] : []),
       "--model", modelName,
@@ -935,6 +927,11 @@ export class ProcessManager {
     const sub = spawnRpcSubprocess({
       bin,
       args,
+      // PI_SUBAGENT marks the child as a spawned worker: extensions that gate
+      // host-only work (e.g. pi-scope's boot probes and completion flush) skip
+      // it. Cheap for children, and it keeps the orchestrator's own behaviour
+      // untouched.
+      env: { ...process.env, PI_SUBAGENT: "1" },
       logger: ctx.logger,
       owner: ap,
       onStderr: (line) => {

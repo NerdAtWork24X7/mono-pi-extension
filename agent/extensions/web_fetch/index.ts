@@ -11,6 +11,7 @@ import {
 	type Update,
 } from "./runner";
 import { SEARCH_ENGINES, selectSources, toKeywords, type SerpRecord } from "./search";
+import { cacheKey, createFetchDedupe, entryUsableFor, readCachedPage, type CacheEntry } from "./cache";
 
 // Floor for the per-source markdown cap when the search budget is split wide.
 const MIN_SOURCE_CHARS = 4_000;
@@ -52,7 +53,8 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Fetch web pages as Markdown via a persistent headless browser (one shared session across calls), or search with 'query'/'queries'. " +
 			"Search extracts your keywords, queries DuckDuckGo, and fetches the top 'maxResults' results (ad slots and duplicate URLs dropped, titles/snippets/sources returned). " +
-			"Pass 'urls' (array) and/or 'queries' (array) to batch many fetches/searches in ONE tool call — everything is crawled in parallel in the same browser session. Singular 'url'/'query' still work.",
+			"Pass 'urls' (array) and/or 'queries' (array) to batch many fetches/searches in ONE tool call — everything is crawled in parallel in the same browser session. Singular 'url'/'query' still work. " +
+			"Pages are cached per project: a URL another agent already fetched is reused instead of crawled again, so parallel agents asking for the same page only pay for it once.",
 		parameters: Type.Object({
 			url: Type.Optional(Type.String({ description: "A single URL to fetch (omit if using query/queries)", default: "" })),
 			urls: Type.Optional(Type.Array(Type.String({ description: "Multiple URLs to fetch in one batch (parallel, shared session)", default: [] }))),
@@ -118,27 +120,85 @@ export default function (pi: ExtensionAPI) {
 				return k;
 			};
 
+			// ── Cross-agent dedupe ──────────────────────────────────────────────
+			// Parallel dispatch runs every subagent in its OWN pi process, so an
+			// in-memory map cannot stop two agents crawling the same URL. This
+			// coordinates through .pi/web-fetch-cache: the first agent to reach a
+			// URL crawls it and publishes the page; the others wait for that page
+			// instead of launching a second (expensive) browser session for it.
+			const dedupe = createFetchDedupe();
+			const fromCache = new Set<number>(); // targets answered without a crawl
+			// SERP pages are query-specific and volatile — only real pages are reused.
+			const cacheable = (t: Target) => t.extract !== "serp" && !t.light;
+			const usableFor = entryUsableFor;
+			const cachedResult = (entry: CacheEntry): JobResult => ({ ok: true, text: entry.text, error: "" });
+
 			// Crawl every not-yet-fetched target as ONE batch on the warm runner
 			// (single Chromium, parallel tabs, shared session).
 			const fetchMissing = async () => {
 				const need = targets.filter((t) => !results.has(t.key));
 				if (need.length === 0) return;
-				const jobs: Job[] = need.map((t) => ({ key: t.key, url: t.url, raw: t.raw, light: t.light, max: t.max, extract: t.extract }));
+				const toCrawl: Target[] = [];
+				const claimed = new Map<number, string>(); // target key -> cache key we own
+				const mine = new Set<string>(); // cache keys this call is crawling
+				const waiting: Array<Promise<{ t: Target; entry: CacheEntry | null }>> = [];
+
+				for (const t of need) {
+					if (!cacheable(t)) { toCrawl.push(t); continue; }
+					const ck = cacheKey(t.url, t.raw);
+					const hit = readCachedPage(ck);
+					if (hit && usableFor(hit, t.max)) {
+						results.set(t.key, cachedResult(hit));
+						fromCache.add(t.key);
+						continue;
+					}
+					// Two link forms of one page land on the same key; never wait on the
+					// lock this same call is holding.
+					if (mine.has(ck)) { toCrawl.push(t); continue; }
+					if (dedupe.claim(ck) === "mine") { mine.add(ck); claimed.set(t.key, ck); toCrawl.push(t); continue; }
+					// Another agent is crawling this URL right now — wait for its page.
+					waiting.push(dedupe.settle(ck, signal).then((entry) => ({ t, entry })));
+				}
+				for (const { t, entry } of await Promise.all(waiting)) {
+					if (entry && usableFor(entry, t.max)) {
+						results.set(t.key, cachedResult(entry));
+						fromCache.add(t.key);
+					} else {
+						// Holder died, overran the wait budget, or has less text than we
+						// need — crawl it ourselves rather than report a stub page. Take
+						// the lock if it is free so our page gets published; if a live
+						// holder still owns it, crawl without publishing so we never
+						// clobber the page it is about to store.
+						const ck = cacheKey(t.url, t.raw);
+						if (!mine.has(ck) && dedupe.claim(ck) === "mine") { mine.add(ck); claimed.set(t.key, ck); }
+						toCrawl.push(t);
+					}
+				}
+				if (toCrawl.length === 0) return;
+
+				const jobs: Job[] = toCrawl.map((t) => ({ key: t.key, url: t.url, raw: t.raw, light: t.light, max: t.max, extract: t.extract }));
 				try {
 					const got = await runBatch(jobs, signal, onUpdate);
-					for (const t of need) {
+					for (const t of toCrawl) {
 						const r = got.get(t.key);
+						const ck = claimed.get(t.key);
 						if (r && (r.ok || r.text || r.results)) {
 							results.set(t.key, r);
+							// Publish the page so agents waiting on this URL can reuse it.
+							if (ck && r.ok && r.text) dedupe.store(ck, { url: t.url, fetchedAt: Date.now(), max: t.max, text: r.text });
+							else if (ck) dedupe.release(ck);
 						} else {
 							results.set(t.key, { ok: false, text: "", error: r?.error ?? "no result from crawler", blocked: r?.blocked, status: r?.status });
+							if (ck) dedupe.release(ck); // nothing to share — let peers through
 						}
 					}
 				} catch (e) {
-					// Batch-level failure (timeout/abort/crash): record the reason on
-					// every pending target so sections can show it, then rethrow.
+					// Batch-level failure (timeout/abort/crash): release the locks so
+					// peers don't wait on us, record the reason on every pending
+					// target so sections can show it, then rethrow.
+					for (const ck of claimed.values()) dedupe.release(ck);
 					const msg = e instanceof Error ? e.message : "batch failed";
-					for (const t of need) results.set(t.key, { ok: false, text: "", error: msg });
+					for (const t of toCrawl) results.set(t.key, { ok: false, text: "", error: msg });
 					throw e;
 				}
 			};
@@ -256,6 +316,7 @@ export default function (pi: ExtensionAPI) {
 						continue;
 					}
 					if (r && r.ok && r.text) {
+						if (fromCache.has(k)) body.push(`\n_Not re-crawled: served from the shared web-fetch cache (another agent already fetched this page)._`);
 						body.push(`\n${r.text}`);
 						count(k, true);
 						rendered.set(k, { query: o.query, n });
@@ -275,6 +336,7 @@ export default function (pi: ExtensionAPI) {
 				const r = results.get(byUrl.get(u)!);
 				const body: string[] = [];
 				if (r && r.ok && r.text) {
+					if (fromCache.has(byUrl.get(u)!)) body.push(`_Not re-crawled: served from the shared web-fetch cache (another agent already fetched this page)._\n`);
 					body.push(r.text);
 					count(byUrl.get(u)!, true);
 				} else {
@@ -288,6 +350,7 @@ export default function (pi: ExtensionAPI) {
 				return errRes(`Error: nothing to fetch (${badUrls.length ? `invalid URLs: ${badUrls.join(", ")}` : "no usable inputs"}).`);
 			}
 			if (searchDetails.length) details.search = searchDetails;
+			if (fromCache.size) details.cacheHits = fromCache.size;
 			return { content: [{ type: "text", text: sections.join("\n\n---\n\n") }], details };
 		},
 	});
