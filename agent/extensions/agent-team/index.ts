@@ -27,7 +27,7 @@ import { join } from "path";
 
 import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, BatchDispatchResult, AgentMode } from "./core";
 import { displayName, shortModel, SessionLogger, RwLock, filterSkills } from "./core";
-import { loadPersistedConfig, savePersistedConfig, scanAgents, loadTeamsYaml, discoverEnabledSkills, loadAgentMd, teamsYamlPath, persistTeams } from "./config";
+import { loadPersistedConfig, savePersistedConfig, scanAgents, loadTeamsYaml, discoverEnabledSkills, loadAgentMd, teamsYamlPath, persistTeams, seedProjectTeamsYaml, seedProjectConfig } from "./config";
 import { scanExtensionPaths, refreshExtensionSettings, extensionSettingsSignature, orchestratorHiddenTools } from "./extensions";
 import { ProcessManager, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchTasks as dispatchTasksImpl } from "./orchestration";
 import { MemoryManager, createMemoryManager, extractLastAssistantText, installMemoryEscEditor, memoryFiles } from "./memory";
@@ -120,6 +120,11 @@ export class AgentTeam implements AgentTeamContext {
 
   constructor(pi: ExtensionAPI) {
     this.pi = pi;
+    // Materialize the project-scoped agent-team-config.json from the global
+    // default (verbatim copy) before the first read, so the project file
+    // exists for every later read — the config watcher and savePersistedConfig
+    // included — instead of silently reading through to the global file.
+    seedProjectConfig();
     this.saved = loadPersistedConfig();
     this.gridCols = this.saved.gridCols ?? 2;
     this.enabled = this.saved.enabled ?? true;
@@ -368,6 +373,12 @@ export class AgentTeam implements AgentTeamContext {
     this.appliedExtSettingsSig = extensionSettingsSignature(this.cachedExtPaths);
     this.skillsCache = discoverEnabledSkills();
     this.agentMdCache = loadAgentMd(cwd);
+
+    // Materialize the project-scoped teams.yaml from the global default on
+    // first load (verbatim copy, comments included). Without this the project
+    // file never appears and every session reads through to the global file,
+    // so project edits and the global default can never diverge cleanly.
+    seedProjectTeamsYaml();
 
     const parsed = loadTeamsYaml(teamsYamlPath());
     this.teams = parsed.teams;

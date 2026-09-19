@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, existsSync, writeFileSync, statSync, mkdirSync } from "fs";
+import { readFileSync, readdirSync, existsSync, writeFileSync, statSync, mkdirSync, copyFileSync } from "fs";
 import { dirname, join } from "path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { scanDirs } from "./core";
@@ -143,6 +143,11 @@ function projectTeamsYamlPath(): string {
   return projectSettingsPath(join("agents", "teams.yaml"));
 }
 
+/** Global default team definitions shipped in the agent dir. */
+function globalTeamsYamlPath(): string {
+  return join(getAgentDir(), "agents", "teams.yaml");
+}
+
 /** Read path for the team definitions file (teams.yaml): project-local
  *  <cwd>/.pi/settings/agents/teams.yaml when present, otherwise the global
  *  agent-dir copy. Single source for the path — it was previously rebuilt
@@ -150,13 +155,33 @@ function projectTeamsYamlPath(): string {
 export function teamsYamlPath(): string {
   const p = projectTeamsYamlPath();
   if (existsSync(p)) return p;
-  return join(getAgentDir(), "agents", "teams.yaml");
+  return globalTeamsYamlPath();
 }
 
 /** Write path for teams.yaml — always project-local so toggles persist
  *  per project instead of mutating the global config. */
 function teamsYamlWritePath(): string {
   return projectTeamsYamlPath();
+}
+
+/** Materialize the project-local teams.yaml by copying the global default
+ *  verbatim when the project file is absent. A byte-for-byte copy preserves
+ *  comments, ordering, and keys the parser ignores, which re-serializing
+ *  would drop. Returns true only when a copy was performed; no-op when the
+ *  project file already exists, no global default exists, or the copy fails
+ *  (the caller then reads through to the global file as before). */
+export function seedProjectTeamsYaml(): boolean {
+  const dest = projectTeamsYamlPath();
+  if (existsSync(dest)) return false;
+  const src = globalTeamsYamlPath();
+  if (!existsSync(src)) return false;
+  try {
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(src, dest);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Resolve a skill short name to an absolute SKILL.md path.
@@ -413,11 +438,36 @@ export function updateTeamsYaml(mutate: (parsed: ParsedTeams) => void): void {
 
 export const CONFIG_FILE = "agent-team-config.json";
 
+/** Global default agent-team config shipped in the agent dir. */
+function globalConfigPath(): string {
+  return join(getAgentDir(), CONFIG_FILE);
+}
+
+/** Materialize the project-local agent-team-config.json by copying the global
+ *  default verbatim when the project file is absent. Mirrors
+ *  seedProjectTeamsYaml: a byte-for-byte copy keeps formatting and unknown keys
+ *  intact. No-op (returns false) when the project file exists, no global
+ *  default exists, or the copy fails — callers then read through to the global
+ *  file exactly as before. */
+export function seedProjectConfig(): boolean {
+  const dest = projectSettingsPath(CONFIG_FILE);
+  if (existsSync(dest)) return false;
+  const src = globalConfigPath();
+  if (!existsSync(src)) return false;
+  try {
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(src, dest);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Load persisted config: project-local <cwd>/.pi/settings/agent-team-config.json
  *  when present, otherwise the global agent-dir copy. */
 export function loadPersistedConfig(): Partial<TeamConfig> {
   const p = projectSettingsPath(CONFIG_FILE);
-  const file = existsSync(p) ? p : join(getAgentDir(), CONFIG_FILE);
+  const file = existsSync(p) ? p : globalConfigPath();
   if (!existsSync(file)) return {};
   try { return JSON.parse(readFileSync(file, "utf-8")); } catch { return {}; }
 }
