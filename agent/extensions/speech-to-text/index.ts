@@ -33,6 +33,10 @@
  *
  * Setup:  export GROQ_API_KEY=gsk_...      (https://console.groq.com/keys)
  *
+ * The clip is written to `<cwd>/.pi/stt/` (falling back to the OS temp dir if
+ * that tree can't be created) and deleted right after transcription — set
+ * `keepAudio` to keep it, e.g. while tuning the recorder.
+ *
  * Optional overrides, either via environment or a JSON config file
  * (`<agentDir>/speech-to-text.json`, overridden by `.pi/speech-to-text.json`):
  *
@@ -54,7 +58,7 @@
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Key, isKeyRelease, isKeyRepeat, matchesKey, parseKey } from "@mariozechner/pi-tui";
-import { rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DEFAULT_MODEL, globalConfigPath, loadConfig, projectConfigPath, type SttConfig } from "./config";
@@ -67,6 +71,9 @@ type Phase = "idle" | "recording" | "transcribing";
 type NotifyType = "info" | "warning" | "error";
 
 const LISTEN_KEY = Key.alt("t");
+
+/** Session-local scratch directory for in-flight clips. */
+const AUDIO_DIR = join(".pi", "stt");
 
 /** Last-resort guard so a transcript can never blow past the editor. */
 const MAX_TRANSCRIPT_CHARS = 4000;
@@ -137,8 +144,22 @@ class SpeechToText {
 	/** Last ctx seen, reused for notifications that fire after a handler returns. */
 	ctx: any = null;
 
-	constructor(cwd: string) {
+	constructor(private readonly cwd: string) {
 		this.cfg = loadConfig(cwd);
+	}
+
+	/** Where clips are written: `<cwd>/.pi/stt`, created on demand with
+	 *  owner-only permissions (a dictation clip is as private as typed text).
+	 *  Falls back to the OS temp dir if that tree can't be created — a
+	 *  read-only or sandboxed cwd must not break recording. */
+	private audioDir(): string {
+		const dir = join(this.cwd, AUDIO_DIR);
+		try {
+			mkdirSync(dir, { recursive: true, mode: 0o700 });
+			return dir;
+		} catch {
+			return tmpdir();
+		}
 	}
 
 	// ── Raw terminal input (press / repeat / release) ───────────────────
@@ -217,7 +238,7 @@ class SpeechToText {
 			return;
 		}
 
-		const file = join(tmpdir(), `pi-stt-${process.pid}-${Date.now()}.wav`);
+		const file = join(this.audioDir(), `pi-stt-${process.pid}-${Date.now()}.wav`);
 		let handle: RecorderHandle;
 		try {
 			handle = startRecorder(this.cfg, file);
