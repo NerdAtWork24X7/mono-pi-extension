@@ -10,9 +10,11 @@
 
 import { Type } from "@mariozechner/pi-ai";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { mkdirSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { homedir, tmpdir } from "os";
+import { createRequire } from "module";
+import { pathToFileURL } from "url";
 
 // ── Browser singleton (per-process) ──────────────────────────────────
 
@@ -21,6 +23,7 @@ let context: any = null;
 let page: any = null;
 const pages = new Map<string, any>();
 let activePageId = "main";
+let headlessFallback = false;
 let playwrightExtra: any = null;
 
 const SCREENSHOT_DIR = join(tmpdir(), "pi-browser-screenshots");
@@ -245,19 +248,108 @@ function readCookieFile(): BrowserCookie[] {
   return parseCookieFile(raw);
 }
 
+/**
+ * Resolve a bare specifier against a filesystem root (walks up node_modules).
+ * pi loads this file from ~/.pi/agent/extensions/browser.ts, which has no
+ * node_modules of its own, so Node's ESM resolver (relative to the *importing
+ * file*) fails even though the packages are installed in the project. Retrying
+ * from process.cwd() bridges that gap.
+ */
+function resolveDepFrom(spec: string, root: string): string | null {
+  try {
+    return createRequire(join(root, "__resolve_dep__.js")).resolve(spec);
+  } catch {
+    return null;
+  }
+}
+
+/** Roots to try, in order: explicit override, cwd, home. */
+function depRoots(): string[] {
+  return [process.env.PI_BROWSER_MODULE_ROOT, process.cwd(), homedir()].filter(
+    (r): r is string => !!r
+  );
+}
+
+/** Import a dependency, falling back to on-disk resolution from other roots. */
+async function importDep(spec: string): Promise<any> {
+  try {
+    return await import(spec);
+  } catch (primary: unknown) {
+    for (const root of depRoots()) {
+      const abs = resolveDepFrom(spec, root);
+      if (!abs) continue;
+      const mod = await import(pathToFileURL(abs).href);
+      return mod;
+    }
+    const code = (primary as NodeJS.ErrnoException)?.code ?? String(primary);
+    throw new Error(
+      `${spec} could not be loaded (${code}). Searched node_modules upward from: ` +
+      `${depRoots().join(", ")}. Install it with: npm i playwright playwright-extra ` +
+      `puppeteer-extra-plugin-stealth (or set PI_BROWSER_MODULE_ROOT to the folder ` +
+      `containing its node_modules).`
+    );
+  }
+}
+
+/** CJS/ESM interop: prefer the named export when asked for, else default. */
+function interop(mod: any, namedExport?: string): any {
+  return namedExport && mod?.[namedExport] ? mod : mod?.default ?? mod;
+}
+
+/**
+ * Locate the Chromium binary inside PLAYWRIGHT_BROWSERS_PATH (default
+ * $HOME/playwright-browsers). Prefers the revision this playwright build wants
+ * (read from its own browsers.json), else the newest installed one. Returns
+ * null when nothing is installed, so the caller can fall back to playwright's
+ * own registry lookup.
+ */
+function resolveChromiumExecutable(): string | null {
+  const root = process.env.PLAYWRIGHT_BROWSERS_PATH || join(homedir(), "playwright-browsers");
+  if (!existsSync(root)) return null;
+
+  const exeOf = (dir: string) => {
+    for (const rel of ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-mac/Chromium.app/Contents/MacOS/Chromium"]) {
+      const p = join(root, dir, rel);
+      if (existsSync(p)) return p;
+    }
+    return null;
+  };
+
+  // 1. exact revision this playwright-core expects
+  const browsersJson = resolveDepFrom("playwright-core/browsers.json", process.cwd());
+  if (browsersJson) {
+    try {
+      const spec = JSON.parse(readFileSync(browsersJson, "utf8"));
+      const rev = spec.browsers?.find((b: any) => b.name === "chromium")?.revision;
+      if (rev) {
+        const exact = exeOf(`chromium-${rev}`);
+        if (exact) return exact;
+      }
+    } catch {
+      // browsers.json unreadable — fall through to newest-revision scan
+    }
+  }
+
+  // 2. newest chromium-<rev> present in the browsers path
+  const revs = readdirSync(root)
+    .map((d) => /^chromium-(\d+)$/.exec(d))
+    .filter((m): m is RegExpExecArray => !!m)
+    .map((m) => Number(m[1]))
+    .sort((a, b) => b - a);
+  for (const rev of revs) {
+    const exe = exeOf(`chromium-${rev}`);
+    if (exe) return exe;
+  }
+  return null;
+}
+
 async function getPw() {
   if (!playwrightExtra) {
-    try {
-      const pwExtra = await import("playwright-extra");
-      const stealthMod = await import("puppeteer-extra-plugin-stealth");
-      const stealth = (stealthMod as any).default();
-      pwExtra.chromium.use(stealth);
-      playwrightExtra = pwExtra;
-    } catch (e: unknown) {
-      throw new Error(
-        "playwright-extra not installed. Run: npm i playwright-extra puppeteer-extra-plugin-stealth"
-      );
-    }
+    const pwExtra = interop(await importDep("playwright-extra"), "chromium");
+    const stealthMod = interop(await importDep("puppeteer-extra-plugin-stealth"));
+    const stealth = (stealthMod as any)();
+    pwExtra.chromium.use(stealth);
+    playwrightExtra = pwExtra;
   }
   return playwrightExtra;
 }
@@ -278,6 +370,46 @@ function err(msg: string) {
 /** Add human-like jitter to a value (±5-15%) */
 function jitter(value: number, pct = 0.1): number {
   return value + value * (Math.random() * pct * 2 - pct);
+}
+
+const TEARDOWN_NOISE = /target (page, context or browser|page|closed)|browser has been closed|protocol error|session closed/i;
+
+/**
+ * Close the browser and reset state.
+ *
+ * playwright-extra runs each stealth evasion's page.addInitScript as a
+ * fire-and-forget promise. Closing right after launch (or on SIGTERM while a
+ * subagent is still setting up pages) rejects those promises *after* the
+ * browser is gone, and an unhandled rejection kills the whole pi subagent
+ * process — the tool call itself was fine. So a narrow guard is installed for
+ * the duration of teardown only: teardown-shaped rejections are swallowed,
+ * anything else is logged and left to crash as it would have anyway.
+ */
+async function shutdownBrowser(): Promise<void> {
+  const b = browser;
+  // Reset state first so a concurrent/early exit hook sees a clean slate.
+  browser = null;
+  context = null;
+  page = null;
+  pages.clear();
+  headlessFallback = false;
+
+  const guard = (reason: unknown) => {
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    if (!TEARDOWN_NOISE.test(msg)) {
+      console.error("[browser] unhandled rejection during teardown:", reason);
+    }
+  };
+  process.on("unhandledRejection", guard);
+  try {
+    if (b) await b.close();
+  } catch {
+    // close error ignored, state already reset
+  } finally {
+    // Give the late rejections a tick to surface while the guard is attached.
+    await new Promise((r) => setTimeout(r, 150));
+    process.off("unhandledRejection", guard);
+  }
 }
 
 // ── Extension entry ──────────────────────────────────────────────────
@@ -318,31 +450,50 @@ export default function (pi: ExtensionAPI) {
             } catch (e: unknown) {
               return err(`Failed to parse cookie file ${COOKIE_FILE}: ${e instanceof Error ? e.message : String(e)}. Fix or remove the file, then relaunch.`);
             }
-            if (browser) return ok("Browser already running.");
-
             const browserType = p.browserType ?? "chromium";
-
+            // Validate before the already-running short-circuit, otherwise a typo
+            // silently reports "Browser already running." forever.
             const pw = await getPw();
             const launcher = (pw as any)[browserType];
             if (!launcher) return err(`Unknown browser: ${browserType}. Use chromium, firefox, or webkit.`);
+            if (browser) return ok(`Browser already running (${browserType}).`);
 
             const vp = p.viewport || randomViewport();
 
-            // Launch with stealth args. Prefer the real installed Chrome binary
-            // over Playwright's bundled Chromium when available — some detectors
-            // fingerprint the bundled-Chromium binary itself (missing Widevine,
-            // different codec support, etc.) regardless of JS-level patches.
+            // Launch with stealth args. The binary comes from PLAYWRIGHT_BROWSERS_PATH
+            // (see resolveChromiumExecutable). headless:false is tried first so
+            // window.chrome, plugins and WebGL behave like a real desktop
+            // Chrome; it silently degrades to headless when no DISPLAY exists.
             const launchOpts: any = {
               headless: false,
               args: browserType === "chromium" ? STEALTH_ARGS : undefined,
             };
-            if (browserType === "chromium") launchOpts.channel = "chrome";
+            if (browserType === "chromium") {
+              // Pin the binary explicitly to PLAYWRIGHT_BROWSERS_PATH
+              // ($HOME/playwright-browsers) instead of asking playwright to look
+              // up its registry: the env var may not reach a spawned subagent,
+              // and the newest revision there (e.g. chromium-1243) differs from
+              // the one this playwright build expects (1234) — asking for a
+              // missing revision fails with an opaque "Executable doesn't exist".
+              const exe = resolveChromiumExecutable();
+              if (exe) launchOpts.executablePath = exe;
+            }
             try {
               browser = await launcher.launch(launchOpts);
-            } catch {
-              // Fall back to bundled Chromium if "chrome" channel isn't installed
-              delete launchOpts.channel;
-              browser = await launcher.launch(launchOpts);
+            } catch (e: unknown) {
+              const msg = e instanceof Error ? e.message : String(e);
+              // Retry headless: a subagent may run without DISPLAY (no X/Wayland),
+              // which makes headless:false fail even though the binary is fine.
+              if (/display|X server|missing X|Headless/i.test(msg) || !process.env.DISPLAY) {
+                try {
+                  browser = await launcher.launch({ ...launchOpts, headless: true });
+                  headlessFallback = true;
+                } catch {
+                  throw new Error(`Chromium launch failed: ${msg}`);
+                }
+              } else {
+                throw new Error(`Chromium launch failed: ${msg}`);
+              }
             }
 
             // Derive UA / Client-Hints from the *actual* launched browser version
@@ -351,7 +502,18 @@ export default function (pi: ExtensionAPI) {
             // highest-signal bot tells for detectors like FingerprintJS/Cloudflare.
             const fullVersion: string = browser.version?.() ?? "124.0.6367.60";
             const majorVersion = fullVersion.split(".")[0];
+
+            // Platform must match the persona the stealth plugin advertises in JS
+            // (user-agent-override masks the Linux host as Windows), otherwise
+            // navigator.userAgent and the HTTP headers disagree — a split far
+            // more detectable than either value alone.
             const userAgent = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${fullVersion} Safari/537.36`;
+            // Client-Hints brands must match the binary: the pinned
+            // $PLAYWRIGHT_BROWSERS_PATH build is Chromium, which never sends a
+            // "Google Chrome" brand — only the real chrome channel does.
+            const brands = launchOpts.executablePath
+              ? `"Chromium";v="${majorVersion}", "Not-A.Brand";v="99"`
+              : `"Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}", "Not-A.Brand";v="99"`;
 
             // Create context with realistic fingerprint
             context = await browser.newContext({
@@ -372,7 +534,7 @@ export default function (pi: ExtensionAPI) {
               extraHTTPHeaders: {
                 "Accept-Language": "en-US,en;q=0.9",
                 "Accept-Encoding": "gzip, deflate, br",
-                "sec-ch-ua": `"Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}", "Not-A.Brand";v="99"`,
+                "sec-ch-ua": brands,
                 "sec-ch-ua-mobile": "?0",
                 "sec-ch-ua-platform": '"Windows"',
               },
@@ -390,7 +552,8 @@ export default function (pi: ExtensionAPI) {
             activePageId = "main";
 
             return ok(
-              `Stealth browser launched (${browserType}, headless=false, viewport=${vp.width}x${vp.height}).` +
+              `Stealth browser launched (${browserType}, headless=${headlessFallback}, viewport=${vp.width}x${vp.height}).` +
+              (launchOpts.executablePath ? ` Binary: ${launchOpts.executablePath}.` : "") +
               (cookies.length > 0 ? ` Loaded ${cookies.length} cookies from ${COOKIE_FILE}.` : "")
             );
           }
@@ -476,18 +639,7 @@ export default function (pi: ExtensionAPI) {
             return ok(`New page opened: ${pageId}`);
           }
           case "close": {
-            try {
-              if (browser) {
-                await browser.close();
-              }
-            } catch {
-              // close error ignored, still reset state
-            } finally {
-              browser = null;
-              context = null;
-              page = null;
-              pages.clear();
-            }
+            await shutdownBrowser();
             return ok("Browser closed.");
           }
           default:
@@ -505,7 +657,7 @@ export default function (pi: ExtensionAPI) {
     if (browser) browser.close().catch(() => { });
   });
   process.on("SIGTERM", async () => {
-    if (browser) await browser.close().catch(() => { });
+    await shutdownBrowser();
     process.exit(0);
   });
 }
