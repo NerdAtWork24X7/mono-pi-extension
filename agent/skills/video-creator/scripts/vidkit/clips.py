@@ -11,6 +11,7 @@ Generated scenes are captured by ONE shared Chromium and streamed into FFmpeg as
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
 
 from . import capture
@@ -63,6 +64,35 @@ def _tail(stderr: bytes) -> str:
     return stderr.decode("utf-8", "replace").strip()[-400:] or "ffmpeg failed"
 
 
+@contextlib.asynccontextmanager
+async def _frames_to_ffmpeg(job: dict):
+    """Run ffmpeg and yield its `write(bytes)` for MJPEG frames on stdin.
+
+    Shared by generated scenes and `browse` shots (both feed `kind="html"` frames); a failure while
+    streaming, or a non-zero exit, is raised with ffmpeg's stderr tail, and the process is never
+    left running.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        *ffmpeg_args(dict(job, kind="html")), stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+    async def write(data: bytes) -> None:
+        proc.stdin.write(data)
+        await proc.stdin.drain()
+
+    try:
+        yield write
+        proc.stdin.close()
+        await proc.stdin.wait_closed()
+        stderr = await proc.stderr.read()
+        if await proc.wait():
+            raise RuntimeError(_tail(stderr))
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
+
+
 async def render_media_shot(job: dict) -> None:
     """Image/video asset -> clip (FFmpeg only; the asset is read directly)."""
     proc = await asyncio.create_subprocess_exec(
@@ -75,33 +105,15 @@ async def render_media_shot(job: dict) -> None:
 async def render_html_shot(browser, job: dict) -> None:
     """Generated scene -> clip: seek one page per frame, stream JPEGs into FFmpeg's stdin."""
     frames, fps = int(job["frames"]), int(job["fps"])
-    width, height = int(job["w"]), int(job["h"])
-    proc = await asyncio.create_subprocess_exec(
-        *ffmpeg_args(job), stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    try:
-        context = await browser.new_context(viewport={"width": width, "height": height},
-                                            device_scale_factor=1, locale="en-US", timezone_id="UTC")
+    async with _frames_to_ffmpeg(job) as write:
+        context = await capture.new_context(browser, job["w"], job["h"])
         try:
             page = await context.new_page()
             await page.goto(capture.page_url(job["html"]), wait_until="load")
             await page.evaluate(capture.READY_JS)
-
-            async def write(data: bytes) -> None:
-                proc.stdin.write(data)
-                await proc.stdin.drain()
-
             await capture.stream_frames(page, frames, fps, write)
-            proc.stdin.close()
-            await proc.stdin.wait_closed()
-            stderr = await proc.stderr.read()
-            if await proc.wait():
-                raise RuntimeError(_tail(stderr))
         finally:
             await context.close()
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
 
 
 async def render_browse_shot(browser, job: dict) -> None:
@@ -114,23 +126,14 @@ async def render_browse_shot(browser, job: dict) -> None:
     a dependent action first waits for the pending long ones.
     """
     frames, fps = int(job["frames"]), int(job["fps"])
-    width, height = int(job["w"]), int(job["h"])
-    proc = await asyncio.create_subprocess_exec(
-        *ffmpeg_args(dict(job, kind="html")), stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    try:
-        context = await browser.new_context(viewport={"width": width, "height": height},
-                                            device_scale_factor=1, locale="en-US", timezone_id="UTC")
+    async with _frames_to_ffmpeg(job) as write:
+        context = await capture.new_context(browser, job["w"], job["h"])
         try:
             page = await context.new_page()
             page.set_default_timeout(capture.DEFAULT_ACTION_TIMEOUT_MS)
             schedule = sorted(job["actions"], key=lambda a: a.get("at", 0))
             background: list = []
             nxt = 0
-
-            async def write(data: bytes) -> None:
-                proc.stdin.write(data)
-                await proc.stdin.drain()
 
             for i in range(frames):
                 t_ms = i * 1000.0 / fps
@@ -147,14 +150,5 @@ async def render_browse_shot(browser, job: dict) -> None:
                 await write(await capture.jpeg(page, capture.JPEG_QUALITY))
             for task in background:
                 await task
-            proc.stdin.close()
-            await proc.stdin.wait_closed()
-            stderr = await proc.stderr.read()
-            if await proc.wait():
-                raise RuntimeError(_tail(stderr))
         finally:
             await context.close()
-    finally:
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()

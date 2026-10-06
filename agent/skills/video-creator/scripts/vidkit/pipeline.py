@@ -161,6 +161,27 @@ def design_theme(args, blurb):
             or pick_theme(blurb, format=getattr(args, "format", None)) or "midnight-lime")
 
 
+def brief_blurb(script) -> str:
+    """The one-line request description a palette is designed from (goal + title + style)."""
+    return " ".join(str(v) for v in ((script.get("brief") or {}).get("goal"), script.get("title"),
+                                     script.get("style")) if v)
+
+
+def choose_theme(script, plan, fmt=None):
+    """Resolve a plan's palette: explicit `theme` -> designed from the brief -> curated fallback.
+
+    `check` and `clips` both call this, so validation and render always agree — and a hand-written
+    plan that names no theme gets the same bespoke palette `draft`/`make` would have designed,
+    instead of silently dropping to a curated preset.
+    """
+    explicit = plan.get("theme") or script.get("theme")
+    if explicit:
+        return explicit
+    fmt = fmt or plan.get("format") or (script.get("brief") or {}).get("format")
+    blurb = brief_blurb(script)
+    return palette.best(blurb, format=fmt) or pick_theme(blurb, format=fmt) or "midnight-lime"
+
+
 def parse_features(raw) -> list:
     feats = []
     for item in raw or []:

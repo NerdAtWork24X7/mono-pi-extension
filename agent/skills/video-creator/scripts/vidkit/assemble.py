@@ -13,6 +13,9 @@ from .ffmpeg import has_filter, probe, run
 
 _SENTENCE = re.compile(r"(?<=[.!?。！？])\s+|(?<=[,;:，；：])\s+")
 
+# One caption style for every burned-in path (soft-caption builds ignore it).
+SRT_STYLE = "FontName=DejaVu Sans,Bold=1,FontSize=14,Outline=2,Shadow=0,MarginV=60"
+
 
 def mux_scene(video, audio, out_mp4, *, fps=30, width=1920, height=1080, pad_s=None, total_s=None) -> Path:
     """Mux one recorded scene with its narration, normalized to CFR H.264/AAC."""
@@ -127,7 +130,7 @@ def apply_metadata(in_mp4, meta_txt, out_mp4) -> Path:
 def add_subtitles(in_mp4, srt, out_mp4, *, burn=False) -> Path:
     """Burn captions in (libass) or mux them as a soft mov_text track."""
     if burn and has_filter("subtitles"):
-        run(["-loglevel", "error", "-y", "-i", in_mp4, "-vf", f"subtitles={srt}:force_style='FontName=DejaVu Sans,Bold=1,FontSize=14,Outline=2,Shadow=0,MarginV=60'",
+        run(["-loglevel", "error", "-y", "-i", in_mp4, "-vf", f"subtitles={srt}:force_style='{SRT_STYLE}'",
              "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18", "-c:a", "copy",
              "-movflags", "+faststart", out_mp4])
     else:
@@ -146,6 +149,19 @@ def mix_music(in_mp4, music, out_mp4, *, gain=0.12) -> Path:
     return Path(out_mp4)
 
 
+def _json_literal(data) -> str:
+    """`data` as JSON that is safe inside a `<script>` block.
+
+    `json.dumps` leaves `/`, `<` and `&` untouched, so a chapter title could close the surrounding
+    `/* … */` comment (`*/`) or open a `</script>` tag. Escaping them keeps the markup inert.
+    """
+    text = json.dumps(data, ensure_ascii=False)
+    for char, escape in (("/", "\\/"), ("<", "\\u003c"), (">", "\\u003e"), ("&", "\\u0026"),
+                         ("\u2028", "\\u2028"), ("\u2029", "\\u2029")):
+        text = text.replace(char, escape)
+    return text
+
+
 def build_player(scenes, video_rel, out_html, *, title="Video", template) -> Path:
     """Render the interactive player (chapter buttons + captions track)."""
     chapters = [
@@ -155,9 +171,9 @@ def build_player(scenes, video_rel, out_html, *, title="Video", template) -> Pat
     markup = (
         Path(template)
         .read_text(encoding="utf-8")
-        .replace("/*__CHAPTERS__*/", json.dumps(chapters))
+        .replace("/*__CHAPTERS__*/", _json_literal(chapters))
         .replace("__TITLE__", html.escape(title))
-        .replace("__VIDEO__", video_rel)
+        .replace("__VIDEO__", html.escape(video_rel, quote=True))
     )
     out = Path(out_html)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -194,6 +210,18 @@ def build_srt_beats(beats, out_srt, *, total_s, max_words=7) -> Path:
     return out
 
 
+def contact_sheet(video, out_png, *, tiles=16) -> Path:
+    """Tile `tiles` evenly-spaced frames into a 4x4 PNG for one-glance QA.
+
+    Shared by `vc sheet` and `vc merge` so the QA image is produced by one recipe.
+    """
+    duration = probe(video)["duration"] or float(tiles)
+    step = max(0.5, duration / tiles)
+    run(["-loglevel", "error", "-y", "-i", video, "-vf",
+         f"fps=1/{step:.3f},scale=480:-2,tile=4x4", "-frames:v", "1", str(out_png)])
+    return Path(out_png)
+
+
 def merge_clips(clips, out_mov) -> Path:
     """Concatenate identically-encoded clips by stream copy (no re-encode, no drift)."""
     out = Path(out_mov)
@@ -211,8 +239,7 @@ def _finalize_once(cmd, out, *, music, srt, burn, gain, loudnorm) -> None:
         graph = f"{voice};[v]anull[a]"
     video = ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
     if srt and burn and has_filter("subtitles"):
-        style = "FontName=DejaVu Sans,Bold=1,FontSize=14,Outline=2,Shadow=0,MarginV=60"
-        graph += f";[0:v]subtitles={_filter_path(srt)}:force_style='{style}'[vv]"
+        graph += f";[0:v]subtitles={_filter_path(srt)}:force_style='{SRT_STYLE}'[vv]"
         maps = ["-map", "[vv]", "-map", "[a]"]
     else:
         maps = ["-map", "0:v", "-map", "[a]"]

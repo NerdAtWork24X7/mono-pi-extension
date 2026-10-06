@@ -11,16 +11,20 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import re
 import shutil
 import sys
 import time
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from . import assemble, capture, clips as clipmod, palette, pipeline, scenes as scene_engine, site, tts, verify
-from .ffmpeg import probe, run
+# aliased: this module defines its own `probe` (the browse dry-run), which would otherwise shadow
+# the media prober that `fetch` validates a download with.
+from .ffmpeg import probe as ffprobe, run
 
 PLAYER_TEMPLATE = Path(__file__).resolve().parents[2] / "assets" / "player.html.tmpl"
 SOURCES = {"create", "asset", "find", "browse"}
@@ -33,7 +37,11 @@ BROWSE_INTERACTIONS = {"click", "type", "press", "hover", "highlight", "scroll"}
 
 
 def load(path):
-    return json.loads(Path(path).read_text(encoding="utf-8"))
+    path = Path(path)
+    if not path.exists():
+        raise RuntimeError(f"{path} not found — run `vc next --work {path.parent}` to see which step "
+                           "is missing")
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def save(path, data):
@@ -53,6 +61,41 @@ def canvas(fmt, draft):
     return (w, h, 15 if draft else 30)
 
 
+def _available_gb() -> int:
+    """Free memory in whole GB; a machine we cannot read is assumed to be a modest 4 GB."""
+    try:
+        for line in Path("/proc/meminfo").read_text(encoding="utf-8").splitlines():
+            if line.startswith("MemAvailable:"):
+                return int(line.split()[1]) // (1024 * 1024)
+    except (OSError, ValueError, IndexError):
+        pass
+    return 4
+
+
+def default_workers() -> int:
+    """How many shots to render at once when `--workers` is not given.
+
+    Each worker holds a Chromium page plus an ffmpeg encoder, so CPU count alone over-subscribes a
+    small container and can take the run (and the toolchain) down with it. Scale with the lesser of
+    the CPUs this process may use and the free memory; `--workers N` always wins.
+    """
+    try:
+        cpus = len(os.sched_getaffinity(0))  # respects cgroup/container CPU limits
+    except AttributeError:  # pragma: no cover - non-Linux
+        cpus = os.cpu_count() or 2
+    return max(1, min(4, cpus, max(1, _available_gb() // 2)))
+
+
+def _estimate_seconds(beats) -> int:
+    """Rough spoken length of a drafted script.
+
+    Fitted to both voice paths (the 900 ms-per-beat placeholder and measured MiMo narration), so
+    the "voice vs target" check stays meaningful whichever one produced the clip.
+    """
+    spoken = sum(max(1.2, len(b["say"].split()) / 2.1) for b in beats)
+    return max(5, round(spoken + 0.18 * max(0, len(beats) - 1) + 0.95))
+
+
 # =========================================================================== draft (web projects)
 def draft(args, work, project):
     """Existing pages -> inspect; none -> scaffold a showcase site from the brief. Writes
@@ -68,7 +111,11 @@ def draft(args, work, project):
         shots.append({"id": f"s{i}", "beats": ids, "visual": f"{scene['type']}: {visual}"[:90],
                       "source": "create", **scene})
     save(work / "script.json", {
-        "title": spec["title"], "brief": {"goal": f"Showcase {spec['title']}", "format": spec["format"], "target_s": 60},
+        # target_s comes from the drafted beats, so the "voice vs target" check is meaningful
+        # instead of always warning against a fixed 60 s.
+        "title": spec["title"],
+        "brief": {"goal": f"Showcase {spec['title']}", "format": spec["format"],
+                  "target_s": _estimate_seconds(beats)},
         "voice": spec["voice"], "style": spec["style"], "beats": beats})
     save(work / "plan.json", {"theme": spec["theme"], "format": spec["format"], "project": spec["project"], "shots": shots})
     print(f"drafted {work / 'script.json'} and {work / 'plan.json'} ({len(beats)} beats, {len(shots)} shots)")
@@ -180,6 +227,27 @@ def _asset_path(src, work, project):
     return None
 
 
+def _local_target(src, project, work):
+    """The local file behind a `browse`/`page` target, or None when it is remote or env-driven.
+
+    Lets a shot's cache key include the *page it points at*: editing the page you are demoing must
+    re-render the shot. A remote url is left alone (hashing it would mean a request), so those
+    still need `--force` after the site changes.
+    """
+    text = str(src or "")
+    if "${" in text:
+        return None
+    if text.startswith("file://"):
+        text = urllib.parse.unquote(urllib.parse.urlsplit(text).path)
+    elif re.match(r"^[a-z][a-z0-9+.\-]*:", text, re.I):  # http:, https:, data:, …
+        return None
+    for base in (work, Path(project) if project else work, Path.cwd()):
+        cand = Path(text) if Path(text).is_absolute() else base / text
+        if cand.is_file():
+            return cand.resolve()
+    return None
+
+
 # =========================================================================== step 4b: check the plan
 def check(work, fps=30) -> int:
     beats_doc, plan = load(work / "beats.json"), load(work / "plan.json")
@@ -203,10 +271,7 @@ def check(work, fps=30) -> int:
 
     # The palette may be a curated name or a bespoke dict (see `vc theme`); validate a dict so a
     # malformed/illegible custom palette fails here rather than in an unreadable render.
-    theme = (plan.get("theme") or script.get("theme")
-             or pipeline.pick_theme((script.get("brief") or {}).get("goal"), script.get("title"),
-                                    script.get("style"), format=plan.get("format"))
-             or "midnight-lime")
+    theme = pipeline.choose_theme(script, plan, plan.get("format"))
     errors += palette.problems(theme)
 
     run_type, run_len = None, 0
@@ -298,9 +363,10 @@ def check(work, fps=30) -> int:
         s = item["shot"]
         source = s.get("source")
         dur = item["dur_ms"] / 1000
-        label = (s.get("type") if source == "create"
-                 else Path(s.get("asset", "")).name or (s.get("url", "")[:40] if source == "browse" else source))
-        print(f"{s['id']:<5}{item['start_s']:5.1f}-{item['start_s'] + dur:<7.1f}{dur:5.1f}  {str(label):<8} {s.get('visual', '')[:60]}")
+        label = (s.get("visual") or s.get("type") or Path(s.get("asset", "")).name
+                 or s.get("url", "") or s.get("src", "") or source)
+        print(f"{s['id']:<5}{item['start_s']:5.1f}-{item['start_s'] + dur:<7.1f}{dur:5.1f}  "
+              f"{str(source):<8}{str(label)[:60]}")
         actions = s.get("actions") or []
         events = [a for a in actions if a.get("type") != "goto"]
         limit = 14 if source == "asset" else 8
@@ -378,8 +444,7 @@ async def _probe_shot(browser, item, url, page_timeout, *, fast):
             action.setdefault("url", url)
     schedule = sorted(actions, key=lambda a: a.get("at", 0))
     print(f"\n{s['id']}  {url}  ({len(actions)} action(s), clip {item['dur_ms'] / 1000:.1f}s)")
-    context = await browser.new_context(viewport={"width": 1280, "height": 720}, device_scale_factor=1,
-                                        locale="en-US", timezone_id="UTC")
+    context = await capture.new_context(browser, 1280, 720)
     page = await context.new_page()
     page.set_default_timeout(page_timeout)
     bad, started = 0, time.monotonic()
@@ -427,10 +492,8 @@ def probe(work, *, only=None, fast=False) -> int:
     if not browsed:
         print("no browse shots to probe")
         return 0
-    from playwright.async_api import async_playwright
-
     async def go():
-        async with async_playwright() as pw:
+        async with capture.playwright_session() as pw:
             browser = await pw.chromium.launch(headless=True, args=capture.CHROMIUM_ARGS)
             try:
                 failures = 0
@@ -453,14 +516,9 @@ def _shot_key(item, fps, w, h, theme, extra=""):
 
 
 def render_clips(work, *, only=None, workers=0, draft=False, force=False, fmt=None, theme=None) -> int:
-    import os
-
     beats_doc, plan, script = load(work / "beats.json"), load(work / "plan.json"), load(work / "script.json")
     fmt = fmt or plan.get("format") or (script.get("brief") or {}).get("format") or "16:9"
-    theme = (theme or plan.get("theme") or script.get("theme")
-             or pipeline.pick_theme((script.get("brief") or {}).get("goal"), script.get("title"),
-                                    script.get("style"), format=fmt)
-             or "midnight-lime")
+    theme = theme or pipeline.choose_theme(script, plan, fmt)
     w, h, fps = canvas(fmt, draft)
     project = plan.get("project") or Path.cwd()
     tl = timeline(beats_doc, plan, fps)
@@ -475,10 +533,16 @@ def render_clips(work, *, only=None, workers=0, draft=False, force=False, fmt=No
         s = item["shot"]
         if wanted and s["id"] not in wanted:
             continue
+        # A shot re-renders when anything it depends on changes: an asset file, or the local page a
+        # `browse`/`page` shot points at (its url/src string alone would not change).
         extra = ""
         if s["source"] == "asset":
             path = _asset_path(s["asset"], work, project)
             extra = f"{path}:{path.stat().st_mtime_ns}"
+        else:
+            target = _local_target(s.get("url") if s["source"] == "browse" else s.get("src"), project, work)
+            if target:
+                extra = f"page:{target}:{target.stat().st_mtime_ns}"
         key = _shot_key(item, fps, w, h, theme, extra)
         out = clip_dir / f"{s['id']}.mov"
         stamp = clip_dir / f"{s['id']}.key"
@@ -491,7 +555,7 @@ def render_clips(work, *, only=None, workers=0, draft=False, force=False, fmt=No
         pending.append((item, out, key))
 
     if pending:
-        concurrency = workers or min(4, os.cpu_count() or 2)
+        concurrency = workers or default_workers()
         print(f"rendering {len(pending)} clip(s) at {w}x{h}@{fps} with {concurrency} worker(s)...")
         failed = asyncio.run(_render_shots(pending, page_jobs, work, clip_dir, project, voice_wav,
                                            theme, fps, w, h, concurrency))
@@ -511,8 +575,6 @@ async def _render_shots(pending, page_jobs, work, clip_dir, project, voice_wav, 
     Scenes stream JPEG frames straight into FFmpeg (bounded concurrency) instead of writing a
     PNG per frame; the browser is launched once for the whole run.
     """
-    from playwright.async_api import async_playwright
-
     failed = []
     sem = asyncio.Semaphore(concurrency)
 
@@ -551,7 +613,7 @@ async def _render_shots(pending, page_jobs, work, clip_dir, project, voice_wav, 
                 failed.append(s["id"])
                 print(f"  {s['id']}: FAILED - {exc}", file=sys.stderr)
 
-    async with async_playwright() as pw:
+    async with capture.playwright_session() as pw:
         browser = await pw.chromium.launch(headless=True, args=capture.CHROMIUM_ARGS)
         try:
             shots = await site.shoot_pages_async(browser, page_jobs, work / "pages") if page_jobs else {}
@@ -602,13 +664,19 @@ def merge(work, out_path, *, burn_captions=True, music=None, strict_black=False)
     poster = out.parent / "poster.png"
     run(["-loglevel", "error", "-y", "-ss", "1.5", "-i", out, "-frames:v", "1", poster])
     sheet = work / "sheet.png"
-    step = max(0.5, total_s / 16)
-    run(["-loglevel", "error", "-y", "-i", out, "-vf", f"fps=1/{step:.3f},scale=480:-2,tile=4x4", "-frames:v", "1", sheet])
+    assemble.contact_sheet(out, sheet)
 
     credits = work / "credits.json"
     if credits.exists() and load(credits):
-        lines = [f"{c['file']}: {c['credit'] or 'n/a'} — {c['license']} — {c['url']}" for c in load(credits)]
+        lines = [f"{c['file']}: {c['credit'] or 'n/a'} — {c['license']} — {_public_url(c['url'])}"
+                 for c in load(credits)]
         (out.parent / "CREDITS.txt").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    if result["ok"]:
+        # Remember where the final video went, so `vc next` stays accurate even when `merge` ran
+        # with a custom --out or from another cwd.
+        save(work / "merge.json", {"out": str(out), "duration_s": round(total_s, 2),
+                                   "narration": "none" if silent else "voice"})
 
     info = result["probe"]
     print(json.dumps({"ok": result["ok"], "problems": result["problems"], "warnings": result["warnings"],
@@ -622,20 +690,47 @@ def merge(work, out_path, *, burn_captions=True, music=None, strict_black=False)
 
 
 # =========================================================================== find -> fetch (licensed assets only)
+def _public_url(url) -> str:
+    """A credit URL without credentials or query string.
+
+    A fetched asset's url can be a signed link carrying a token; `out/CREDITS.txt` is a deliverable
+    meant to be shared, so only scheme/host/path belong in it (credits.json keeps the full url).
+    """
+    parts = urllib.parse.urlsplit(str(url))
+    if not parts.scheme:
+        return str(url)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    return urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def _asset_name(url, name) -> str:
+    """A flat, safe filename inside assets/ (never a path, never '.'/'..')."""
+    base = re.sub(r"[?#].*$", "", str(name or url))
+    candidate = re.sub(r"[^\w.\-]", "_", Path(base).name).strip("_")
+    return candidate if candidate and candidate not in (".", "..") else "asset"
+
+
 def fetch(work, url, *, license_name, credit, name=None, shot=None):
     if not license_name:
         raise RuntimeError("--license is required (e.g. CC0, 'Pexels License', 'CC-BY 4.0'); only use clearly licensed media")
+    scheme = urllib.parse.urlsplit(str(url)).scheme.lower()
+    if scheme not in ("http", "https"):
+        raise RuntimeError(f"--url must be http(s) (got {scheme or 'no scheme'!r}) — `vc fetch` downloads "
+                           "licensed media over the web only")
     assets = work / "assets"
     assets.mkdir(parents=True, exist_ok=True)
-    base = name or Path(re.sub(r"[?#].*$", "", url)).name or "asset"
-    dest = assets / re.sub(r"[^\w.\-]", "_", base)
+    dest = assets / _asset_name(url, name)
+    if dest.parent != assets:  # defense in depth: the sanitizer above must keep the file in assets/
+        raise RuntimeError(f"refusing to write outside assets/: {dest}")
     request = urllib.request.Request(url, headers={"User-Agent": "video-creator/1.0"})
     with urllib.request.urlopen(request, timeout=120) as response, open(dest, "wb") as fh:
         shutil.copyfileobj(response, fh, length=1 << 20)
     if dest.suffix.lower() not in ASSET_EXT:
         dest.unlink(missing_ok=True)
         raise RuntimeError(f"unsupported media type {dest.suffix!r}; need one of {sorted(ASSET_EXT)}")
-    info = probe(dest)
+    info = ffprobe(dest)
     if not info["video"]:
         dest.unlink(missing_ok=True)
         raise RuntimeError("downloaded file is not a readable image/video")
@@ -678,6 +773,11 @@ def next_step(work, out_path) -> str:
         stale = []
     if stale or p.stat().st_mtime > meta.stat().st_mtime:
         return f"STEP 5: plan changed or clips missing {stale or ''} — run `vc clips` (only changed shots re-render)."
-    if not Path(out_path).exists() or Path(out_path).stat().st_mtime < meta.stat().st_mtime:
+    merged = Path(out_path)
+    recorded = work / "merge.json"
+    if not merged.exists() and recorded.exists():
+        merged = Path(load(recorded).get("out") or merged)  # merge was run with a custom --out
+    if not merged.exists() or merged.stat().st_mtime < meta.stat().st_mtime:
         return "STEP 6: run `vc merge` to produce the final video."
-    return "DONE: look at tmp/video/sheet.png once, then report paths, duration, resolution and narration status."
+    return (f"DONE: {merged} is merged — glance at tmp/video/sheet.png, then report absolute paths, "
+            "duration, resolution, theme and narration status.")

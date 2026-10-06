@@ -1,5 +1,5 @@
 {
-  "lastChangelogVersion": "0.87.1",
+  "lastChangelogVersion": "1.0.4",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
   "defaultProvider": "opencode",
@@ -31,11 +31,12 @@
     "opencode-go/glm-5.3",
     "opencode-go/kimi-k3",
     "opencode-go/deepseek-v4.1-flash",
-    "kilo/inclusionai/ling-3.0-flash-vl:free",
     "tokenharbor/deepseek-v4.1-flash",
     "xiaomi-token-plan-ams/mimo-v2.6-flash",
     "xiaomi-token-plan-ams/mimo-v2.6-pro",
-    "opencode/space-bunny-free"
+    "opencode/space-bunny-free",
+    "opencode/mimo-v2.6-flash-free",
+    "tokenharbor/mimo-v2.6-flash:free"
   ],
   "extensions": [
     "+extensions/agent-team/index.ts",
@@ -45,7 +46,7 @@
     "+extensions/tokenharbor.ts",
     "-extensions/obscura/index.ts",
     "+extensions/browser.ts",
-    "+extension/pi-scope.ts",
+    "+extensions/pi-scope.ts",
     "+extensions/custom-footer.ts"
   ],
   "terminal": {
@@ -54,5 +55,7 @@
   "compaction": {
     "enabled": true
   },
-  "editorPaddingX": 1
+  "editorPaddingX": 1,
+  "gitCommitModel": "xiaomi-token-plan-ams/mimo-v2.6-flash",
+  "gitCommitTemplate": ""
 }

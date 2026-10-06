@@ -8,6 +8,10 @@ description: MANDATORY for any request to create, make or edit a video (explaine
 `<skill>` = absolute path of the folder containing this file. Run everything from the user's project root.
 One tool does the work: `"<skill>/scripts/vc"` (bootstraps its venv on first use).
 
+**Keep the working folder inside the project: `--work tmp/video` (relative paths resolve against the
+current working directory). Never pass a system temp dir such as `/tmp/...` — it is wiped between runs
+and the tool now refuses it; `<skill>/tmp` is the only other allowed home for scratch.**
+
 The six steps map exactly to the user's request:
 
 | Step | Who | Command / artifact |
@@ -134,7 +138,7 @@ Pacing: a new visual event every ≤ 3 s, vary scene types, ≤ 4 beats per shot
 
 `probe` replays each `browse` shot's actions on the clip clock and reports `ok / missing / hidden / blocked` per action plus wall time — do this before `clips` so a bad selector costs 5 s, not a failed render. `--only s5,s13` limits it; `--fast` skips the waits.
 
-`clips` renders each shot with its **exact slice of the voice** (frame count = audio seconds × fps), so clips concatenate with zero drift. Unchanged shots are skipped; re-render only what changed with `--only s2,s4`. Use `--draft` (still 1080p, 15 fps) for a fast preview, `--workers N` to parallelize.
+`clips` renders each shot with its **exact slice of the voice** (frame count = audio seconds × fps), so clips concatenate with zero drift. Unchanged shots are skipped — a shot re-renders when its definition, its asset, or a **local** page it points at changes (a remote url needs `--force`); re-render only what changed with `--only s2,s4`. Use `--draft` (still 1080p, 15 fps) for a fast preview, `--workers N` to parallelize (the default scales with the CPUs *and* free RAM available, so a small container will not be over-subscribed).
 
 ## Step 6 · Merge into one video
 
@@ -177,7 +181,7 @@ Run an **isolated instance** so the demo can't touch real data: separate port, p
 ## Commands
 
 `next` (what to do next — run whenever unsure) · `draft` · `voice` · `check` · `probe [--only ids] [--fast]` · `clips` · `merge` · `fetch` · `make` · `theme ["brief"] [--seed HEX] [--variants N] [--json]` · `doctor` · `verify --file F [--expected S]` · `sheet --file F --out P` · `frames` · `record` · `tts-api` · `tts-browser` · `tts-save` · `normalize` · `assemble`.
-Common flags: `--work tmp/video` (working folder), `--draft` (1080p at 15 fps). Formats `16:9` / `9:16`. `theme` designs a bespoke palette; the curated names (`midnight-lime`, `paper-ink`, `ocean-glass`, `sunset-pop`, `slate-sky`, `ember-noir`) are fallbacks.
+Common flags: `--work tmp/video` (working folder — always inside the project, never `/tmp`), `--draft` (1080p at 15 fps). Formats `16:9` / `9:16`. `theme` designs a bespoke palette from a brief; `--theme NAME` forces one of the curated fallbacks listed in step 4.
 
 ## Rules
 
@@ -187,6 +191,7 @@ Common flags: `--work tmp/video` (working folder), `--draft` (1080p at 15 fps). 
 4. Check exit codes. Run `vc probe` before `vc clips` for `browse` shots. `verify` warnings name the shot and time and say whether the region looks blank or rendered; `"ok": false` is a failure.
 5. Finish by glancing at `tmp/video/sheet.png`, then report absolute paths, duration, resolution, theme, and narration status (real vs silent).
 6. Never commit or share `tmp/video/` (`plan.json` can hold a live token/url); use `${VAR}` interpolation for secrets.
+7. If the toolchain itself breaks (import errors, a core dump mid-render), run `vc doctor`: it names the broken piece and prints the exact reinstall command. Never hand-patch the venv.
 
 ## Reference
 - [references/creative-playbook.md](references/creative-playbook.md) — hooks, pacing, motion, sound, QA checklist.

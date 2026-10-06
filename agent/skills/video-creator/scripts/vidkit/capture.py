@@ -16,12 +16,28 @@ import time
 from pathlib import Path
 
 
+_SETUP_HINT = "reinstall the toolchain: rm -rf <skill>/.venv && <skill>/scripts/setup.sh"
+
+
 def _playwright():
     try:
         from playwright.sync_api import sync_playwright
     except ImportError as exc:  # pragma: no cover - depends on setup.sh
-        raise RuntimeError("playwright is not installed — run scripts/setup.sh") from exc
+        raise RuntimeError(f"playwright is unavailable ({exc}) — {_SETUP_HINT}") from exc
     return sync_playwright
+
+
+def playwright_session():
+    """A fresh Playwright async session, ready for `async with`.
+
+    Every async capture path starts its browser through here, so a half-installed venv (interrupted
+    install, truncated files) reports the exact fix instead of a bare ImportError traceback.
+    """
+    try:
+        from playwright.async_api import async_playwright as entry
+    except ImportError as exc:
+        raise RuntimeError(f"playwright is unavailable ({exc}) — {_SETUP_HINT}") from exc
+    return entry()
 
 
 def _url(target) -> str:
@@ -36,42 +52,19 @@ _SEEK = (
 )
 
 
-def _apply(page, action: dict) -> None:
-    kind = action.get("type")
-    if kind == "click":
-        page.click(action["sel"])
-    elif kind == "type":
-        page.fill(action["sel"], action.get("text", ""))
-    elif kind == "press":
-        page.press(action["sel"], action.get("key", "Enter"))
-    elif kind == "hover":
-        page.hover(action["sel"])
-    elif kind == "scroll":
-        if action.get("sel"):
-            page.locator(action["sel"]).first.scroll_into_view_if_needed()
-        else:
-            page.mouse.wheel(0, action.get("dy", 600))
-    elif kind == "wait":
-        page.wait_for_selector(action["sel"], state=action.get("state", "visible"),
-                               timeout=action.get("timeout", DEFAULT_ACTION_TIMEOUT_MS))
-    elif kind == "highlight":
-        locator = page.locator(action["sel"])
-        if locator.count():
-            locator.first.evaluate(_HIGHLIGHT_EL_JS)
-    elif kind == "js":
-        page.evaluate(action["expr"])
-    else:
-        raise ValueError(f"unknown action type: {kind!r}")
+# ONE deterministic context recipe (fixed locale/timezone/scale) for every capture path — sync and
+# async, scene pages and browse shots — so a recording is reproducible and the two APIs cannot drift.
+def context_options(width, height, *, scale: int = 1, **extra) -> dict:
+    return {"viewport": {"width": int(width), "height": int(height)}, "device_scale_factor": scale,
+            "locale": "en-US", "timezone_id": "UTC", **extra}
 
 
 def _new_context(browser, width, height, **extra):
-    return browser.new_context(
-        viewport={"width": width, "height": height},
-        device_scale_factor=1,
-        locale="en-US",
-        timezone_id="UTC",
-        **extra,
-    )
+    return browser.new_context(**context_options(width, height, **extra))
+
+
+async def new_context(browser, width, height, **extra):
+    return await browser.new_context(**context_options(width, height, **extra))
 
 
 # ── Reusable browser ──────────────────────────────────────────────────
@@ -226,7 +219,11 @@ async def apply_action(page, action: dict, *, cursor: bool = True) -> None:
     timeout = action.get("timeout", DEFAULT_ACTION_TIMEOUT_MS)
 
     if kind == "goto":
-        await page.goto(action.get("url") or action["src"], wait_until="load", timeout=timeout)
+        # `goto` carries the shot's url in a `browse` shot; elsewhere (a scene already opened by
+        # `record_scene`) there is nothing to navigate to, so it just re-asserts page readiness.
+        url = action.get("url") or action.get("src")
+        if url:
+            await page.goto(url, wait_until="load", timeout=timeout)
         await page.evaluate(READY_JS)
         if cursor:
             await page.evaluate(_CURSOR_JS)
@@ -266,37 +263,38 @@ async def apply_action(page, action: dict, *, cursor: bool = True) -> None:
 
 
 def record_scene(html, out_webm, duration_ms, actions=None, *, width=1920, height=1080) -> Path:
-    """Headful screen-record an interactive scene to `out_webm` (webm, no audio)."""
-    actions = actions or []
+    """Headful screen-record an interactive scene to `out_webm` (webm, no audio).
+
+    Replays the same action list, through the same `apply_action` dispatcher, as a `browse` shot —
+    so `record` and `browse` capture cannot diverge in behaviour.
+    """
     out = Path(out_webm)
     out.parent.mkdir(parents=True, exist_ok=True)
     rec_dir = out.parent / "_rec"
     rec_dir.mkdir(parents=True, exist_ok=True)
 
-    with _playwright()() as pw:
-        browser = pw.chromium.launch(headless=False)
-        context = _new_context(
-            browser,
-            width,
-            height,
-            record_video_dir=str(rec_dir),
-            record_video_size={"width": width, "height": height},
-        )
-        page = context.new_page()
-        page.goto(_url(html), wait_until="load")
-        page.evaluate(_READY)
+    async def go() -> Path:
+        async with playwright_session() as pw:
+            browser = await pw.chromium.launch(headless=False)
+            context = await new_context(browser, width, height, record_video_dir=str(rec_dir),
+                                        record_video_size={"width": width, "height": height})
+            try:
+                page = await context.new_page()
+                await page.goto(_url(html), wait_until="load")
+                await page.evaluate(_READY)
 
-        started = time.monotonic()
-        for action in sorted(actions, key=lambda a: a.get("at", 0)):
-            _sleep_until(started + action.get("at", 0) / 1000.0)
-            _apply(page, action)
-        _sleep_until(started + duration_ms / 1000.0)
+                started = time.monotonic()
+                for action in sorted(actions or [], key=lambda a: a.get("at", 0)):
+                    await _sleep_until(started + action.get("at", 0) / 1000.0)
+                    await apply_action(page, action)
+                await _sleep_until(started + duration_ms / 1000.0)
+                video = page.video
+            finally:
+                await context.close()
+                await browser.close()
+            return Path(await video.path())
 
-        video = page.video
-        context.close()
-        browser.close()
-        produced = Path(video.path())
-
+    produced = asyncio.run(go())
     produced.replace(out)
     return out
 
@@ -323,7 +321,7 @@ def capture_frames(html, out_dir, duration_ms, *, fps=30, width=1920, height=108
     return out, count
 
 
-def _sleep_until(deadline: float) -> None:
+async def _sleep_until(deadline: float) -> None:
     delay = deadline - time.monotonic()
     if delay > 0:
-        time.sleep(delay)
+        await asyncio.sleep(delay)

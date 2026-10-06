@@ -49,7 +49,7 @@ Add depth cheaply: soft radial gradient, 6–12 % noise overlay (inline SVG filt
 - **Entrances:** 450 ms, `cubic-bezier(.2,.8,.2,1)`, translateY(24px)+opacity; stagger children 80 ms.
 - **Emphasis:** scale 1→1.06→1 (300 ms), highlight bar wipe behind a word, underline draw.
 - **Number count-up:** animate a CSS `@property --n` integer and render via `counter()`; seekable and deterministic.
-- **Kinetic type:** split words into spans with incrementing `animation-delay` matching beat offsets from `timing.json`.
+- **Kinetic type:** split words into spans with incrementing `animation-delay` matching the beat offsets in `beats.json`.
 - **Camera feel:** slow 1.00→1.06 scale + 8 px pan across the whole scene (ken-burns) so no frame is ever fully static.
 - **Cuts:** hard cut on the first syllable of the next beat; use `fade` ≤ 0.4 s only to signal time passing or a mood change.
 - Avoid: bounce/elastic easing everywhere, spinning, > 2 simultaneous moving things, text moving while being read.
@@ -71,7 +71,7 @@ Each scene file: canvas div, `<style>` tokens at top (`--bg --fg --accent`), mar
 
 ## 6. Captions (most viewers are muted)
 
-Burn in for shorts/social. Max 2 lines, ≤ 42 chars/line, white bold with 2 px outline, bottom 18 % safe zone, never over the key visual. Current build times captions proportionally per sentence; for tighter sync, make each beat its own caption using `timing.json` marks.
+Burn in for shorts/social. Max 2 lines, ≤ 42 chars/line, white bold with 2 px outline, bottom 18 % safe zone, never over the key visual. `vc merge` already times one cue per beat from `beats.json` and splits long beats at ~7 words, so captions land on the real voice.
 
 ## 7. Sound design (optional, local only)
 

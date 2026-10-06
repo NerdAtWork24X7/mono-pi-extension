@@ -93,17 +93,20 @@ script edited after voicing (re-run `vc voice`).
 
 ## Command reference (see `vc <cmd> -h`)
 
-All step commands accept `--work` (default `tmp/video`) and `--draft` (1080p at 15 fps).
+All step commands accept `--work` (default `tmp/video`, **relative to the current working directory**) and
+`--draft` (1080p at 15 fps). Keep the working folder inside the project (`tmp/video`) or under `<skill>/tmp`: a
+system temp dir like `/tmp/...` is wiped between runs, so `vc` refuses it. `clips` sizes its worker pool from
+the CPUs **and free memory** it can see (`--workers N` overrides it — use `--workers 2` on a small container).
 
 | Command | What it does |
 |---|---|
-| `next` | prints the next action from the state of `tmp/video` |
+| `next` | prints the next action from the state of `tmp/video`, including where the last merge wrote its output |
 | `draft [brief]` | web project: inspect pages (or scaffold a site) → starting `script.json` + `plan.json` |
 | `voice [--tts auto\|api\|none]` | step 3: synthesizes/estimates all beats → `voice.wav` + `beats.json` |
 | `check` | step 4b: validates `plan.json` vs `beats.json`, prints the shot table + chosen theme + warnings |
 | `probe [--only ids] [--fast]` | step 4c: dry-runs `browse` actions with no frames — per-action `ok`/`missing`/`hidden`/`blocked` + wall time |
 | `theme ["brief"] [--seed HEX] [--variants N] [--json]` | list curated palettes, or **design** bespoke, contrast-checked palettes for a request |
-| `clips [--only ids] [--force] [--workers N] [--format F] [--theme T]` | step 5: renders one synced `.mov` per shot (skips unchanged) |
+| `clips [--only ids] [--force] [--workers N] [--format F] [--theme T]` | step 5: renders one synced `.mov` per shot (skips unchanged; re-renders automatically when an asset or a *local* page it points at changes) |
 | `merge [--out F] [--no-burn] [--music M]` | step 6: concat → MP4 + captions + chapters + player + poster + verify |
 | `fetch --url U --license L [--credit C] [--name N] [--shot id]` | download a licensed asset into `assets/`, log it, attach to a shot |
 | `make [brief] [--regen] [--tts …] [--out F]` | express: draft → voice → check → clips → merge |
@@ -136,7 +139,7 @@ mkdir -p tmp/video
 - **`shots must cover every beat exactly once, in order`** → adjust `plan.json` `beats` arrays.
 - **`script.json changed after voice`** → re-run `vc voice`.
 - **`<shot>: still 'find'`** → `vc fetch --shot <id>` or set `source: create`.
-- **`<shot>: url uses unset env var(s) [...]`** → export the variable (or `vc theme`/a literal url); `${VAR}` is resolved at render time.
+- **`<shot>: url uses unset env var(s) [...]`** → export the variable, or replace `${VAR}` with a literal url; `${VAR}` is resolved at render time.
 - **`<shot>: on_beat references unknown beat id(s)`** → the id must exist in `beats.json`.
 - **`custom palette … must be #RRGGBB` / `custom palette <fg/bg> contrast … <` ** → the `theme` dict has a bad hex or unreadable contrast; run `vc theme "<brief>"` (optionally `--seed HEX`) and paste the JSON, or drop the dict to use a curated name.
 - **`<shot>: <type> … at Nms would fire before the page is interactive (<800ms)`** → the shot's first beat maps to offset 0; add an `offset` (or `on_beat` a later beat). `goto`/`js`/`wait` may stay at 0.
@@ -144,8 +147,17 @@ mkdir -p tmp/video
 - **probe reports `missing` / `hidden` / `blocked`** → fix the selector, or use `state: attached` (collapsed panel), or wait for the element that reveals it. `:has-text()`/`:visible` work everywhere.
 - **`<shot>: asset file not found` / `unsupported asset type`** → fix the `asset` path (images: jpg/jpeg/png/webp/bmp; video: mp4/mov/webm/mkv/m4v/avi).
 - **`<shot>: type must be one of …`** → use a valid scene type.
-- **`ffmpeg not found`** → run `scripts/setup.sh` or set `FFMPEG_BIN`.
-- **Chromium missing** → `python -m playwright install chromium` in the skill venv.
+- **`ffmpeg not found` / `playwright is unavailable`** → `vc doctor` names the broken piece and prints the
+  fix: run `scripts/setup.sh` (or set `FFMPEG_BIN`); for a missing browser, `python -m playwright install
+  chromium` in the skill venv.
+- **A render dies with a core dump / `SIGBUS`, or imports fail after a crash** → the venv was truncated
+  (interrupted install): `rm -rf <skill>/.venv && <skill>/scripts/setup.sh`, then re-run `vc clips`.
+  Never hand-patch the venv; `vc doctor` verifies the binary actually *runs*.
+- **An edited page does not re-render** → only file:///local targets are fingerprinted into the clip key;
+  a remote url needs `vc clips --only <id> --force`.
+- **`--work … is inside the system temp dir`** → the working folder must live in the project (`--work tmp/video`)
+  or under `<skill>/tmp`; a system temp dir is wiped between runs and cannot hold the voice cache.
+- **`…/beats.json not found`** → that step has not run yet: `vc next --work <work>` says what is missing.
 - **No TTS key / API error** → retry once; on repeat use `--tts none` (silent, real timings, captions) and tell the user.
 - **Animation frozen in a clip** → the scene uses non-seekable animation; only generated scene types are supported.
 - **`verify` not ok** → read the `problems` list (duration mismatch, missing stream, silent audio) and fix the corresponding step.
@@ -165,20 +177,8 @@ mkdir -p tmp/video
 
 ### Driving an existing local app (isolated instance)
 
-`make` scaffolds a showcase site only when no pages are found. To demo a **running** product, point it at
-the instance and keep the demo isolated from real data:
-
-```bash
-export SCOPE_URL="http://127.0.0.1:4178"      # separate port
-export SCOPE_TOKEN="$(cat .demo-token)"       # pinned token, not a real credential
-# separate DB/config copy, then start the app, e.g.:
-PORT=4178 DATABASE_URL=file:tmp/demo.db pnpm start
-"$SK" make --project . --page "${SCOPE_URL}/?token=${SCOPE_TOKEN}" --name "Acme"
-```
-
-`${VAR}` resolves from the environment when `check`/`clips` run, so an unset variable fails early and no
-secret is written into `plan.json`. Re-establish per-shot state (theme/cwd/auth) with a `js` action —
-each `browse` shot gets a fresh browser context. Tear the instance down afterwards.
+To demo a **running** product instead of having `make` scaffold a site, point `--page` at the instance:
+recipe, isolation checklist and `${VAR}` example live in SKILL.md → *Driving an existing local app*.
 
 > **Security:** `tmp/video/plan.json` can contain a live token or internal url. Never commit or share
 > `tmp/video/`; prefer `${SCOPE_TOKEN}` interpolation over literal values.

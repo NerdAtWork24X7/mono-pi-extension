@@ -13,12 +13,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from vidkit import assemble, capture, palette, pipeline, scenes as scene_engine, tts, verify, workflow  # noqa: E402
-from vidkit.ffmpeg import FfmpegError, ffmpeg_exe, has_encoder, probe, run  # noqa: E402
+from vidkit import assemble, capture, palette, scenes as scene_engine, tts, verify, workflow  # noqa: E402
+from vidkit.ffmpeg import REINSTALL_HINT, FfmpegError, ffmpeg_exe, has_encoder, has_filter, probe, run  # noqa: E402
 
 SKILL_DIR = Path(__file__).resolve().parents[1]
 PLAYER_TEMPLATE = SKILL_DIR / "assets" / "player.html.tmpl"
@@ -48,9 +49,14 @@ def cmd_doctor(_args) -> int:
         exe = ffmpeg_exe()
     except FfmpegError as exc:
         print(f"FAIL ffmpeg: {exc}")
+        if "FFMPEG_BIN" not in str(exc) and "IMAGEIO_FFMPEG_EXE" not in str(exc):
+            print(f"     fix: {REINSTALL_HINT}   (or set FFMPEG_BIN to a working binary)")
         return 1
     print(f"ffmpeg     : {exe}")
+    # `exists` is not `runs`: a truncated/partial install leaves a file that cannot execute.
+    print(f"  runs     : {run(['-version'], capture=True, check=False).returncode == 0}")
     print(f"  libx264  : {has_encoder('libx264')}   aac: {has_encoder('aac')}")
+    print(f"  subtitles: {has_filter('subtitles')}   loudnorm: {has_filter('loudnorm')}")
     try:
         from playwright.sync_api import sync_playwright
 
@@ -60,6 +66,7 @@ def cmd_doctor(_args) -> int:
             browser.close()
     except Exception as exc:  # noqa: BLE001 - report any launch failure verbatim
         print(f"FAIL playwright: {exc}")
+        print(f"     fix: {REINSTALL_HINT}   (then `python -m playwright install chromium`)")
         return 1
     _, base, source = tts.resolve_credentials()
     print(f"tts key    : {source or 'NOT FOUND (use MIMO_API_KEY or `vc tts-browser`)'}")
@@ -195,16 +202,33 @@ def cmd_assemble(args) -> int:
 
 
 def cmd_sheet(args) -> int:
-    duration = probe(args.file)["duration"] or 16.0
-    step = max(0.5, duration / 16)
-    run(["-loglevel", "error", "-y", "-i", args.file, "-vf",
-         f"fps=1/{step:.3f},scale=480:-2,tile=4x4", "-frames:v", "1", args.out])
-    print(args.out)
+    print(assemble.contact_sheet(args.file, args.out))
     return 0
+
+
+def _check_workdir(work: Path) -> None:
+    """Keep the working folder inside the project (or the skill) — never the OS temp dir.
+
+    Everything the skill writes (script/plan/beats/clips, the voice cache, page screenshots) lives
+    here, and a system temp dir is wiped between runs, may be shared, and is usually small. The
+    convention is the project's own `tmp/` (`--work tmp/video`, relative to the current working
+    directory); `<skill>/tmp` is fine too. Relative paths always resolve against the cwd.
+    """
+    roots = (Path.cwd().resolve(), SKILL_DIR)
+    if any(work == root or root in work.parents for root in roots):
+        return
+    temp = Path(tempfile.gettempdir()).resolve()
+    if work == temp or temp in work.parents:
+        raise RuntimeError(
+            f"--work {work} is inside the system temp dir ({temp}) — keep the working folder inside "
+            f"{Path.cwd()} as `tmp/video`, or under <skill>/tmp")
+    print(f"WARNING: --work {work} is outside the project and the skill — the convention is "
+          f"`--work tmp/video` inside the current working directory", file=sys.stderr)
 
 
 def _work(args) -> Path:
     work = Path(args.work).resolve()
+    _check_workdir(work)
     work.mkdir(parents=True, exist_ok=True)
     return work
 

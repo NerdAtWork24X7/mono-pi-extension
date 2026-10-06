@@ -6,6 +6,7 @@ import hashlib
 import struct
 from pathlib import Path
 
+from .capture import _READY, context_options
 from .scenes import esc, resolve_theme
 
 MAX_CSS_H = 7000  # keeps hi-dpi screenshots under Chromium's 16384px limit
@@ -87,19 +88,23 @@ _SCROLL_JS = """async () => { const h=Math.min(document.documentElement.scrollHe
   window.scrollTo(0,0); await new Promise(r=>setTimeout(r,250)); }""" % MAX_CSS_H
 
 
+# Hi-dpi (2x) page screenshots: the `page` scene reads element rects in CSS pixels and `_png_size`
+# divides the PNG dimensions by the same factor.
+SCREENSHOT_SCALE = 2
+SCREENSHOT_VIEWPORT_H = 900
+
+
 def _open(browser, width):
-    ctx = browser.new_context(viewport={"width": width, "height": 900}, device_scale_factor=2,
-                              locale="en-US", timezone_id="UTC")
-    return ctx
+    return browser.new_context(**context_options(width, SCREENSHOT_VIEWPORT_H, scale=SCREENSHOT_SCALE))
 
 
 def _png_size(path) -> tuple[float, float]:
     px_w, px_h = struct.unpack(">II", Path(path).read_bytes()[16:24])
-    return px_w / 2, px_h / 2  # device_scale_factor=2
+    return px_w / SCREENSHOT_SCALE, px_h / SCREENSHOT_SCALE
 
 
 def inspect_pages(urls, *, width=1440) -> dict:
-    from .capture import _READY, browser as shared_browser
+    from .capture import browser as shared_browser
 
     info = {}
     ctx = _open(shared_browser(), width)
@@ -119,13 +124,10 @@ async def shoot_pages_async(browser, jobs: dict, out_dir, *, width=1440) -> dict
 
     Uses the caller's browser (one context/page for every URL in the batch).
     """
-    from .capture import _READY
-
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     result = {}
-    ctx = await browser.new_context(viewport={"width": width, "height": 900}, device_scale_factor=2,
-                                    locale="en-US", timezone_id="UTC")
+    ctx = await browser.new_context(**context_options(width, SCREENSHOT_VIEWPORT_H, scale=SCREENSHOT_SCALE))
     try:
         page = await ctx.new_page()
         for url, selectors in jobs.items():
@@ -149,22 +151,3 @@ async def shoot_pages_async(browser, jobs: dict, out_dir, *, width=1440) -> dict
     finally:
         await ctx.close()
     return result
-
-
-def shoot_pages(jobs: dict, out_dir, *, width=1440) -> dict:
-    """Synchronous entry point (own browser); prefer `shoot_pages_async` when a browser is live."""
-    import asyncio
-
-    from playwright.async_api import async_playwright
-
-    from .capture import CHROMIUM_ARGS
-
-    async def go():
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True, args=CHROMIUM_ARGS)
-            try:
-                return await shoot_pages_async(browser, jobs, out_dir, width=width)
-            finally:
-                await browser.close()
-
-    return asyncio.run(go())

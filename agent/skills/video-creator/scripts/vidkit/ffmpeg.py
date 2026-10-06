@@ -20,23 +20,40 @@ class FfmpegError(RuntimeError):
     """Raised when no usable FFmpeg binary can be found."""
 
 
+REINSTALL_HINT = "reinstall the toolchain: rm -rf <skill>/.venv && <skill>/scripts/setup.sh"
+
+
 @lru_cache(maxsize=1)
 def ffmpeg_exe() -> str:
-    for cand in (os.environ.get("FFMPEG_BIN"), os.environ.get("IMAGEIO_FFMPEG_EXE")):
-        if cand and Path(cand).is_file():
-            return cand
+    """The ffmpeg binary to use: `FFMPEG_BIN`/`IMAGEIO_FFMPEG_EXE`, the bundled build, or PATH.
+
+    A half-installed `imageio-ffmpeg` (interrupted install, truncated files) raises on import —
+    that is reported as *broken*, not merely *missing*, so the fix is unambiguous.
+    """
+    # An explicit override must be honoured, not silently ignored: a stale path would otherwise
+    # make you think you were testing with a different ffmpeg than you were.
+    for name in ("FFMPEG_BIN", "IMAGEIO_FFMPEG_EXE"):
+        cand = os.environ.get(name)
+        if not cand:
+            continue
+        if not Path(cand).is_file():
+            raise FfmpegError(f"{name}={cand} is not a file")
+        if not os.access(cand, os.X_OK):
+            raise FfmpegError(f"{name}={cand} is not executable")
+        return cand
+    broken = ""
     try:
         import imageio_ffmpeg
 
         return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - report whatever went wrong, then fall back
+        broken = f"the bundled imageio-ffmpeg looks broken ({type(exc).__name__}: {exc})"
     found = shutil.which("ffmpeg")
     if found:
         return found
     raise FfmpegError(
         "ffmpeg not found. Run scripts/setup.sh (installs imageio-ffmpeg) or set "
-        "FFMPEG_BIN to an ffmpeg binary."
+        "FFMPEG_BIN to an ffmpeg binary." + (f" — {broken}; {REINSTALL_HINT}" if broken else "")
     )
 
 

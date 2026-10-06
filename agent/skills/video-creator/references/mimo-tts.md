@@ -82,6 +82,7 @@ For a payload extracted some other way, `tts-save` still wraps base64/PCM16:
 
 ## Captions
 
-Narration is authored text, so captions can be built from the script
-(`video.py assemble` does this). For word-exact timing, install the optional
-`faster-whisper` extra and transcribe the narration WAV locally — no API key.
+Narration is authored text, so captions need no speech recognition: `vc merge` builds them from
+`beats.json` (the measured beat timings), one cue per beat, split at ~7 words, then burns them in.
+For *word*-level timing, install the optional `faster-whisper` extra and transcribe the narration
+WAV locally — no API key.
