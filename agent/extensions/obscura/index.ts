@@ -5,6 +5,11 @@
  * Obscura is a Rust-based headless browser that runs JavaScript via V8, with
  * instant startup (~85ms) and low memory (~30MB vs 200MB+ for Chrome).
  *
+ * PLATFORM: the bundled binary (and the only published release asset) is a
+ * Linux x86_64 ELF. On macOS/Windows this extension therefore registers no
+ * tool and stays inert — the Playwright-backed `web_fetch` extension covers
+ * fetching there. Point OBSCURA_BIN at a native build to force-enable it.
+ *
  * The obscura binary is bundled alongside this script. If missing,
  * install from the Obscura releases page:
  *   curl -LO https://github.com/h4ckf0r0day/obscura/releases/latest/download/obscura-x86_64-linux-stealth.tar.gz
@@ -339,6 +344,12 @@ function errRes(text: string) {
 }
 
 export default function (pi: ExtensionAPI) {
+  // The bundled obscura/obscura-worker are Linux x86_64 ELF binaries, so on
+  // macOS/Windows there is nothing runnable to exec and this extension stays
+  // inert (see the header). An explicit OBSCURA_BIN is honoured anyway, so a
+  // native build can still be wired up on those platforms.
+  if (process.platform !== "linux" && !process.env.OBSCURA_BIN) return;
+
   // Prune stale entries once at load time.
   setImmediate(() => maybePrune(true));
 

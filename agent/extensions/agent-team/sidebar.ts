@@ -1,4 +1,4 @@
-// ── Sidebar: team/agent/skill/memory overlay (toggled with Ctrl+Q) ──
+// ── Sidebar: team/agent/skill/memory overlay (toggled with Alt+S) ──
 //
 // Split out of ui.ts: the sidebar is its own concern (overlay component +
 // toggle actions) and was half of that file. All row rendering goes through
@@ -287,7 +287,7 @@ export function openSidebar(ctx: AgentTeamContext) {
             "Tab Switch focus ↑↓ Navigate",
             "Enter Select team / Toggle skill / tool / agent / memory / mode",
             "PgUp/PgDn Page · Home/End Jump · ●=enabled ○=disabled",
-            "Esc/Ctrl+Q Close sidebar",
+            "Esc/Alt+S Close sidebar",
           ]) {
             lines.push(sidebarRow(theme, w, [{ t: help, c: "dim" }]));
           }

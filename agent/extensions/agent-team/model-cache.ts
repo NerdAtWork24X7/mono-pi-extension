@@ -26,7 +26,12 @@ const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 /** Owner-only. Cached model lists can reflect account-specific entitlements
  *  (e.g. a provider's custom/allowed model set for the caller's API key), so
  *  the cache directory and its files should not be world-readable on shared
- *  machines. */
+ *  machines.
+ *
+ *  POSIX-only guarantee: Windows has no mode bits (NTFS uses ACLs), so the
+ *  mode argument and the chmodSync below are ignored there and the cache
+ *  inherits the user profile's ACL — which is already per-user on a default
+ *  Windows install, so there is nothing to tighten. */
 const DIR_MODE = 0o700;
 const FILE_MODE = 0o600;
 

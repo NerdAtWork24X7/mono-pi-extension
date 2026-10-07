@@ -302,13 +302,23 @@ function interop(mod: any, namedExport?: string): any {
  * (read from its own browsers.json), else the newest installed one. Returns
  * null when nothing is installed, so the caller can fall back to playwright's
  * own registry lookup.
+ *
+ * The relative layout differs per platform (linux64 / linux / mac .app / win
+ * .exe), so all of them are probed. A missing layout would return null and
+ * silently fall back to the registry lookup instead of pinning the revision.
  */
 function resolveChromiumExecutable(): string | null {
   const root = process.env.PLAYWRIGHT_BROWSERS_PATH || join(homedir(), "playwright-browsers");
   if (!existsSync(root)) return null;
 
   const exeOf = (dir: string) => {
-    for (const rel of ["chrome-linux64/chrome", "chrome-linux/chrome", "chrome-mac/Chromium.app/Contents/MacOS/Chromium"]) {
+    for (const rel of [
+      "chrome-linux64/chrome",
+      "chrome-linux/chrome",
+      "chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+      "chrome-win/chrome.exe",
+      "chrome-win64/chrome.exe",
+    ]) {
       const p = join(root, dir, rel);
       if (existsSync(p)) return p;
     }
@@ -484,7 +494,12 @@ export default function (pi: ExtensionAPI) {
               const msg = e instanceof Error ? e.message : String(e);
               // Retry headless: a subagent may run without DISPLAY (no X/Wayland),
               // which makes headless:false fail even though the binary is fine.
-              if (/display|X server|missing X|Headless/i.test(msg) || !process.env.DISPLAY) {
+              // DISPLAY is an X11 concept: on Windows and macOS it is always
+              // unset, so only treat its absence as "no display" on Linux —
+              // elsewhere fall straight through to the error so a real launch
+              // failure is not masked by a doomed headless retry.
+              const noDisplay = process.platform !== "linux" || !process.env.DISPLAY;
+              if (/display|X server|missing X|Headless/i.test(msg) || noDisplay) {
                 try {
                   browser = await launcher.launch({ ...launchOpts, headless: true });
                   headlessFallback = true;

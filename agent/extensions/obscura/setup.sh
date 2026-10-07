@@ -7,6 +7,10 @@
 # instead. Run this script once after cloning to produce the runnable binaries
 # that agent/extensions/obscura/index.ts expects alongside this file.
 #
+# POSIX only, and only useful on Linux: both tarballs contain Linux x86_64 ELF
+# binaries, and index.ts stays inert on macOS/Windows (see its header). On
+# Windows, extract manually with the built-in tar:  tar -xzf obscura.tar.gz
+#
 # Usage:
 #   ./setup.sh          extract only if a binary is missing
 #   ./setup.sh --force  re-extract even if binaries already exist

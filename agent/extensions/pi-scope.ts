@@ -215,17 +215,21 @@ let lastToolResultText: string | null = null;
 // so the extension and server agree on auth without a hardcoded constant.
 const EXT_PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 // Candidate locations where the scope server may have persisted its per-run
-// token. In dev the server writes <project>/tmp/scope_token. When launched via
-// the packaged AppImage, scope-control sets SCOPE_TOKEN_FILE to
-// $HOME/.local/share/pi-scope/scope_token — so we must check that too.
+// token. In dev the server writes <project>/tmp/scope_token. A packaged build
+// writes to the platform's per-user data dir instead, and sets
+// SCOPE_TOKEN_FILE — so all of them are checked.
 function tokenCandidates(): string[] {
   const out: string[] = [];
   if (process.env.SCOPE_TOKEN_FILE) out.push(process.env.SCOPE_TOKEN_FILE);
-  // Packaged AppImage server writes its per-run token to the data dir
-  // (~/.local/share/pi-scope/scope_token); check it BEFORE the dev
-  // tmp/scope_token so a stale dev token can't shadow the real one and
-  // cause every POST to 401 (no activity in the dashboard).
-  out.push(path.join(os.homedir(), ".local", "share", "pi-scope", "scope_token"));
+  // Packaged server data dir, per platform: Linux (XDG), macOS (Application
+  // Support) and Windows (%APPDATA% / %LOCALAPPDATA%). These are checked
+  // BEFORE the dev tmp/scope_token so a stale dev token can't shadow the
+  // real one and cause every POST to 401 (no activity in the dashboard).
+  const home = os.homedir();
+  out.push(path.join(home, ".local", "share", "pi-scope", "scope_token"));
+  out.push(path.join(home, "Library", "Application Support", "pi-scope", "scope_token"));
+  if (process.env.APPDATA) out.push(path.join(process.env.APPDATA, "pi-scope", "scope_token"));
+  if (process.env.LOCALAPPDATA) out.push(path.join(process.env.LOCALAPPDATA, "pi-scope", "scope_token"));
   out.push(path.join(EXT_PROJECT_ROOT, "tmp", "scope_token"));
   return out;
 }

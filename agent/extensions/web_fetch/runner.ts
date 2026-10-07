@@ -1,6 +1,7 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "fs";
 import { join, dirname, delimiter } from "path";
+import { homedir } from "node:os";
 import type { SerpRecord } from "./search";
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -69,12 +70,32 @@ const SCRIPT_DIR = dirname(__filename);
 const PY_SCRIPT = join(SCRIPT_DIR, "web-fetch.py");
 const PY_REQUIREMENTS = join(SCRIPT_DIR, "requirements.txt");
 
-/** Locate the `uv` launcher on PATH — never a hardcoded interpreter path.
- *  `WEB_FETCH_UV_BIN` overrides; the bare name lets spawn resolve via PATH. */
+/** Platform-specific `uv` install dirs, probed only when PATH lookup misses.
+ *  The official standalone installer lands `uv` in `~/.local/bin`
+ *  (`XDG_BIN_HOME` when set) and `cargo install` in `~/.cargo/bin`; a macOS
+ *  Homebrew `uv` lives in a brew prefix. Resolving these keeps the crawler
+ *  working even when the parent process inherited a stale PATH that predates
+ *  the uv install (e.g. a long-lived terminal on Windows). */
+function uvFallbackDirs(): string[] {
+	const home = homedir();
+	if (process.platform === "win32") {
+		const profile = process.env.USERPROFILE || home;
+		return [join(profile, ".local", "bin"), join(profile, ".cargo", "bin")];
+	}
+	const dirs = [process.env.XDG_BIN_HOME || join(home, ".local", "bin"), join(home, ".cargo", "bin")];
+	if (process.platform === "darwin") dirs.push("/opt/homebrew/bin", "/usr/local/bin");
+	return dirs;
+}
+
+/** Locate the `uv` launcher: PATH first, then the platform's well-known uv
+ *  install dirs — never a hardcoded interpreter path. `WEB_FETCH_UV_BIN`
+ *  overrides; the bare name is the last resort, so spawn surfaces a clear
+ *  ENOENT when uv is genuinely absent. */
 function resolveUvBin(): string {
 	if (process.env.WEB_FETCH_UV_BIN) return process.env.WEB_FETCH_UV_BIN;
 	const exe = process.platform === "win32" ? "uv.exe" : "uv";
-	const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+	const pathDirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+	const dirs = [...new Set([...pathDirs, ...uvFallbackDirs()])];
 	return dirs.map((d) => join(d, exe)).find((p) => existsSync(p)) ?? exe;
 }
 const UV_BIN = resolveUvBin();
@@ -88,12 +109,26 @@ const PY_CMD: readonly string[] = process.env.WEB_FETCH_PY_BIN
 const PY_LABEL = PY_CMD.join(" ");
 
 // ── Process helpers ──────────────────────────────────────────────────────
-/** Kill a spawned crawler and its whole process group (Playwright/Chromium
- *  grandchildren). Returns the SIGKILL fallback timer to cancel on exit. */
+/** Kill a spawned crawler and its whole process tree (Playwright/Chromium
+ *  grandchildren). Returns the SIGKILL fallback timer to cancel on exit.
+ *
+ *  POSIX: the child is spawned `detached`, i.e. in its own process group, so
+ *  a negative-PID signal reaches every descendant. Windows has no process
+ *  groups to signal (`process.kill(-pid)` throws there), so use
+ *  `taskkill /T /F`, which walks the child tree. A plain `child.kill()` would
+ *  kill only `uv.exe` and leave Chromium running with the profile dir locked. */
 function killProcessGroup(child: ChildProcess, sigkillTimer?: ReturnType<typeof setTimeout> | null) {
 	if (sigkillTimer) clearTimeout(sigkillTimer);
 	const pid = child.pid;
 	if (!pid) return;
+	if (process.platform === "win32") {
+		try {
+			spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+		} catch {
+			try { child.kill("SIGTERM"); } catch {}
+		}
+		return undefined; // taskkill is synchronous and forceful — no SIGKILL backstop needed
+	}
 	try {
 		process.kill(-pid, "SIGTERM"); // negative PID = process group (detached session)
 		return setTimeout(() => {
@@ -202,7 +237,11 @@ class Runner {
 		this.buf = "";
 		this.stderr = "";
 		const child = spawn(PY_CMD[0], PY_CMD.slice(1), {
-			detached: true,
+			// POSIX: own process group, so killProcessGroup can signal the whole
+			// tree. Windows: a detached child gets its own console window, and
+			// tree-kill goes through taskkill instead, so stay attached.
+			detached: process.platform !== "win32",
+			windowsHide: true,
 			stdio: ["pipe", "pipe", "pipe"],
 			// Tell the crawler which persistent profile dir to launch Chromium on.
 			env: { ...process.env, WEB_FETCH_PROFILE_DIR: PROFILE_DIR },

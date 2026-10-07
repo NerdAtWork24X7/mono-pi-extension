@@ -146,7 +146,7 @@ Add your own by dropping a `.md` file into `agent/agents/` with the same frontma
 | `/agents-parallel [on|off|status] [max N]` | Toggle global parallelism: ON → independent read-only tasks run in parallel (up to `max N`); OFF → every dispatch is serialized, in the order given |
 | `/agents-debug <0\|1\|2\|status>` | Dispatch-pipeline debug level: 0 off, 1 lifecycle log to `~/.pi/agent-team-log/agent-sessions/agent-team-debug.log`, 2 + raw per-agent JSONL traces |
 | `dispatch_agents(tasks: [{agent, task}, ...])` | Delegate tasks to specialists — one `{agent, task}` entry per task (a single task is a one-entry array). Read-only entries run in parallel when parallel dispatch is ON; any edit/write entry is always serialized |
-| `Ctrl+Q` | Toggle the sidebar (agent grid, skills snapshot, team list) |
+| `Alt+S` | Toggle the sidebar (agent grid, skills snapshot, team list) |
 | `Ctrl+Shift+E` | Toggle the agent team on/off |
 | `Ctrl+Shift+M` | Abort the running memory summarizer |
 | `Alt+T` (hold) | Speech-to-text: record while the key is held; release to transcribe via Groq Whisper |

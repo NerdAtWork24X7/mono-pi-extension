@@ -469,7 +469,7 @@ function buildBanner(): string {
     rb(`           V:::V           S:::::::::::::::SS `, 14) + "\n" +
     rb(`            VVV             SSSSSSSSSSSSSSS   `, 15) + "\n" +
     `/agents-team           Select a team\n` +
-    `Ctrl+Q                 Toggle sidebar\n`
+    `Alt+S                  Toggle sidebar\n`
   );
 }
 

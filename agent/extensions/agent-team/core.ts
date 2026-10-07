@@ -661,9 +661,35 @@ export class SessionLogger {
 
 // ── RPC subprocess spawner ──
 
-import { spawn as nodeSpawn } from "node:child_process";
+import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync } from "fs";
 import { join } from "path";
+
+/**
+ * Terminate a spawned subprocess *and everything it launched*.
+ *
+ * On POSIX the child is a direct exec of `pi`, so `proc.kill(signal)` reaches
+ * it. On Windows `shell: true` makes the direct child `cmd.exe` (the wrapper
+ * Node needs to run the `pi.cmd` shim) and the real node process is *its*
+ * child: `proc.kill()` would terminate only cmd.exe and orphan the live `pi`
+ * subagent, which keeps the stdout pipe open and keeps burning tokens nobody
+ * is reading. `taskkill /T /F` walks the whole child tree, the only reliable
+ * tree kill on Windows (there are no POSIX process groups to signal there).
+ */
+function killProcessTree(proc: ChildProcess, signal: NodeJS.Signals): void {
+  if (process.platform === "win32" && proc.pid) {
+    try {
+      nodeSpawnSync("taskkill", ["/pid", String(proc.pid), "/T", "/F"], {
+        stdio: "ignore",
+        windowsHide: true,
+      });
+      return;
+    } catch {
+      /* taskkill unavailable — fall through to the direct kill */
+    }
+  }
+  try { proc.kill(signal); } catch { }
+}
 
 export interface RpcSubprocessOpts {
   bin: string;
@@ -696,6 +722,8 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
     env: opts.env ?? { ...process.env },
     // Windows can't execute .cmd/.bat directly through spawn; route via the shell.
     shell: process.platform === "win32",
+    // Never flash a console window for the cmd.exe wrapper on Windows.
+    windowsHide: true,
   });
 
   let settled = false;
@@ -859,12 +887,10 @@ export function spawnRpcSubprocess(opts: RpcSubprocessOpts): RpcSubprocess {
       try { proc.stdin?.end(); } catch { }
       try { proc.stdout?.resume(); } catch { }
       try { proc.stderr?.resume(); } catch { }
-      try { proc.kill(signal); } catch { }
+      killProcessTree(proc, signal);
       killTimer = setTimeout(() => {
         killTimer = undefined;
-        if (!settled) {
-          try { proc.kill("SIGKILL"); } catch { }
-        }
+        if (!settled) killProcessTree(proc, "SIGKILL");
       }, 2000);
     },
   };

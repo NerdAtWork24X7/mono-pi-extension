@@ -13,9 +13,28 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getAgentDir } from "@mariozechner/pi-coding-agent";
 
-/** Which recorder binary the extension may drive. "auto" probes in this order. */
+/** Which recorder binary the extension may drive. Every kind is accepted in
+ *  config on every platform; availability is decided by PROBE_ORDER + PATH. */
 export type RecorderKind = "sox" | "arecord" | "ffmpeg";
 export const RECORDER_KINDS: RecorderKind[] = ["sox", "arecord", "ffmpeg"];
+
+/** Probe order for `recorder: "auto"`, per platform.
+ *
+ *  - Linux:   sox, arecord (ALSA), ffmpeg. sox first — it gives silence
+ *             detection and a clean SIGINT finalization.
+ *  - macOS:   sox, ffmpeg (avfoundation). `arecord` is ALSA-only, so it is
+ *             never probed there.
+ *  - Windows: ffmpeg first — the only backend that finalizes the WAV on a
+ *             stdin `"q"`, and the most commonly installed there. sox
+ *             (`rec.exe`) is a fallback that can only be stopped by a hard
+ *             terminate, which leaves the RIFF size fields unwritten.
+ *             `arecord` does not exist on Windows. */
+export const PROBE_ORDER: RecorderKind[] =
+	process.platform === "win32"
+		? ["ffmpeg", "sox"]
+		: process.platform === "darwin"
+			? ["sox", "ffmpeg"]
+			: ["sox", "arecord", "ffmpeg"];
 
 export const DEFAULT_MODEL = "whisper-large-v3-turbo";
 

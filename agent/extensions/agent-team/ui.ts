@@ -1,9 +1,32 @@
 // ── UI: system prompt builder + widget rendering (sidebar → ./sidebar.ts) ──
 
+import { existsSync } from "node:fs";
+import { join, relative } from "node:path";
 import { Text } from "@mariozechner/pi-tui";
 import type { AgentProc, AgentTeamContext } from "./core";
 import { agentNameKey, displayName, fmtTok, shortModel, toolsAreWritable } from "./core";
 import { boxBorder, cardTitleLine, padToVis, statusDisplay, trunc, visLen } from "./helpers";
+
+/** `file` relative to `dir`, with separators normalized to "/" for prompt
+ *  display. Falls back to the absolute path when the file is not under `dir`.
+ *  Uses path.relative so it works with either separator (the previous
+ *  `dir + "/"` prefix strip never matched Windows backslash paths). */
+function relativeToDir(file: string, dir: string): string {
+  const rel = relative(dir, file);
+  return (rel && !rel.startsWith("..") ? rel : file).replace(/\\/g, "/");
+}
+
+/** Platform-correct Python interpreter for the orchestrator prompt footer.
+ *  The venv layout differs (POSIX: `.venv/bin/python`, Windows:
+ *  `.venv\Scripts\python.exe`), so probe both and fall back to the platform
+ *  default when neither exists yet. */
+function venvHint(cwd: string): string {
+  const win = join(cwd, ".venv", "Scripts", "python.exe");
+  const posix = join(cwd, ".venv", "bin", "python");
+  if (existsSync(win)) return win;
+  if (existsSync(posix)) return posix;
+  return process.platform === "win32" ? win : posix;
+}
 
 // The sidebar overlay lives in ./sidebar — re-exported here so existing
 // import sites (index.ts, integrations.ts) keep working unchanged.
@@ -127,7 +150,7 @@ ${tableRows}
   const skillsSection = args.skills && args.skills.length ? "\n## Skills\n" + args.skills.map(s => "- **" + s.name + "**: " + (s.description || "(no description)")).join("\n") + "\n" : "";
   const memorySection = args.memory && (args.memory.dir || (args.memory.files && args.memory.files.length))
     ? "\n## Project Memory\nMemory directory = `" + args.memory.dir + "`:\n" +
-    args.memory.files.map(f => "- `" + f.path.replace(args.memory.dir + "/", "") + "` - " + f.heading).join("\n") +
+    args.memory.files.map(f => "- `" + relativeToDir(f.path, args.memory.dir) + "` - " + f.heading).join("\n") +
     "\n**VERY IMPORTANT** Read memory files to understand Repo before working on any Task.\n"
     : "";
 
@@ -157,7 +180,7 @@ ${agentMdSection}${skillsSection}${memorySection}
 - Design Check (UI only): <distinctive styling + visual polish confirmation, or N/A>
 - Remaining / Next Steps: <blockers, unverified items, or recommended follow-ups>
 
-Date: ${args.date} | CWD: ${args.cwd} | Tmp: ${args.cwd}/tmp/ | Python: ${args.cwd}/.venv
+Date: ${args.date} | CWD: ${args.cwd} | Tmp: ${join(args.cwd, "tmp")} | Python: ${venvHint(args.cwd)}
 `;
 
   return { systemPrompt: raw.replace(/\n{3,}/g, "\n\n").trim() + "\n" };

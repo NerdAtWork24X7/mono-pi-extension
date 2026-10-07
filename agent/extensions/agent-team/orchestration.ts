@@ -484,7 +484,7 @@ function resolveAgent(ctx: AgentTeamContext, name: string): { ap: AgentProc } | 
   const ap = ctx.procs.get(key);
   if (!ap) return { error: `Agent "${name}" not found. Available: ${availableAgentNames(ctx)}` };
   if (ctx.disabledAgents.has(key)) {
-    return { error: `Agent "${name}" is disabled. Enable it from the sidebar (Ctrl+Q).` };
+    return { error: `Agent "${name}" is disabled. Enable it from the sidebar (Alt+S).` };
   }
   return { ap };
 }

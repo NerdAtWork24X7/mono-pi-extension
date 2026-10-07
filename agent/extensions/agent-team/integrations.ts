@@ -346,7 +346,7 @@ export function registerCommands(pi: ExtensionAPI, team: AgentTeamContext) {
 
 
 export function registerShortcut(pi: ExtensionAPI, team: AgentTeamContext) {
-  pi.registerShortcut("ctrl+q", {
+  pi.registerShortcut("alt+s", {
     description: "Toggle agent team sidebar",
     handler: async (ctx) => {
       if (!team.enabled) return;
