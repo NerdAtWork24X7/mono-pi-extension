@@ -34,6 +34,12 @@ MODE: native_vision | script_api
 - Confidence: <HIGH | MEDIUM | LOW> (<evidence-based reason>)
 - Artifacts: <path to tmp file if data dumped to disk, or `none`>
 
+# Effort Budget & Termination (Hard)
+- **Tool budget: ≤ 10 tool calls.** Inspect the image (native vision first), fall back to one Pillow script if needed — that is the whole flow.
+- **Never repeat work**: do not re-run a script whose output you already have, or re-inspect the same file. If a second pass adds no new visual fact, you are done.
+- **Always end with a text response** in the mandated format. Ending a turn on a tool call, with no `STATUS:` line, is a protocol failure.
+- If the budget runs out, return `STATUS: PARTIAL` with the observed facts and the `Uncertainty` field filled. Partial observations beat no analysis.
+
 # Forbidden
 - Modifying, generating, or overwriting image files.
 - Echoing sensitive credentials or secrets found in images.

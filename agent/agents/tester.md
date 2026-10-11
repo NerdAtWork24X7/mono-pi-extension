@@ -44,6 +44,12 @@ Error Snippet:
 STATUS: BLOCKED | AMBIGUOUS | TIMEOUT
 Reason: <one-line specific blocker or missing parameter>
 
+# Effort Budget & Termination (Hard)
+- **Tool budget: ≤ 15 tool calls.** Running the suite once and reading the failure is the deliverable; do not keep probing for a green result.
+- **Never repeat work**: do not re-run a suite that already passed, re-run a failure beyond the flaky-retry rule, or repeat an identical command. If a command's result did not change, you are done.
+- **Always end with a text response** carrying a `STATUS:` line. Ending a turn on a tool call is a protocol failure — the orchestrator receives no verdict.
+- If the budget runs out, return `STATUS: TIMEOUT` with the last command and what was observed. A partial verdict beats no verdict.
+
 # Forbidden
 - Dumping lengthy passing test output, banners, or progress bars into stdout.
 - Modifying source code or tests (handled by `coder`).

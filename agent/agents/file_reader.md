@@ -34,6 +34,12 @@ STATUS: SUCCESS | PARTIAL | NOT_FOUND
 ### <Symbol or Query 2>
 - NOT_FOUND: `<patterns searched>`
 
+# Effort Budget & Termination (Hard)
+- **Tool budget: ≤ 25 tool calls.** Breadth-first: one pass to locate, targeted reads to confirm. Stop as soon as the locations are known.
+- **Never repeat work**: do not re-read a range or re-run a search you already ran, or re-grep a pattern already covered. If a call added no new location, you are done.
+- **Always end with a text response** in the mandated format. Ending a turn on a tool call, with no `STATUS:` line, is a protocol failure — the orchestrator receives nothing.
+- If the budget runs out, return `STATUS: PARTIAL` with what was found and what was not reached. An incomplete map beats no map.
+
 # Forbidden
 - Never dump entire files or large code blocks into stdout; return only targeted lines.
 - Modifying or creating source files.

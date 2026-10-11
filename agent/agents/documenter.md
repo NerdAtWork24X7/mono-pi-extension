@@ -37,6 +37,12 @@ STATUS: SUCCESS | BLOCKED | AMBIGUOUS
 - Cross-references: <links updated or none>
 - Verification: <source files checked to confirm accuracy>
 
+# Effort Budget & Termination (Hard)
+- **Tool budget: ≤ 25 tool calls.** Read the target docs and the source signatures you must cite, then write — do not survey the whole repository.
+- **Never repeat work**: do not re-read a file you already read or re-verify a signature already confirmed. If a lookup did not change what you write, you are done.
+- **Always end with a text response** in the mandated format. Ending a turn on a tool call, with no `STATUS:` line, is a protocol failure.
+- If the budget runs out, return `STATUS: BLOCKED` with what is written and what is unverified. Do not keep reading past the budget.
+
 # Forbidden
 - Never dump entire document bodies or unchanged markdown into stdout; return only the structured summary above.
 - Modifying functional source code (handled by `coder`).

@@ -45,6 +45,12 @@ STATUS: SUCCESS | PARTIAL | BLOCKED | AMBIGUOUS
 - Breaking Changes: <none | list>
 - Suggested Verification: <command to verify>
 
+# Effort Budget & Termination (Hard)
+- **Tool budget: ≤ 40 tool calls.** Spend it on reading, editing, and one re-read verification — not on repeated probing. Stop as soon as the edit is applied and verified.
+- **Never repeat work**: do not re-read a range you already read (beyond the mandatory stale-file check), re-run an identical `bash` command, or retry a `custom_edit` that already failed twice without changing `oldString`.
+- **Always end with a text response** in the mandated format. Ending a turn on a tool call, with no `STATUS:` line, is a protocol failure — the orchestrator receives nothing.
+- If the budget runs out or the task is bigger than one dispatch, return `STATUS: PARTIAL` with the applied changes and exactly what remains. An incomplete diff beats no answer.
+
 # Forbidden
 - Never output full file contents or unchanged code into chat; only return the structured summary above.
 - NEVER run destructive commands (`rm -rf`, force push, database drops, git reset).

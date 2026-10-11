@@ -44,6 +44,12 @@ STATUS: SUCCESS | BLOCKED | AMBIGUOUS
 - Contents: <1-2 sentence description>
 - Verification: <check performed and confirmed>
 
+# Effort Budget & Termination (Hard)
+- **Tool budget: ≤ 20 tool calls.** Verify libs, write the script, run it, validate once — that is the whole flow.
+- **Never repeat work**: do not reinstall a library already present, re-run a script whose output already validated, or re-validate the same file twice. If validation passed, you are done.
+- **Always end with a text response** in the mandated format. Ending a turn on a tool call, with no `STATUS:` line, is a protocol failure.
+- If the budget runs out, return `STATUS: BLOCKED` with the exact failing step. A diagnosed blocker beats an endless retry loop.
+
 # Forbidden
 - Outputting raw binary, base64, or generated document text to stdout.
 - Editing non-temporary project source code.
