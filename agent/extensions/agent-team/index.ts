@@ -26,7 +26,7 @@ import { readdir as readdirAsync, stat as statAsync, unlink as unlinkAsync } fro
 import { join } from "path";
 
 import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, BatchDispatchResult, AgentMode } from "./core";
-import { displayName, shortModel, SessionLogger, RwLock, filterSkills, agentNameKey } from "./core";
+import { displayName, shortModel, SessionLogger, RwLock, filterSkills, agentNameKey, DEFAULT_DISPATCH_TIMEOUT_MS, clampDispatchTimeout } from "./core";
 import { loadPersistedConfig, savePersistedConfig, scanAgents, loadTeamsYaml, discoverEnabledSkills, loadAgentMd, teamsYamlPath, persistTeams, seedProjectTeamsYaml, seedProjectConfig } from "./config";
 // A subagent's skills are NOT a team setting any more: each definition's own
 // `agents/<name>.md` frontmatter `skills:` key is the single source of truth
@@ -81,6 +81,8 @@ export class AgentTeam implements AgentTeamContext {
   enabled = true;
   parallelDispatch = true;
   maxParallel = 5;
+  /** Hard wall-clock cap (ms) for a single subagent dispatch. */
+  dispatchTimeoutMs = DEFAULT_DISPATCH_TIMEOUT_MS;
   /** Orchestrator system-prompt mode: "standard" (strict) or "creative". */
   mode: AgentMode = "standard";
   /** Debug verbosity for the dispatch pipeline (0 off, 1 lifecycle, 2 raw JSONL).
@@ -132,6 +134,7 @@ export class AgentTeam implements AgentTeamContext {
     this.enabled = this.saved.enabled ?? true;
     this.parallelDispatch = this.saved.parallelDispatch ?? true;
     this.maxParallel = this.saved.maxParallel ?? 5;
+    this.dispatchTimeoutMs = clampDispatchTimeout(this.saved.dispatchTimeoutMs);
     this.debugLevel = this.saved.debugLevel ?? 0;
     this.mode = this.saved.mode ?? "standard";
     this.destructiveTools = this.saved.destructiveTools ?? ["custom_edit", "custom_write", "edit", "write", "web-fetch"];
@@ -196,6 +199,13 @@ export class AgentTeam implements AgentTeamContext {
       if (keyOf(skip) !== keyOf(this.skipOrchestratorTools)) this.skipOrchestratorTools = skip;
       if (typeof cfg.parallelDispatch === "boolean" && cfg.parallelDispatch !== this.parallelDispatch) {
         this.parallelDispatch = cfg.parallelDispatch;
+      }
+      if (cfg.dispatchTimeoutMs !== undefined) {
+        const next = clampDispatchTimeout(cfg.dispatchTimeoutMs);
+        if (next !== this.dispatchTimeoutMs) {
+          this.dispatchTimeoutMs = next;
+          if (this.wCtx) this.wCtx.ui.notify(`Subagent dispatch timeout: ${Math.round(next / 60000)} min`, "info");
+        }
       }
       // Duty is per team and lives in teams.yaml's roster rows; the Scope UI
       // (Office / Settings) writes that same file. Re-derive the running
@@ -317,6 +327,7 @@ export class AgentTeam implements AgentTeamContext {
       mode: this.mode,
       parallelDispatch: this.parallelDispatch,
       maxParallel: this.maxParallel,
+      dispatchTimeoutMs: this.dispatchTimeoutMs,
       debugLevel: this.debugLevel,
       destructiveTools: this.destructiveTools,
       disabledAgents: Array.from(this.disabledAgents),

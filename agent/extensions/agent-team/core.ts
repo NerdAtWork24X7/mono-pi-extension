@@ -48,6 +48,12 @@ export interface AgentProc {
    *  (see startElapsedTicker in orchestration.ts). */
   timer?: ReturnType<typeof setInterval>;
   dispatchTimeout?: ReturnType<typeof setTimeout>;
+  /** Hard wall-clock backstop for a dispatch. Distinct from `dispatchTimeout`
+   *  (the inactivity timer, which any RPC event resets): this fires once after
+   *  DISPATCH_TIMEOUT_MS regardless of traffic, so a subagent that stays busy
+   *  (retries, heartbeats, endless tool loops) yet never completes is still
+   *  bounded and reported. */
+  wallClockTimeout?: ReturnType<typeof setTimeout>;
   lastActivity: number;          // timestamp of last received RPC event
   resetPongTimeout?: () => void; // resets the 10-min pong timer
   resolveDispatch: ((output: string, code: number) => void) | null;
@@ -98,6 +104,18 @@ export type DebugLevel = 0 | 1 | 2;
  *  model explore freely. Persisted in agent-team-config.json. */
 export type AgentMode = "standard" | "creative";
 
+/** Default hard wall-clock cap for a single dispatch (20 min). */
+export const DEFAULT_DISPATCH_TIMEOUT_MS = 1_200_000;
+/** Lower/upper bounds a user-supplied dispatch timeout is clamped into. */
+export const MIN_DISPATCH_TIMEOUT_MS = 60_000;         // 1 min
+export const MAX_DISPATCH_TIMEOUT_MS = 3_600_000;      // 60 min
+/** Clamp a persisted/user-supplied dispatch timeout into [1 min, 60 min],
+ *  falling back to the default when the value is absent or not a number. */
+export function clampDispatchTimeout(ms: unknown): number {
+  const n = typeof ms === "number" && Number.isFinite(ms) ? Math.floor(ms) : DEFAULT_DISPATCH_TIMEOUT_MS;
+  return Math.min(MAX_DISPATCH_TIMEOUT_MS, Math.max(MIN_DISPATCH_TIMEOUT_MS, n));
+}
+
 export interface TeamConfig {
   activeTeam: string;
   gridCols: number;
@@ -112,6 +130,10 @@ export interface TeamConfig {
   debugLevel?: number;
   /** Max concurrent read-only subagent processes spawned by one dispatch_agents call. */
   maxParallel?: number;
+  /** Hard wall-clock cap (ms) for a single subagent dispatch — overrides the
+   *  inactivity timer as the backstop that bounds a busy-but-stuck worker.
+   *  Clamped to [1 min, 60 min]. Defaults to DEFAULT_DISPATCH_TIMEOUT_MS. */
+  dispatchTimeoutMs?: number;
   /** Tools that mark an agent as "writable" (serialized, never parallel). */
   destructiveTools?: string[];
   /** Agent names that are disabled by the user via the sidebar */
@@ -148,6 +170,9 @@ export interface AgentTeamContext {
   mode: AgentMode;
   parallelDispatch: boolean;
   maxParallel: number;
+  /** Hard wall-clock cap (ms) for a single subagent dispatch. Persisted in
+   *  agent-team-config.json; reloaded live by the config watcher. */
+  dispatchTimeoutMs: number;
   batchClones: Set<AgentProc>;
   /** Set of agent names that are temporarily disabled by the user */
   disabledAgents: Set<string>;
@@ -274,7 +299,7 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
     contextWindow: 0, tokensUsed: 0, tokensOut: 0,
     cacheRead: 0, cacheWrite: 0, cacheSavedTotal: 0,
     toolCount: 0, elapsed: 0, lastWork: "", runCount: 0,
-    timer: undefined, dispatchTimeout: undefined,
+    timer: undefined, dispatchTimeout: undefined, wallClockTimeout: undefined,
     lastActivity: 0, resetPongTimeout: undefined, resolveDispatch: null,
     autoCompacted: false,
     compactionCount: 0,
@@ -291,6 +316,7 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
 export function clearTimers(ap: AgentProc) {
   clearInterval(ap.timer);
   if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
+  if (ap.wallClockTimeout) { clearTimeout(ap.wallClockTimeout); ap.wallClockTimeout = undefined; }
 }
 
 /** Reset mutable dispatch fields on an AgentProc (reuses blank state pattern).

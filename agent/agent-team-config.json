@@ -4,6 +4,7 @@
   "enabled": true,
   "parallelDispatch": true,
   "maxParallel": 5,
+  "dispatchTimeoutMs": 1200000,
   "destructiveTools": [
     "write",
     "custom_write",

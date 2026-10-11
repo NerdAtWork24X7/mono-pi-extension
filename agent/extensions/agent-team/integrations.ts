@@ -43,33 +43,54 @@ function capOutput(out: string): string {
 }
 
 /** Format a multi-task batch as markdown sections joined by "---", each
- *  headed by the agent name and task.
+ *  headed by the agent name and task, preceded by a status summary.
  *
- *  Individual outputs are capped at MAX_RESPONSE_LENGTH, but when many
- *  subagents run in parallel the combined text can still be N× that limit.
- *  An overall cap (with a clear truncation marker) prevents the downstream
- *  orchestrator from receiving a silently-truncated result. */
+ *  EVERY task is always represented: its header, status and reason are never
+ *  dropped. Only the per-task output BODY is truncated when the combined text
+ *  would exceed MAX_RESPONSE_LENGTH, and each task gets an equal share of the
+ *  budget. The previous version stopped adding tasks at the cap, so one large
+ *  (or a timed-out) result could hide every later task — including ones that
+ *  completed — from the orchestrator, which then redid finished work. */
 function formatBatchParts(results: BatchTaskResult[]): string {
-  // Build parts one at a time, tracking total size so we can stop before
-  // the combined output exceeds the cap. Always include at least the first
-  // result; subsequent results are added only if there is headroom.
-  let combined = "";
-  let included = 0;
-  for (const res of results) {
-    const status = res.code === 0 ? "done" : "error";
-    const header = `### ${res.agent}\n${res.task}`;
-    const part = `${header}\n→ ${status} (${Math.round(res.elapsed / 1000)}s)\n\n${capOutput(res.output)}`;
-    const separator = included > 0 ? "\n\n---\n\n" : "";
-    if (combined.length + separator.length + part.length > MAX_RESPONSE_LENGTH && included > 0) {
-      const remaining = results.length - included;
-      combined += `\n\n---\n\n… [${remaining} more result(s) truncated — combined output exceeded ${MAX_RESPONSE_LENGTH} chars]`;
-      break;
-    }
-    combined += separator + part;
-    included++;
-  }
+  const completed = results.filter(r => r.code === 0).length;
+  const failed = results.length - completed;
 
-  return combined;
+  // One-line-per-task summary so the orchestrator can see at a glance what
+  // succeeded, what failed, and why — without reading the full bodies.
+  const summaryLines = results.map((res, i) => {
+    const mark = res.code === 0 ? "✓" : "✗";
+    const why = res.code === 0 ? "" : ` — ${firstLine(res.error || res.output) || "did not complete"}`;
+    return `${mark} ${i + 1}. ${res.agent}${why}`;
+  });
+  const summary =
+    `**Batch: ${completed}/${results.length} completed${failed ? `, ${failed} did not` : ""}.**` +
+    (failed
+      ? `\nCompleted results below are FINAL — do NOT redo them. Retry only the ✗ task(s).`
+      : "") +
+    `\n${summaryLines.join("\n")}`;
+
+  // Reserve headroom for the summary + every header/status before splitting the
+  // remaining budget evenly across task bodies, so no task is ever omitted.
+  const headers = results.map(res => {
+    const status = res.code === 0 ? "done" : "error";
+    return `### ${res.agent}\n${res.task}\n→ ${status} (${Math.round(res.elapsed / 1000)}s)`;
+  });
+  const overhead = summary.length + headers.reduce((n, h) => n + h.length + 10, 0);
+  const perTask = Math.max(1000, Math.floor((MAX_RESPONSE_LENGTH - overhead) / Math.max(1, results.length)));
+
+  const parts = results.map((res, i) => {
+    const body = res.output.length > perTask
+      ? `${res.output.slice(0, perTask)}\n… [${res.output.length - perTask} more chars truncated]`
+      : res.output;
+    return `${headers[i]}\n\n${body}`;
+  });
+
+  return `${summary}\n\n---\n\n${parts.join("\n\n---\n\n")}`;
+}
+
+/** First non-empty line of a string, trimmed (for compact failure reasons). */
+function firstLine(s: string): string {
+  return (s.split("\n").find(l => l.trim()) || "").trim();
 }
 
 /** Get agent display info: [name][model] tag */

@@ -8,7 +8,7 @@
 
 import { matchesKey, Key } from "@mariozechner/pi-tui";
 import type { AgentProc, AgentTeamContext, TeamMember } from "./core";
-import { agentNameKey, displayName, shortModel } from "./core";
+import { agentNameKey, displayName, shortModel, clampDispatchTimeout } from "./core";
 import { updateTeamsYaml, discoverAllSkills, type Skill } from "./config";
 import { installMemoryEscEditor, removeMemoryEscEditor, toggleMemory } from "./memory";
 import { boxBorder, sidebarRow, statusDisplay } from "./helpers";
@@ -111,8 +111,24 @@ function toggleMode(ctx: AgentTeamContext) {
   ctx.invalidate();
 }
 
+/** Preset wall-clock caps (ms) cycled from the sidebar's Limits row. */
+const DISPATCH_TIMEOUT_PRESETS_MS = [300_000, 600_000, 900_000, 1_200_000, 1_800_000, 2_700_000, 3_600_000];
+/** Human-readable minute label for a dispatch timeout. */
+function fmtTimeout(ms: number): string {
+  return `${Math.round(ms / 60_000)} min`;
+}
+/** Cycle the per-dispatch wall-clock timeout through the presets, persist, and
+ *  repaint. A value not in the preset list snaps to the nearest/next preset. */
+function cycleDispatchTimeout(ctx: AgentTeamContext) {
+  const cur = clampDispatchTimeout(ctx.dispatchTimeoutMs);
+  const i = DISPATCH_TIMEOUT_PRESETS_MS.indexOf(cur);
+  ctx.dispatchTimeoutMs = DISPATCH_TIMEOUT_PRESETS_MS[(i + 1) % DISPATCH_TIMEOUT_PRESETS_MS.length];
+  ctx.persist();
+  ctx.invalidate();
+}
+
 /** Focus sections in Tab-cycling order. */
-const SECTION_ORDER = ["orch", "tools", "mode", "memory", "teams", "sub"] as const;
+const SECTION_ORDER = ["orch", "tools", "mode", "limits", "memory", "teams", "sub"] as const;
 type Section = typeof SECTION_ORDER[number];
 
 export function openSidebar(ctx: AgentTeamContext) {
@@ -217,6 +233,19 @@ export function openSidebar(ctx: AgentTeamContext) {
             ], sel));
           }
 
+          // Limits section
+          lines.push(boxBorder(theme, w, "sep"));
+          lines.push(sidebarRow(theme, w, [{ t: "Limits (Enter to cycle)", c: "dim", b: true }]));
+          {
+            const sel = section === "limits";
+            if (sel) selectedLine = lines.length;
+            lines.push(sidebarRow(theme, w, [
+              { t: sel ? "▸ " : "  ", c: sel ? "accent" : "text" },
+              { t: "⏱ ", c: sel ? "accent" : "dim" },
+              { t: `Subagent timeout: ${fmtTimeout(ctx.dispatchTimeoutMs)}`, c: sel ? "accent" : "text" },
+            ], sel));
+          }
+
           // Memory section
           lines.push(boxBorder(theme, w, "sep"));
           lines.push(sidebarRow(theme, w, [{ t: "Memory (Enter to toggle)", c: "dim", b: true }]));
@@ -278,7 +307,7 @@ export function openSidebar(ctx: AgentTeamContext) {
           lines.push(boxBorder(theme, w, "sep"));
           for (const help of [
             "Tab Switch focus ↑↓ Navigate",
-            "Enter Select team / Toggle skill / tool / agent / memory / mode",
+            "Enter Select team / Toggle skill / tool / agent / memory / mode / timeout",
             "PgUp/PgDn Page · Home/End Jump · ●=enabled ○=disabled",
             "Esc/Alt+S Close sidebar",
           ]) {
@@ -348,6 +377,10 @@ export function openSidebar(ctx: AgentTeamContext) {
             } else if (section === "mode") {
               // Toggle orchestrator mode standard/creative
               toggleMode(ctx);
+              tui.requestRender();
+            } else if (section === "limits") {
+              // Cycle the per-dispatch wall-clock timeout (persists)
+              cycleDispatchTimeout(ctx);
               tui.requestRender();
             } else if (section === "teams") {
               // Switch to the selected team

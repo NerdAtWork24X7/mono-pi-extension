@@ -4,7 +4,7 @@ import { writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import type { AgentProc } from "./core";
 import { spawnRpcSubprocess } from "./core";
-import { SessionLogger, agentKey, agentNameKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, parseModelId, safeUnlink, shortModel, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
+import { SessionLogger, agentKey, agentNameKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, parseModelId, safeUnlink, shortModel, MAX_COLLECTED_TEXT, DEFAULT_DISPATCH_TIMEOUT_MS, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext, AgentMode } from "./core";
 import { resolveSkillPath } from "./config";
 import { buildExtensionCliArgs, buildScopeNameArgs } from "./extensions";
@@ -17,7 +17,7 @@ const SPAWN_READY_TIMEOUT_MS = 15_000;
 const STREAM_INVALIDATE_THROTTLE_MS = 100;
 
 export const MAX_RESPONSE_LENGTH = 600000; // Subagent tool-result cap. Keep the truncation marker in formatBatchParts (integrations.ts) in sync.
-export const PONG_TIMEOUT = 600_000;  // 10 min — reset on every activity
+export const PONG_TIMEOUT = 600_000;  // 10 min — inactivity (reset on any RPC event)
 
 /** Post-process a subagent's static system prompt before it is handed to the
  *  `pi` subprocess. This is the single hook where the subagent prompt can be
@@ -118,6 +118,18 @@ const taskTooLargeSignal = (why: string) =>
  *  drift apart. */
 function capturedText(ap: AgentProc): string {
   return ap.lastAssistantText.trim() || ap.currentMessageText.trim() || ap.collectedText.trim();
+}
+
+/** Build the result text for a dispatch that was force-killed (inactivity or
+ *  wall-clock timeout). Keeps any partial output the subagent produced before
+ *  the kill, prefixed with an explicit reason, so the orchestrator (a) knows
+ *  WHY the task did not complete and (b) can still use partial findings instead
+ *  of discarding them. */
+function timeoutOutput(ap: AgentProc, reason: string): string {
+  const partial = capturedText(ap);
+  return partial
+    ? `TIMEOUT: ${reason}.\n\n--- Partial output captured before the timeout ---\n${partial}`
+    : `TIMEOUT: ${reason}. No output was produced.`;
 }
 
 export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) {
@@ -416,8 +428,16 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
   ctx.logger.flushStreamBuf(ap);
 
   const output = capturedText(ap) || "(no output)";
+  // A subagent that settles its turn without emitting any final text did NOT
+  // complete its task. Reporting that as a successful "done" with "(no output)"
+  // is what made the orchestrator treat a stuck/empty worker as finished (and
+  // redo the work). Treat it as a failure with a concrete reason instead.
+  const completed = output !== "(no output)";
+  const finalOutput = completed
+    ? output
+    : "Subagent ended without producing any output — task not completed.";
 
-  if (output === "(no output)") {
+  if (!completed) {
     ctx.logger.logErrorBox(ap, "EMPTY RESPONSE",
       `lastAssistant:${ap.lastAssistantText ? "yes" : "no"} curMsg:${ap.currentMessageText.length}c collected:${ap.collectedText.length}c`);
   }
@@ -429,7 +449,7 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
 
   ctx.logger.logDoneBox(ap, Math.round(ap.elapsed / 1000), ap.toolCount);
   ap.status = "done";
-  ap.lastWork = extractLastLine(output);
+  ap.lastWork = extractLastLine(finalOutput);
 
   // Keep the captured output until the dispatch promise has resolved and the
   // process close handler has had a chance to drain trailing stdout. Clearing
@@ -442,16 +462,18 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
 
   if (ctx.wCtx) {
     ctx.wCtx.ui.notify(
-      ctx.tag(ap, `done (${Math.round(ap.elapsed / 1000)}s, ${ap.toolCount} tools)`),
-      "success",
+      ctx.tag(ap, completed
+        ? `done (${Math.round(ap.elapsed / 1000)}s, ${ap.toolCount} tools)`
+        : `no output (${Math.round(ap.elapsed / 1000)}s) — not completed`),
+      completed ? "success" : "error",
     );
   }
 
   // Resolve from the completion event, but leave the captured final text
   // intact until the close fallback has had a chance to run. This is safe
   // because resolveIfPending clears the callback exactly once.
-  if (SessionLogger.debugLevel >= 1) ctx.logger.debug(ap, `agent_end: resolving dispatch code=0`);
-  ctx.resolveIfPending(ap, output, 0);
+  if (SessionLogger.debugLevel >= 1) ctx.logger.debug(ap, `agent_end: resolving dispatch code=${completed ? 0 : 1}`);
+  ctx.resolveIfPending(ap, finalOutput, completed ? 0 : 1);
   // `lastAssistantText` is deliberately cleared by the next dispatch reset,
   // not before the child has finished flushing its final RPC events.
 }
@@ -548,7 +570,7 @@ export async function runAgent(
       const silence = Math.round((Date.now() - ap.lastActivity) / 1000);
       ctx.logger.logErrorBox(ap, "NO ACTIVITY", `no event for ${silence}s — force-killing`);
       ap.lastWork = `Timed out (${silence}s silence)`;
-      ctx.resolveIfPending(ap, `No activity for ${silence}s — killed`, 1);
+      ctx.resolveIfPending(ap, timeoutOutput(ap, `no activity for ${silence}s`), 1);
       ctx.killProc(ap, true);
       if (ctx.wCtx) ctx.wCtx.ui.notify(ctx.tag(ap, `NO ACTIVITY (${silence}s) — killed`), "error");
       ctx.invalidate();
@@ -557,6 +579,22 @@ export async function runAgent(
   ap.resetPongTimeout = doResetPongTimeout;
 
   doResetPongTimeout(); // start initial 10-min timer
+
+  // ── Hard wall-clock backstop ──
+  // The inactivity timer is reset by every event, so a busy-but-stuck
+  // subagent (observed at ~1300s) never trips it. This fires once after the
+  // configured dispatch timeout (agent-team-config.json `dispatchTimeoutMs`,
+  // default 20 min) no matter the traffic, bounding the dispatch and reporting
+  // the reason so the orchestrator retries only this task.
+  ap.wallClockTimeout = setTimeout(() => {
+    const secs = Math.round((Date.now() - t0) / 1000);
+    ctx.logger.logErrorBox(ap, "DISPATCH TIMEOUT", `still running after ${secs}s — force-killing`);
+    ap.lastWork = `Timed out (${secs}s wall clock)`;
+    ctx.resolveIfPending(ap, timeoutOutput(ap, `still running after ${secs}s`), 1);
+    ctx.killProc(ap, true);
+    if (ctx.wCtx) ctx.wCtx.ui.notify(ctx.tag(ap, `DISPATCH TIMEOUT (${secs}s) — killed`), "error");
+    ctx.invalidate();
+  }, ctx.dispatchTimeoutMs ?? DEFAULT_DISPATCH_TIMEOUT_MS);
 
   ctx.logger.logTaskBox(ap, ap.runCount, task);
 
@@ -585,6 +623,7 @@ export async function runAgent(
       // drained trailing stdout; late response/agent_end events can otherwise
       // be lost between resolution and process teardown.
       if (ap.dispatchTimeout) { clearTimeout(ap.dispatchTimeout); ap.dispatchTimeout = undefined; }
+      if (ap.wallClockTimeout) { clearTimeout(ap.wallClockTimeout); ap.wallClockTimeout = undefined; }
       if (SessionLogger.debugLevel >= 1) {
         ctx.logger.debug(ap, `dispatch promise resolved code=${code} output=${output.length}c elapsed=${Math.round(ap.elapsed / 1000)}s`);
       }
@@ -718,14 +757,15 @@ export async function dispatchTasks(
     specs.push({ agent: t.agent, task: t.task, def: r.ap.def, model: r.ap.model, teamModel: r.ap.teamModel });
   }
 
-  if (signal?.aborted) return { ok: false, error: "Aborted", results: [] };
-
   const parallel = ctx.parallelDispatch && !anyWritable;
   const max = parallel ? Math.max(1, Math.min(ctx.maxParallel || 5, specs.length)) : 1;
-  const run = async (): Promise<BatchDispatchResult> => {
-    if (signal?.aborted) return { ok: false, error: "Aborted", results: [] };
-    return { ok: true, results: await runClonePool(ctx, specs, max, signal) };
-  };
+  // Always run the pool, even when the turn's abort signal already fired: the
+  // pool marks not-yet-started tasks "Aborted" and kills in-flight clones
+  // while PRESERVING the results of tasks that already completed. Returning an
+  // empty `results: []` on abort (as before) discarded finished subagent work
+  // and forced the orchestrator to redo it.
+  const run = async (): Promise<BatchDispatchResult> =>
+    ({ ok: true, results: await runClonePool(ctx, specs, max, signal) });
   return parallel ? ctx.dispatchLock.read(run) : ctx.dispatchLock.write(run);
 }
 
@@ -994,8 +1034,14 @@ export class ProcessManager {
           }
           // A clean RPC child exit is a successful completion even when no
           // completion event arrived (or pi omitted it). Resolve only after
-          // stdout has been fully drained.
-          this.resolveIfPending(ap, captured || (code === 0 ? "(no output)" : exitDetail), code === 0 ? 0 : 1);
+          // stdout has been fully drained. An exit with no captured output is
+          // NOT a success: report a concrete failure reason so the orchestrator
+          // retries only that task instead of trusting an empty result.
+          const ok = code === 0 && !!captured;
+          const text = captured || (code === 0
+            ? "Subagent exited without producing any output — task not completed."
+            : exitDetail);
+          this.resolveIfPending(ap, text, ok ? 0 : 1);
         }
         // stdin is already owned and closed by the RPC wrapper/kill path.
         ap.status = "dead";
