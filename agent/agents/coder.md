@@ -1,7 +1,8 @@
 ---
 name: coder
 description: Create, modify, or fix source code files. Applies surgical edits via custom_edit or write and returns touched paths and summary.
-tools: bash, custom_read, grep, find, ls, custom_write, custom_edit
+tools: bash, custom_read, grep, find, custom_write, custom_edit, ls
+skills:
 thinking: off
 ---
 

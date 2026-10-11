@@ -1,7 +1,7 @@
 /**
  * Shared disk cache for provider model-list fetches.
  *
- * Provider extensions (kilo, tokenrouter) fetch their model lists over the
+ * Provider extensions (kilo, tokenharbor) fetch their model lists over the
  * network at extension load time. The agent-team extension loads every
  * extension into every spawned subagent process, so each subagent boot paid
  * one or more remote fetches (up to 10s timeout each) before it could even
@@ -9,18 +9,29 @@
  * local file instead — network only happens when the cache is missing or
  * stale. The host process refreshes the cache on its own boot; short-lived
  * subagents consume it.
+ *
+ * Every provider shares ONE cache directory (<agent dir>/../Provider_Cache) and
+ * ONE cache file (model_provider.json) holding one section per provider cache
+ * key, instead of a separate <key>.json per provider.
  */
 
-import { join } from "path";
-import { homedir } from "os";
+import { dirname, join } from "path";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync, chmodSync } from "fs";
 import { randomBytes } from "crypto";
+import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import { safeUnlink } from "./core";
 
-// Global (per-user) cache directory shared by all projects. The cached model
-// lists describe provider APIs, not the local project, so one copy serves
-// every project and avoids re-fetching per project boot.
-const CACHE_DIR = join(homedir(), ".pi", "kilo_Cache");
+// Per-user cache directory, shared by all projects, placed beside the pi that
+// runs this extension instead of a fixed ~/.pi: the agent dir's parent is the
+// install/data root — ~/.pi-scope for Pi Scope's bundled agent
+// (PI_CODING_AGENT_DIR=~/.pi-scope/agent, alongside its pi shim) and ~/.pi for a
+// global install — so each agent reads and writes its OWN cache and Pi Scope
+// never touches the user's global pi data. The cached model lists describe
+// provider APIs, not the local project, so one copy still serves every project.
+const CACHE_DIR = join(dirname(getAgentDir()), "Provider_Cache");
+/** All providers are stored in this one file, keyed by provider cache key,
+ *  so the per-user cache directory holds a single model_provider.json. */
+const CACHE_FILE = join(CACHE_DIR, "model_provider.json");
 const DEFAULT_TTL_MS = 12 * 60 * 60 * 1000; // 12 hours
 
 /** Owner-only. Cached model lists can reflect account-specific entitlements
@@ -49,17 +60,28 @@ interface CacheEnvelope<T> {
   data: T;
 }
 
-function cacheFile(key: string): string {
-  return join(CACHE_DIR, `${key}.json`);
+/** The whole file: provider cache key → that provider's envelope. */
+type CacheFile = Record<string, CacheEnvelope<unknown>>;
+
+/** Read every provider section. A missing or corrupted file reads as empty
+ *  so callers degrade to "no cache" instead of throwing. */
+function readCacheFile(): CacheFile {
+  try {
+    if (!existsSync(CACHE_FILE)) return {};
+    const parsed = JSON.parse(readFileSync(CACHE_FILE, "utf-8")) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as CacheFile;
+    }
+  } catch {
+    /* missing / corrupted — treat as no cache */
+  }
+  return {};
 }
 
 function readEnvelope<T>(key: string): CacheEnvelope<T> | null {
-  try {
-    if (!existsSync(cacheFile(key))) return null;
-    const env = JSON.parse(readFileSync(cacheFile(key), "utf-8")) as CacheEnvelope<T>;
-    if (env && typeof env.cachedAt === "number" && Array.isArray(env.data)) return env;
-  } catch {
-    /* missing / corrupted — treat as no cache */
+  const env = readCacheFile()[key];
+  if (env && typeof env.cachedAt === "number" && Array.isArray(env.data)) {
+    return env as CacheEnvelope<T>;
   }
   return null;
 }
@@ -69,6 +91,45 @@ function readEnvelope<T>(key: string): CacheEnvelope<T> | null {
  *  upstream that momentarily returns `{ data: [] }`). */
 function isUsable(models: unknown[]): boolean {
   return models.length > 0;
+}
+
+/**
+ * Serialize read-modify-write of the shared cache file within this process:
+ * a write must re-read the current file first so the other providers'
+ * sections survive. TokenHarbor and Kilo register in parallel at load, so on
+ * a cold (or fully stale) cache both fetches finish at once and, without
+ * this, the second write would silently drop the first provider's section.
+ */
+let writeChain: Promise<unknown> = Promise.resolve();
+
+/** Persist one provider's section, preserving every other section already in
+ *  the file. */
+function writeEnvelope<T>(key: string, data: T[]): void {
+  writeChain = writeChain
+    .then(() => {
+      const all = readCacheFile();
+      all[key] = { cachedAt: Date.now(), data } satisfies CacheEnvelope<T[]>;
+      // Write via temp file + rename so a concurrent reader (host + a
+      // subagent booting at the same time) never sees a torn file. The temp
+      // name is unique per call (pid + random suffix) so two writers racing
+      // across processes never share a path and interleave writes into the
+      // same file; whichever rename lands last wins atomically. A
+      // cross-process race can still lose the other process's section, which
+      // costs one extra fetch later — never a corrupt file.
+      const tmp = `${CACHE_FILE}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
+      try {
+        ensureCacheDir();
+        writeFileSync(tmp, JSON.stringify(all), { mode: FILE_MODE });
+        renameSync(tmp, CACHE_FILE);
+      } catch {
+        /* cache write failure is non-fatal — but don't leave an orphaned
+         * temp file sitting on disk forever if we got past the write. */
+        safeUnlink(tmp);
+      }
+    })
+    .catch(() => {
+      /* a failed write must not poison the chain for later keys */
+    });
 }
 
 /**
@@ -90,22 +151,7 @@ export async function loadCachedModels<T>(
 
   try {
     const data = await fetchFn();
-    // Write via temp file + rename so a concurrent reader (host + a
-    // subagent booting at the same time) never sees a torn file. The temp
-    // name is unique per call (pid + random suffix) so two writers racing
-    // on the same key — e.g. two host processes booting at once — never
-    // share a path and interleave writes into the same file; whichever
-    // rename lands last simply wins atomically instead of corrupting.
-    const tmp = `${cacheFile(key)}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
-    try {
-      ensureCacheDir();
-      writeFileSync(tmp, JSON.stringify({ cachedAt: Date.now(), data } satisfies CacheEnvelope<T[]>), { mode: FILE_MODE });
-      renameSync(tmp, cacheFile(key));
-    } catch {
-      /* cache write failure is non-fatal — but don't leave an orphaned
-       * temp file sitting on disk forever if we got past the write. */
-      safeUnlink(tmp);
-    }
+    writeEnvelope(key, data);
     return data;
   } catch (err) {
     const stale = readEnvelope<T[]>(key);

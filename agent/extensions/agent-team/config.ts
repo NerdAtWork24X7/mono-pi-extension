@@ -472,9 +472,16 @@ export function loadPersistedConfig(): Partial<TeamConfig> {
   try { return JSON.parse(readFileSync(file, "utf-8")); } catch { return {}; }
 }
 
-/** Persist config to the project-local path so settings are per project. */
+/** Persist config to the project-local path so settings are per project.
+ *
+ *  The retired `subagentSkills` key is stripped here rather than in persist()
+ *  because persist() spreads the on-disk config first (so manual edits to
+ *  untracked keys survive): a file that still carries the old key would
+ *  otherwise re-write it forever. Subagent skills live in the definition —
+ *  `agents/<name>.md` `skills:` — which is the only source of truth now. */
 export function savePersistedConfig(cfg: TeamConfig) {
   const p = projectSettingsPath(CONFIG_FILE);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(cfg, null, 2));
+  const { subagentSkills: _retired, ...rest } = cfg as TeamConfig & { subagentSkills?: unknown };
+  writeFileSync(p, JSON.stringify(rest, null, 2));
 }

@@ -1,7 +1,7 @@
 /**
  * Browser Automation Tool - Stealth Playwright browser control for subagents
  *
- * Cookies: if ~/.pi/agent/cookie exists (JSON array/object or Netscape cookies.txt), they are loaded into the context on launch.
+ * Cookies: if <agent dir>/cookie exists (JSON array/object or Netscape cookies.txt), they are loaded into the context on launch.
  * Uses playwright-extra + stealth plugin to evade bot detection.
  * Each subagent process gets its own browser instance (module-level singleton).
  * Tools: browser (actions: launch, goto, click, type,
@@ -9,7 +9,7 @@
  */
 
 import { Type } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { existsSync, mkdirSync, readFileSync, readdirSync } from "fs";
 import { join } from "path";
 import { homedir, tmpdir } from "os";
@@ -28,7 +28,11 @@ let playwrightExtra: any = null;
 
 const SCREENSHOT_DIR = join(tmpdir(), "pi-browser-screenshots");
 mkdirSync(SCREENSHOT_DIR, { recursive: true });
-const COOKIE_FILE = join(homedir(), ".pi", "agent", "cookie");
+// The agent dir pi is actually running with: ~/.pi-scope/agent for Pi Scope's
+// bundled agent (PI_CODING_AGENT_DIR, pinned by its shim) and ~/.pi/agent for a
+// global install. Never a hardcoded ~/.pi — Pi Scope's cookie lives beside its
+// own agent, and a global install resolves to the same place as before.
+const COOKIE_FILE = join(getAgentDir(), "cookie");
 
 // ── Stealth & anti-detection patches (injected before every page) ────
 
@@ -237,7 +241,7 @@ export function parseCookieFile(text: string): BrowserCookie[] {
   return parseNetscapeCookies(text);
 }
 
-/** Read ~/.pi/agent/cookie; returns [] if file missing. Throws on unparseable content. */
+/** Read the agent dir's cookie file; returns [] if missing. Throws on unparseable content. */
 function readCookieFile(): BrowserCookie[] {
   let raw: string;
   try {
@@ -250,7 +254,7 @@ function readCookieFile(): BrowserCookie[] {
 
 /**
  * Resolve a bare specifier against a filesystem root (walks up node_modules).
- * pi loads this file from ~/.pi/agent/extensions/browser.ts, which has no
+ * pi loads this file from <agent dir>/extensions/browser.ts, which has no
  * node_modules of its own, so Node's ESM resolver (relative to the *importing
  * file*) fails even though the packages are installed in the project. Retrying
  * from process.cwd() bridges that gap.

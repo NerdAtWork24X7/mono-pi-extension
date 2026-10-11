@@ -8,9 +8,11 @@ export interface AgentDef {
   tools: string;
   model?: string;
   thinking?: string;
-  /** Explicit skill allowlist for this subagent. When present, global skill
-   *  discovery is disabled (`--no-skills`) and only these skill names are
-   *  loaded. When absent, the subagent receives every globally enabled skill. */
+  /** This subagent's own skill allowlist, taken verbatim from its
+   *  `agents/<name>.md` `skills:` key — the ONLY source of a subagent's skills.
+   *  Global skill discovery is disabled for the child (`--no-skills`) and only
+   *  these names are loaded; when the key is absent (or empty) the subagent gets
+   *  no skills, because there is no shared subagent set to fall back to. */
   skills?: string[];
   systemPrompt: string;
   file: string;
@@ -116,8 +118,6 @@ export interface TeamConfig {
   disabledAgents?: string[];
   /** Skill directory names enabled for the orchestrator system prompt. Empty = none enabled. */
   orchestratorSkills?: string[];
-  /** Skill directory names available to subagents. Empty = none enabled. */
-  subagentSkills?: string[];
   /** Orchestrator tool denylist. Tools listed are hidden from the orchestrator. Empty = all tools shown. */
   skipOrchestratorTools?: string[];
 }
@@ -153,8 +153,6 @@ export interface AgentTeamContext {
   disabledAgents: Set<string>;
   /** Skill directory names enabled for orchestrator system prompt. Empty = none. */
   orchestratorSkills: Set<string>;
-  /** Skill directory names available to subagents. Empty = none. */
-  subagentSkills: Set<string>;
   animFrame: number;
   wInvalidate: (() => void) | null;
   gridCols: number;
@@ -218,8 +216,10 @@ export function parseModelId(full: string): { provider: string | undefined; mode
   return { provider: undefined, model: full };
 }
 
-/** Filter skills by an enable-set. Returns all skills when the set is empty
- *  (meaning no filter), otherwise only skills whose `dir` is in the set. */
+/** Filter skills by an enable-set: only skills whose `dir` is in the set are
+ *  returned, and an EMPTY set means "no skills at all" (there is no permissive
+ *  fallback). A subagent's skills never come through here — they are read from
+ *  that subagent's own `agents/<name>.md` `skills:` key (see spawnProc). */
 export function filterSkills(
   skills: Array<{ name: string; description: string; dir: string }>,
   enabledSet: Set<string>,

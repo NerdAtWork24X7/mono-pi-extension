@@ -326,9 +326,10 @@ const HOST_ONLY_EXTENSIONS: RegExp[] = [
  *  one only when its own model belongs to that provider. When the model id has
  *  no provider prefix we keep them all (fail open — an unregistered provider
  *  would make the child's model unresolvable). */
-const PROVIDER_EXTENSIONS: Array<{ match: RegExp; provider: string }> = [
-  { match: /(^|\/)kilo\.ts$/, provider: "kilo" },
-  { match: /(^|\/)tokenharbor\.ts$/, provider: "tokenharbor" },
+const PROVIDER_EXTENSIONS: Array<{ match: RegExp; providers: string[] }> = [
+  // One file registers both dynamic providers (see model_provider.ts), so the
+  // child gets it when its model belongs to either one.
+  { match: /(^|\/)model_provider\.ts$/, providers: ["kilo", "tokenharbor"] },
 ];
 
 export interface SubagentExtensionFilter {
@@ -358,7 +359,7 @@ export function selectSubagentExtensions(extPaths: string[], filter: SubagentExt
     const toolExt = TOOL_EXTENSIONS.find(e => e.match.test(path));
     if (toolExt) return toolExt.tools.some(t => tools.has(t.toLowerCase()));
     const providerExt = PROVIDER_EXTENSIONS.find(e => e.match.test(path));
-    if (providerExt) return !provider || provider === providerExt.provider;
+    if (providerExt) return !provider || providerExt.providers.includes(provider);
     return true;
   });
 }

@@ -4,7 +4,7 @@ import { writeFileSync, existsSync } from "fs";
 import { join } from "path";
 import type { AgentProc } from "./core";
 import { spawnRpcSubprocess } from "./core";
-import { SessionLogger, agentKey, agentNameKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, parseModelId, filterSkills, safeUnlink, shortModel, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
+import { SessionLogger, agentKey, agentNameKey, clearTimers, resetForDispatch, blankProcState, displayName, extractLastLine, isWritable, parseModelId, safeUnlink, shortModel, MAX_COLLECTED_TEXT, type BatchDispatchResult, type BatchTaskResult, type AgentDef } from "./core";
 import type { AgentTeamContext, AgentMode } from "./core";
 import { resolveSkillPath } from "./config";
 import { buildExtensionCliArgs, buildScopeNameArgs } from "./extensions";
@@ -737,14 +737,15 @@ export async function activateTeam(ctx: AgentTeamContext, name: string) {
   const members = ctx.teams[name] || [];
   const byName = new Map(ctx.allDefs.map(d => [agentNameKey(d.name), d]));
 
-  // Reset each member's proc so teams.yaml is the source of truth: the
-  // disabled set is cleared first, then inactive members are re-added.
-  // Agents from other teams retain their disabled state.
+  // Duty is per team: this team's roster rows are the whole truth for it.
+  // Rebuild the off-list from scratch so a member disabled on the team we just
+  // left cannot silence a same-named member of the team we switch to (the
+  // Scope UI reads the same teams.yaml rows and follows the same rule).
+  ctx.disabledAgents.clear();
   for (const m of members) {
     const def = byName.get(agentNameKey(m.name));
     if (!def) continue;
     const key = agentNameKey(def.name);
-    ctx.disabledAgents.delete(key);
     ctx.procs.set(key, {
       def,
       teamModel: m.model,
@@ -892,12 +893,12 @@ export class ProcessManager {
 
     const extPaths = this.cachedExtPaths();
 
-    // Build skill flags: disable global skill discovery and load only the
-    // explicit skills from the agent def, or all globally enabled skills if
-    // the agent def does not specify a list.
+    // Build skill flags: disable global skill discovery and load exactly the
+    // skills the agent's OWN definition names in its `skills:` key — the single
+    // source of truth for what a subagent may use. No key (or an empty one)
+    // means no skills: there is no shared subagent default to fall back to.
     const skillFlags: string[] = ["--no-skills"];
-    const filteredSubSkills = filterSkills(ctx.skillsCache, ctx.subagentSkills);
-    const skillNames = ap.def.skills ?? filteredSubSkills.map(s => s.dir);
+    const skillNames = ap.def.skills ?? [];
     for (const skillName of skillNames) {
       const skillPath = resolveSkillPath(skillName);
       if (skillPath) {
@@ -970,6 +971,16 @@ export class ProcessManager {
         // be mistaken for events from a later process using the same AgentProc.
         ap.proc = null;
         ap.procRef = null;
+        // A child that dies BEFORE answering the readiness probe (rejected CLI
+        // flag, failed boot) must reject the readiness wait here, exactly like
+        // the spawn-error path does. Without this the wait only ends when
+        // SPAWN_READY_TIMEOUT_MS fires, so an instant crash is reported as a
+        // 15-second stall and the caller never learns why. Guarded on !ap.ready
+        // so a normally-completed child does not log a bogus READY FAILED.
+        if (!ap.ready) {
+          ap.readyResolve?.(false);
+          ap.readyResolve = null;
+        }
         // If we intentionally killed the subagent because it auto-compacted,
         // don't log a scary PROCESS EXIT box and don't overwrite the
         // TASK_TOO_LARGE signal that was already resolved.

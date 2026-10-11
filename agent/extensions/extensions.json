@@ -10,21 +10,52 @@
     "the extension available to it.",
     "An extension omitted here - or this whole file missing - is enabled for both."
   ],
-
-  "custom-tools": { "orchestrator": true, "subagent": true },
-  "web_fetch": { "orchestrator": true, "subagent": true },
-  "browser": { "orchestrator": true, "subagent": true },
-  "context7": { "orchestrator": true, "subagent": true },
-
-  "speech-to-text": { "orchestrator": true, "subagent": false },
-  "custom-footer": { "orchestrator": true, "subagent": false },
-  "image-preview": { "orchestrator": true, "subagent": false },
-  "modelcost": { "orchestrator": true, "subagent": false },
-
-  "kilo": { "orchestrator": true, "subagent": true },
-  "tokenharbor": { "orchestrator": true, "subagent": true },
-  "pi-scope": { "orchestrator": true, "subagent": true },
-  "herdr-agent-state": { "orchestrator": true, "subagent": true },
-
-  "obscura": { "orchestrator": true, "subagent": false }
+  "custom-tools": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "web_fetch": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "browser": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "context7": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "speech-to-text": {
+    "orchestrator": true,
+    "subagent": false
+  },
+  "custom-footer": {
+    "orchestrator": true,
+    "subagent": false
+  },
+  "image-preview": {
+    "orchestrator": true,
+    "subagent": false
+  },
+  "modelcost": {
+    "orchestrator": true,
+    "subagent": false
+  },
+  "model_provider": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "pi-scope": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "herdr-agent-state": {
+    "orchestrator": true,
+    "subagent": true
+  },
+  "obscura": {
+    "orchestrator": false,
+    "subagent": false
+  }
 }

@@ -11,10 +11,8 @@
     "custom_edit",
     "doc_generator"
   ],
-  "disabledAgents": [
-  ],
+  "disabledAgents": [],
   "orchestratorSkills": [],
-  "subagentSkills": [],
   "skipOrchestratorTools": [
     "context7-search",
     "context7-query",
@@ -27,6 +25,5 @@
   "debugLevel": 0,
   "mode": "standard",
   "chatWorkspaces": [],
-  "chatWorkspacesRemoved": [
-  ]
+  "chatWorkspacesRemoved": []
 }

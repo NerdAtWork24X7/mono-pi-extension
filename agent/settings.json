@@ -1,9 +1,9 @@
 {
-  "lastChangelogVersion": "1.0.4",
+  "lastChangelogVersion": "1.1.0",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
-  "defaultProvider": "opencode",
-  "defaultModel": "space-bunny-free",
+  "defaultProvider": "opencode-go",
+  "defaultModel": "step-5-preview-free",
   "defaultThinkingLevel": "high",
   "packages": [
     "npm:@juicesharp/rpiv-ask-user-question",
@@ -43,7 +43,7 @@
     "+extensions/custom-tools/index.ts",
     "+extensions/web_fetch/index.ts",
     "+extensions/speech-to-text/index.ts",
-    "+extensions/tokenharbor.ts",
+    "+extensions/model_provider.ts",
     "-extensions/obscura/index.ts",
     "+extensions/browser.ts",
     "+extensions/pi-scope.ts",
@@ -55,7 +55,5 @@
   "compaction": {
     "enabled": true
   },
-  "editorPaddingX": 1,
-  "gitCommitModel": "xiaomi-token-plan-ams/mimo-v2.6-flash",
-  "gitCommitTemplate": ""
+  "editorPaddingX": 1
 }

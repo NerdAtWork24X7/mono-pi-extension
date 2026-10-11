@@ -13,6 +13,7 @@
 - **File & Tool Handling**: Read files >200 lines in targeted line ranges. Re-read edited sections before citing. Never run write/edit on the same file in parallel. The `custom_edit` tool requires an EXACT byte-for-byte match of `oldString`. Prioritize surgical edit instead of writing complete file.
 - **Ignored Paths**: `.git`, `node_modules`, `.agent`, `.next`, `__pycache__`, `.venv`, `.env`, `build`, `dist`, `coverage`.
 - **Python**: Use `<cwd>/.venv` and `uv`. Check installed package versions before changing.
+- **Compatibility** : Make sure your changes are compatible on linux , windows , mac platform
 
 ## 3. Error Handling
 On failure: inspect error → identify root cause in source/docs → make one targeted correction → retry once. If it still fails, stop and report the blocker. Never repeat a failed command without modifying parameters or understanding the failure.

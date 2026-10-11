@@ -26,8 +26,12 @@ import { readdir as readdirAsync, stat as statAsync, unlink as unlinkAsync } fro
 import { join } from "path";
 
 import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, BatchDispatchResult, AgentMode } from "./core";
-import { displayName, shortModel, SessionLogger, RwLock, filterSkills } from "./core";
+import { displayName, shortModel, SessionLogger, RwLock, filterSkills, agentNameKey } from "./core";
 import { loadPersistedConfig, savePersistedConfig, scanAgents, loadTeamsYaml, discoverEnabledSkills, loadAgentMd, teamsYamlPath, persistTeams, seedProjectTeamsYaml, seedProjectConfig } from "./config";
+// A subagent's skills are NOT a team setting any more: each definition's own
+// `agents/<name>.md` frontmatter `skills:` key is the single source of truth
+// (see config.ts#parseAgentFile and orchestration.ts#spawnProc). The retired
+// `subagentSkills` array is dropped from the file on the next save.
 import { scanExtensionPaths, refreshExtensionSettings, extensionSettingsSignature, orchestratorHiddenTools } from "./extensions";
 import { ProcessManager, activateTeam as activateTeamImpl, handleEvent as handleEventImpl, dispatchTasks as dispatchTasksImpl } from "./orchestration";
 import { MemoryManager, createMemoryManager, extractLastAssistantText, installMemoryEscEditor, memoryFiles } from "./memory";
@@ -89,8 +93,6 @@ export class AgentTeam implements AgentTeamContext {
   disabledAgents = new Set<string>();
   /** Skill directory names enabled for orchestrator system prompt. Empty = none. */
   orchestratorSkills = new Set<string>();
-  /** Skill directory names available to subagents. Empty = none. */
-  subagentSkills = new Set<string>();
   /** Orchestrator tool denylist. Tools listed are hidden from the orchestrator. Empty = all tools shown. */
   skipOrchestratorTools: string[] = [];
 
@@ -135,7 +137,6 @@ export class AgentTeam implements AgentTeamContext {
     this.destructiveTools = this.saved.destructiveTools ?? ["custom_edit", "custom_write", "edit", "write", "web-fetch"];
     this.disabledAgents = new Set(this.saved.disabledAgents ?? []);
     this.orchestratorSkills = new Set(this.saved.orchestratorSkills ?? []);
-    this.subagentSkills = new Set(this.saved.subagentSkills ?? []);
     this.skipOrchestratorTools = this.saved.skipOrchestratorTools ?? [];
 
     this.logger = new SessionLogger();
@@ -195,6 +196,27 @@ export class AgentTeam implements AgentTeamContext {
       if (keyOf(skip) !== keyOf(this.skipOrchestratorTools)) this.skipOrchestratorTools = skip;
       if (typeof cfg.parallelDispatch === "boolean" && cfg.parallelDispatch !== this.parallelDispatch) {
         this.parallelDispatch = cfg.parallelDispatch;
+      }
+      // Duty is per team and lives in teams.yaml's roster rows; the Scope UI
+      // (Office / Settings) writes that same file. Re-derive the running
+      // session's off-list from whichever team is active so a duty toggle made
+      // in either place reaches the other, and a member kept off duty on
+      // another team can never leak into this one.
+      const liveMembers = loadTeamsYaml(teamsYamlPath()).teams[this.activeTeam] || [];
+      const liveOff = new Set(liveMembers.filter(m => m.active === false).map(m => agentNameKey(m.name)));
+      if (keyOf([...liveOff]) !== keyOf([...this.disabledAgents])) {
+        // Mirror the sidebar's own toggle: a subagent that just went off duty
+        // stops running rather than finishing its turn first.
+        for (const key of liveOff) {
+          if (this.disabledAgents.has(key)) continue;
+          const ap = this.procs.get(key);
+          if (!ap) continue;
+          if (ap.status === "running" || ap.status === "starting") this.killProc(ap, true);
+          ap.status = "dead";
+        }
+        this.disabledAgents = liveOff;
+        // Keep the active team's in-memory rows in step for the sidebar.
+        if (this.teams[this.activeTeam]) this.teams[this.activeTeam] = liveMembers;
       }
       try {
         this.pi.setActiveTools(this.activeToolList());
@@ -299,7 +321,6 @@ export class AgentTeam implements AgentTeamContext {
       destructiveTools: this.destructiveTools,
       disabledAgents: Array.from(this.disabledAgents),
       orchestratorSkills: Array.from(this.orchestratorSkills),
-      subagentSkills: Array.from(this.subagentSkills),
       // skipOrchestratorTools has a runtime setter now (sidebar tool toggles),
       // so the runtime value always wins over the on-disk copy.
       skipOrchestratorTools: this.skipOrchestratorTools,

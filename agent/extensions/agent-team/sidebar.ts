@@ -128,7 +128,7 @@ export function openSidebar(ctx: AgentTeamContext) {
       let teamIdx = 0; // index within teams section
       let skillIdx = 0; // index within orchestrator skill list
       let toolIdx = 0; // index within orchestrator tool list
-      let subIdx = 0; // index within subagents flat list (agents then skills)
+      let subIdx = 0; // index within the subagents list
       let scrollTop = 0; // viewport offset into the rendered line list
       let viewport = 40; // last computed visible line count (page size for PgUp/PgDn)
       // Snapshot ALL available skills (including disabled in settings.json) once when sidebar opens
@@ -142,7 +142,7 @@ export function openSidebar(ctx: AgentTeamContext) {
           const allAgents = agents();
           const w = Math.min(width, overlayWidth);
           const teamNames = Object.keys(ctx.teams);
-          const subLen = allAgents.length + allSkills.length;
+          const subLen = allAgents.length;
 
           const toolNames = ctx.allTools();
 
@@ -271,15 +271,8 @@ export function openSidebar(ctx: AgentTeamContext) {
             }
           }
 
-          // Subagent skills (folded under the subagents list)
-          if (allSkills.length > 0) {
-            lines.push(sidebarRow(theme, w, [{ t: "─".repeat(Math.max(4, w - 10)), c: "dim" }]));
-            for (let i = 0; i < allSkills.length; i++) {
-              const sel = section === "sub" && (allAgents.length + i) === subIdx;
-              if (sel) selectedLine = lines.length;
-              lines.push(skillRow(theme, w, allSkills[i], ctx.subagentSkills.has(allSkills[i].dir), sel));
-            }
-          }
+          // (A subagent's skills are its own `agents/<name>.md` `skills:` key —
+          // one source of truth — so there is no subagent skill list here.)
 
           // Help text + bottom border
           lines.push(boxBorder(theme, w, "sep"));
@@ -309,7 +302,7 @@ export function openSidebar(ctx: AgentTeamContext) {
         handleInput(data: string) {
           const allAgents = agents();
           const teamNames = Object.keys(ctx.teams);
-          const subLen = allAgents.length + allSkills.length;
+          const subLen = allAgents.length;
 
           const move = (delta: number) => {
             const clamp = (v: number, max: number) => Math.max(0, Math.min(Math.max(0, max), v));
@@ -389,13 +382,6 @@ export function openSidebar(ctx: AgentTeamContext) {
               const ap = allAgents[subIdx];
               setAgentDisabled(ctx, ap, !ctx.disabledAgents.has(agentNameKey(ap.def.name)));
               tui.requestRender();
-            } else {
-              // Toggle subagent skill
-              const sIdx = subIdx - allAgents.length;
-              if (sIdx >= 0 && sIdx < allSkills.length) {
-                toggleSkill(ctx, ctx.subagentSkills, allSkills[sIdx]);
-                tui.requestRender();
-              }
             }
           } else if (matchesKey(data, Key.escape)) {
             closeSidebar();

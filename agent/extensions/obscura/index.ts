@@ -21,7 +21,7 @@
  *
  * ENV:
  *   OBSCURA_BIN               — path to obscura binary (default bundled)
- *   WEB_FETCH_CACHE_DIR       — disk cache directory (default ~/.pi/web-fetch-cache)
+ *   WEB_FETCH_CACHE_DIR       — disk cache directory (default <cwd>/.pi/web-fetch-cache)
  *   WEB_FETCH_CACHE_TTL_MS    — cache TTL in ms (default 1 hour)
  *   WEB_FETCH_FETCH_TIMEOUT_MS — per-fetch timeout in ms (default 30s)
  *   WEB_FETCH_MAX_CHARS       — per-page text cap (default 4000)
@@ -34,9 +34,8 @@ import { createHash } from "crypto";
 import { execFile } from "child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "fs";
 import { join, resolve, dirname } from "path";
-import { homedir } from "os";
 import { fileURLToPath } from "url";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@mariozechner/pi-ai";
 
 // ── Extension directory (for bundled binary) ──────────────────────────────
@@ -56,7 +55,9 @@ const OBSCURA_BIN: string = (() => {
   if (env && existsSync(env)) return env;
   const bundled = join(EXTENSION_DIR, "obscura");
   if (existsSync(bundled)) return bundled;
-  const def = join(homedir(), ".pi", "obscura", "obscura");
+  // Beside pi's data root, like the provider model cache: ~/.pi-scope for Pi
+  // Scope's own agent, ~/.pi for a global install.
+  const def = join(dirname(getAgentDir()), "obscura", "obscura");
   if (existsSync(def)) return def;
   // last resort — hope it's on PATH
   return "obscura";
@@ -88,9 +89,9 @@ const MEM_CACHE_MAX_ENTRY = 512 * 1024; // big raw HTML stays disk-only
 
 // ── Cookie helpers ──────────────────────────────────────────────────────────
 
-const AGENT_COOKIE_FILE = join(homedir(), ".pi", "agent", "cookie");
+const AGENT_COOKIE_FILE = join(getAgentDir(), "cookie");
 
-/** Load ~/.pi/agent/cookie (JSON array of Playwright-style cookies) and
+/** Load the agent dir's cookie (JSON array of Playwright-style cookies) and
  *  convert to Obscura cookies.json format. Returns null if file missing/empty. */
 function loadAgentCookies(): string | null {
   let raw: string;
@@ -405,7 +406,7 @@ export default function (pi: ExtensionAPI) {
       const stealth = params.stealth ?? STEALTH_DEFAULT;
       const proxy = (params.proxy?.trim() ?? "") || PROXY_DEFAULT || undefined;
 
-      // ── Cookie setup (auto-load from ~/.pi/agent/cookie) ──────
+      // ── Cookie setup (auto-load from the agent dir's cookie) ──────
       const cookiesJson = loadAgentCookies();
       let cookieHashVal: string | undefined;
       let storageDir: string | undefined;
