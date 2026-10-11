@@ -19,6 +19,17 @@ const STREAM_INVALIDATE_THROTTLE_MS = 100;
 export const MAX_RESPONSE_LENGTH = 600000; // Subagent tool-result cap. Keep the truncation marker in formatBatchParts (integrations.ts) in sync.
 export const PONG_TIMEOUT = 600_000;  // 10 min — inactivity (reset on any RPC event)
 
+/** Loop guard: stop a subagent that repeats the exact same tool call (same name
+ *  AND same arguments) this many times within one dispatch. Healthy agents in
+ *  measured runs repeated a signature at most twice, so this has high precision. */
+export const STUCK_REPEAT_LIMIT = 3;
+/** Loop guard: stop a subagent that makes this many tool calls without ever
+ *  emitting any assistant text. A worker that acts forever and never reports
+ *  cannot converge — it would otherwise run until the wall-clock cap (or a
+ *  provider timeout) and return nothing. Healthy agents always emit text at
+ *  least once, so this never fires on a productive worker. */
+export const STUCK_TOOL_LIMIT = 40;
+
 /** Post-process a subagent's static system prompt before it is handed to the
  *  `pi` subprocess. This is the single hook where the subagent prompt can be
  *  adjusted at runtime (e.g. for the orchestrator's creative/standard mode).
@@ -130,6 +141,58 @@ function timeoutOutput(ap: AgentProc, reason: string): string {
   return partial
     ? `TIMEOUT: ${reason}.\n\n--- Partial output captured before the timeout ---\n${partial}`
     : `TIMEOUT: ${reason}. No output was produced.`;
+}
+
+/** Deterministic serialization of tool-call arguments, so key order in the
+ *  model's JSON cannot make two logically identical calls look different. */
+function stableKey(v: unknown): string {
+  if (v === null || typeof v !== "object") return JSON.stringify(v) ?? String(v);
+  if (Array.isArray(v)) return "[" + v.map(stableKey).join(",") + "]";
+  const obj = v as Record<string, unknown>;
+  return "{" + Object.keys(obj).sort().map(k => JSON.stringify(k) + ":" + stableKey(obj[k])).join(",") + "}";
+}
+
+/** Identity of a tool call: tool name + normalized arguments. */
+function toolSignature(ev: any): string {
+  let args: unknown = ev.args ?? ev.input ?? {};
+  if (typeof args === "string") { try { args = JSON.parse(args); } catch { /* keep raw */ } }
+  return `${ev.toolName ?? ev.name ?? "?"}\u0000${stableKey(args)}`;
+}
+
+/** Terminate the dispatch with a STUCK_LOOP signal (including the concrete
+ *  reason) so the orchestrator narrows and re-dispatches, instead of waiting
+ *  for the wall-clock cap. Mirrors abortTooLarge. */
+function abortStuck(ctx: AgentTeamContext, ap: AgentProc, why: string) {
+  if (ap.stuckAborted) return;
+  ap.stuckAborted = true;
+  ctx.logger.logErrorBox(ap, "STUCK LOOP", `${why} — stopping the subagent`);
+  ctx.resolveIfPending(ap, `STUCK_LOOP: ${why}. The subagent was repeating itself without converging and was stopped. Narrow the scope (specific files/sections) and re-dispatch.`, 1);
+  ctx.killProc(ap, true);
+  if (ctx.wCtx) ctx.wCtx.ui.notify(ctx.tag(ap, "stuck loop — stopped"), "error");
+  ctx.invalidate();
+}
+
+/** Record one tool call and report whether the subagent has become stuck.
+ *  Two independent rules, both calibrated against real runs:
+ *    1. the exact same tool call repeated ≥ STUCK_REPEAT_LIMIT times, or
+ *    2. ≥ STUCK_TOOL_LIMIT tool calls with no assistant text ever emitted.
+ *  Either means the subagent stopped making progress; returning true tells the
+ *  caller to skip the call (the dispatch has already been resolved + killed). */
+function noteToolCall(ctx: AgentTeamContext, ap: AgentProc, ev: any): boolean {
+  if (ap.status !== "running" || ap.stuckAborted) return false;
+  if (!ap.toolSigCounts) ap.toolSigCounts = new Map();
+  const sig = toolSignature(ev);
+  const n = (ap.toolSigCounts.get(sig) ?? 0) + 1;
+  ap.toolSigCounts.set(sig, n);
+  if (n >= STUCK_REPEAT_LIMIT) {
+    abortStuck(ctx, ap, `repeated the same ${ev.toolName ?? ev.name ?? "tool"} call ${n}× with identical arguments`);
+    return true;
+  }
+  if (!ap.assistantTextSeen && ap.toolCount >= STUCK_TOOL_LIMIT) {
+    abortStuck(ctx, ap, `${ap.toolCount} tool calls without producing any answer`);
+    return true;
+  }
+  return false;
 }
 
 export function handleEvent(ctx: AgentTeamContext, ap: AgentProc, line: string) {
@@ -258,7 +321,7 @@ export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
         : (ev.data?.result?.text ?? ev.data?.text ?? ev.data?.content ?? "");
     // Always accept the latest response text — multi-turn subagents may have
     // earlier message_end events that set lastAssistantText with stale content.
-    if (resultText) ap.lastAssistantText = String(resultText);
+    if (resultText) { ap.lastAssistantText = String(resultText); ap.assistantTextSeen = true; }
   }
 
   if (!ev.success && ap.status === "running" && ap.resolveDispatch) {
@@ -306,6 +369,7 @@ export function handleMessageUpdate(ctx: AgentTeamContext, ap: AgentProc, ev: an
   const delta = ev.assistantMessageEvent;
   if (delta?.type !== "text_delta") return;
   const chunk = delta.delta || "";
+  if (chunk) ap.assistantTextSeen = true;
   ap.collectedText += chunk;
   ap.currentMessageText += chunk;
   // Cap collectedText and currentMessageText to prevent unbounded memory
@@ -354,6 +418,7 @@ export function handleMessageEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) 
   // Don't promote partial text from an errored/aborted stream — a following
   // auto-retry re-streams the real message and would overwrite it anyway.
   const stop = ev.message?.stopReason;
+  if (ap.currentMessageText.trim()) ap.assistantTextSeen = true;
   if (stop !== "error" && stop !== "aborted" && ap.currentMessageText.trim()) ap.lastAssistantText = ap.currentMessageText;
   ap.currentMessageText = "";
   ctx.invalidate();
@@ -377,6 +442,9 @@ function fmtToolArg(v: unknown): string {
 
 export function handleToolStart(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
   ap.toolCount++;
+  // Loop guard: a subagent that repeats itself (or never reports) is stopped
+  // here with a concrete reason instead of burning the whole dispatch budget.
+  if (noteToolCall(ctx, ap, ev)) return;
   let detail = "";
   let args: unknown = ev.args;
   // Some hosts serialize args as a JSON string rather than an object.
@@ -420,9 +488,9 @@ export function handleToolEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
  *  final output. Fired on `agent_end` (pi ≤0.84) or `agent_settled`
  *  (pi ≥0.85) — both route here. */
 export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
-  // If we already terminated the subagent because it auto-compacted, ignore
-  // any late completion event and don't overwrite the TASK_TOO_LARGE signal.
-  if (ap.autoCompacted) return;
+  // If we already terminated the subagent because it auto-compacted or got
+  // stuck, ignore any late completion event and don't overwrite that signal.
+  if (ap.autoCompacted || ap.stuckAborted) return;
   // The shared elapsed ticker drops this proc on the next tick (status flips
   // to "done" below) — no per-dispatch timer to clear here.
   ctx.logger.flushStreamBuf(ap);
@@ -435,7 +503,7 @@ export function handleAgentEnd(ctx: AgentTeamContext, ap: AgentProc, _ev: any) {
   const completed = output !== "(no output)";
   const finalOutput = completed
     ? output
-    : "Subagent ended without producing any output — task not completed.";
+    : `Subagent ended without producing any output after ${ap.toolCount} tool call(s) — the task was likely too broad or the model stalled. Narrow the scope and re-dispatch.`;
 
   if (!completed) {
     ctx.logger.logErrorBox(ap, "EMPTY RESPONSE",
@@ -1024,7 +1092,7 @@ export class ProcessManager {
         // If we intentionally killed the subagent because it auto-compacted,
         // don't log a scary PROCESS EXIT box and don't overwrite the
         // TASK_TOO_LARGE signal that was already resolved.
-        if (!ap.autoCompacted) {
+        if (!ap.autoCompacted && !ap.stuckAborted) {
           const captured = capturedText(ap);
           if (code !== 0 && !captured) {
             ctx.logger.logErrorBox(ap, "PROCESS EXIT", exitDetail);
@@ -1039,7 +1107,7 @@ export class ProcessManager {
           // retries only that task instead of trusting an empty result.
           const ok = code === 0 && !!captured;
           const text = captured || (code === 0
-            ? "Subagent exited without producing any output — task not completed."
+            ? `Subagent exited without producing any output after ${ap.toolCount} tool call(s) — task not completed.`
             : exitDetail);
           this.resolveIfPending(ap, text, ok ? 0 : 1);
         }

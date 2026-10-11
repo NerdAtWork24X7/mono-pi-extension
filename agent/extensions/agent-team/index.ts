@@ -27,7 +27,7 @@ import { join } from "path";
 
 import type { AgentDef, AgentProc, TeamMember, TeamConfig, AgentTeamContext, BatchDispatchResult, AgentMode } from "./core";
 import { displayName, shortModel, SessionLogger, RwLock, filterSkills, agentNameKey, DEFAULT_DISPATCH_TIMEOUT_MS, clampDispatchTimeout } from "./core";
-import { loadPersistedConfig, savePersistedConfig, scanAgents, loadTeamsYaml, discoverEnabledSkills, loadAgentMd, teamsYamlPath, persistTeams, seedProjectTeamsYaml, seedProjectConfig } from "./config";
+import { loadPersistedConfig, savePersistedConfig, scanAgents, loadTeamsYaml, discoverEnabledSkills, loadAgentMd, teamsYamlPath, persistTeams, seedProjectTeamsYaml, seedProjectConfig, resolveSkillPath } from "./config";
 // A subagent's skills are NOT a team setting any more: each definition's own
 // `agents/<name>.md` frontmatter `skills:` key is the single source of truth
 // (see config.ts#parseAgentFile and orchestration.ts#spawnProc). The retired
@@ -578,7 +578,7 @@ export default function (pi: ExtensionAPI) {
       cwd: process.cwd(),
       memory: team.memoryManager ? { dir: team.memoryDir, files: memoryFiles(team.memoryDir) } : null,
       agentMd: team.agentMdCache,
-      skills: filterSkills(team.skillsCache, team.orchestratorSkills),
+      skills: filterSkills(team.skillsCache, team.orchestratorSkills).map(s => ({ name: s.name, description: s.description, path: resolveSkillPath(s.dir) })),
       orchestratorTools: team.activeToolList(),
     });
   });

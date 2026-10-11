@@ -49,7 +49,7 @@ export function buildSystemPrompt(args: {
   cwd: string;
   memory?: { dir: string; files: Array<{ path: string; heading: string }> } | null;
   agentMd?: string | null;
-  skills?: Array<{ name: string; description: string }>;
+  skills?: Array<{ name: string; description: string; path?: string }>;
   parallel?: boolean;
   harshCriticEnabled?: boolean;
   orchestratorTools?: string[];
@@ -115,7 +115,7 @@ export function buildSystemPrompt(args: {
 Subagents are stateless, isolated workers. You own architecture, integration, and final decisions.
 - **Plan First**: Formulate subtasks and dependencies before dispatching. Provide specific objective, non-overlapping scope (files/paths/symbols), relevant context, and acceptance criteria.
 ${dispatchToolNote}- **Parallel Strategy**: Run independent read-only searches/lookups in parallel (${ctxGap}). Batch file edits into single dispatches; NEVER edit or write to the same file concurrently.
-- **Delegation Guidelines**: Research requires primary sources & exact versions; image tasks need absolute paths; UI tasks must include the Visual Standard in context.
+- **Delegation Guidelines**: Research requires primary sources & exact versions; image tasks need absolute paths; UI tasks must include the Visual Standard in context. Review/audit tasks must name the exact files or sections to inspect and a bounded scope — never ask a reviewer to audit "everything"; split a whole-project audit into per-area tasks.
 - **Failure Protocol**: Non-zero exit, timeout, or BLOCKED = failure. Never invent success. Edit mismatch? Re-read file and send exact whitespace. Retry once with narrowed scope (max 2 retries total), then resolve directly or report blocker.
 
 | Subagent | Role | Tools | Dispatch |
@@ -147,7 +147,7 @@ ${tableRows}
 6. **Finalize**: ${docsStep} Inspect diff against the Craft Bar. Ensure no unverified claims or regressions remain.`;
 
   const agentMdSection = args.agentMd ? "\n## Project AGENTS.md\n" + args.agentMd.trim() + "\n" : "";
-  const skillsSection = args.skills && args.skills.length ? "\n## Skills\n" + args.skills.map(s => "- **" + s.name + "**: " + (s.description || "(no description)")).join("\n") + "\n" : "";
+  const skillsSection = args.skills && args.skills.length ? "\n## Skills\nEnabled skills — read each skill's `SKILL.md` for full instructions:\n" + args.skills.map(s => "- **" + s.name + "**" + (s.path ? " (`" + s.path + "`)" : "") + ": " + (s.description || "(no description)")).join("\n") + "\n" : "";
   const memorySection = args.memory && (args.memory.dir || (args.memory.files && args.memory.files.length))
     ? "\n## Project Memory\nMemory directory = `" + args.memory.dir + "`:\n" +
     args.memory.files.map(f => "- `" + relativeToDir(f.path, args.memory.dir) + "` - " + f.heading).join("\n") +

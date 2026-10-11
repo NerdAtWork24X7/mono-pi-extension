@@ -58,6 +58,16 @@ export interface AgentProc {
   resetPongTimeout?: () => void; // resets the 10-min pong timer
   resolveDispatch: ((output: string, code: number) => void) | null;
   autoCompacted: boolean;        // true if subagent hit auto-compaction
+  /** True once the harness stopped this dispatch for a stuck loop (repeated
+   *  identical tool call, or sustained tool use with no assistant text). Late
+   *  `agent_end`/close events must not overwrite the STUCK_LOOP signal. */
+  stuckAborted: boolean;
+  /** Loop guard: tool-call signature → occurrences in the current dispatch. */
+  toolSigCounts: Map<string, number>;
+  /** Loop guard: true once this dispatch has produced any assistant text. A
+   *  worker that runs many tool calls without ever reporting is loop evidence
+   *  (healthy agents always emit at least one text response). */
+  assistantTextSeen: boolean;
   compactionCount: number;       // auto-compactions in the current dispatch (abort at cap)
   sessionFile: string;
   systemPromptFile: string;
@@ -302,6 +312,9 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
     timer: undefined, dispatchTimeout: undefined, wallClockTimeout: undefined,
     lastActivity: 0, resetPongTimeout: undefined, resolveDispatch: null,
     autoCompacted: false,
+    stuckAborted: false,
+    toolSigCounts: new Map(),
+    assistantTextSeen: false,
     compactionCount: 0,
     sessionFile: "", systemPromptFile: "", lastPromptHash: undefined,
     streamLineBuf: "",
@@ -336,6 +349,9 @@ export function resetForDispatch(ap: AgentProc) {
   ap.streamLogIdx = ap.logLines.length;
   ap.resolveDispatch = null;
   ap.autoCompacted = false;
+  ap.stuckAborted = false;
+  ap.toolSigCounts.clear();
+  ap.assistantTextSeen = false;
   ap.compactionCount = 0;
   ap.toolCount = 0;
   ap.task = "";
