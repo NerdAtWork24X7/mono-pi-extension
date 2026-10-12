@@ -38,10 +38,6 @@
     "orchestrator": true,
     "subagent": false
   },
-  "modelcost": {
-    "orchestrator": true,
-    "subagent": false
-  },
   "model_provider": {
     "orchestrator": true,
     "subagent": true

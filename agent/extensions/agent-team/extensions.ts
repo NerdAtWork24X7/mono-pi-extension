@@ -312,13 +312,16 @@ const TOOL_EXTENSIONS: Array<{ match: RegExp; tools: string[] }> = [
   { match: /(^|\/)context7\.ts$/, tools: ["context7-search", "context7-query"] },
 ];
 
-/** Interactive-host extensions: UI wiring (footer, dictation, model picker) or
+/** Interactive-host extensions: UI wiring (footer, dictation, previews) or
  *  input hooks that are inert in a headless RPC child. A subagent can never
- *  use them, and each one costs a module load per dispatch. */
+ *  use them, and each one costs a module load per dispatch.
+ *
+ *  model_provider.ts is NOT host-only despite registering the /modelcost
+ *  model picker: it also registers the kilo/tokenharbor providers, so a child
+ *  on either of those models needs it — PROVIDER_EXTENSIONS below routes it. */
 const HOST_ONLY_EXTENSIONS: RegExp[] = [
   /(^|\/)speech-to-text\/index\.ts$/,
   /(^|\/)custom-footer\.ts$/,
-  /(^|\/)modelcost\.ts$/,
   /(^|\/)image-preview\.ts$/,
 ];
 

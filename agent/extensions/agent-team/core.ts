@@ -64,10 +64,11 @@ export interface AgentProc {
   stuckAborted: boolean;
   /** Loop guard: tool-call signature → occurrences in the current dispatch. */
   toolSigCounts: Map<string, number>;
-  /** Loop guard: true once this dispatch has produced any assistant text. A
-   *  worker that runs many tool calls without ever reporting is loop evidence
-   *  (healthy agents always emit at least one text response). */
-  assistantTextSeen: boolean;
+  /** Loop guard: tool calls made since the last assistant text was emitted in
+   *  the current dispatch (reset to 0 on every assistant text, including the
+   *  first). A streak — not a lifetime total — so a subagent that reports once
+   *  and then loops forever with tool calls still trips STUCK_TOOL_LIMIT. */
+  toolsSinceAssistantText: number;
   compactionCount: number;       // auto-compactions in the current dispatch (abort at cap)
   sessionFile: string;
   systemPromptFile: string;
@@ -314,7 +315,7 @@ export function blankProcState(): Omit<AgentProc, "def" | "model" | "teamModel">
     autoCompacted: false,
     stuckAborted: false,
     toolSigCounts: new Map(),
-    assistantTextSeen: false,
+    toolsSinceAssistantText: 0,
     compactionCount: 0,
     sessionFile: "", systemPromptFile: "", lastPromptHash: undefined,
     streamLineBuf: "",
@@ -351,7 +352,7 @@ export function resetForDispatch(ap: AgentProc) {
   ap.autoCompacted = false;
   ap.stuckAborted = false;
   ap.toolSigCounts.clear();
-  ap.assistantTextSeen = false;
+  ap.toolsSinceAssistantText = 0;
   ap.compactionCount = 0;
   ap.toolCount = 0;
   ap.task = "";

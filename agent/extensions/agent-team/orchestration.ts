@@ -23,11 +23,13 @@ export const PONG_TIMEOUT = 600_000;  // 10 min — inactivity (reset on any RPC
  *  AND same arguments) this many times within one dispatch. Healthy agents in
  *  measured runs repeated a signature at most twice, so this has high precision. */
 export const STUCK_REPEAT_LIMIT = 3;
-/** Loop guard: stop a subagent that makes this many tool calls without ever
- *  emitting any assistant text. A worker that acts forever and never reports
- *  cannot converge — it would otherwise run until the wall-clock cap (or a
- *  provider timeout) and return nothing. Healthy agents always emit text at
- *  least once, so this never fires on a productive worker. */
+/** Loop guard: stop a subagent that makes this many consecutive tool calls
+ *  without emitting any assistant text. A worker that acts forever and never
+ *  reports cannot converge — it would otherwise run until the wall-clock cap
+ *  (or a provider timeout) and return nothing. The count is a streak that
+ *  resets on every assistant text (see `toolsSinceAssistantText`), so a
+ *  subagent that answers once and then loops forever is still stopped; healthy
+ *  agents keep reporting, so this never fires on a productive worker. */
 export const STUCK_TOOL_LIMIT = 40;
 
 /** Post-process a subagent's static system prompt before it is handed to the
@@ -175,7 +177,9 @@ function abortStuck(ctx: AgentTeamContext, ap: AgentProc, why: string) {
 /** Record one tool call and report whether the subagent has become stuck.
  *  Two independent rules, both calibrated against real runs:
  *    1. the exact same tool call repeated ≥ STUCK_REPEAT_LIMIT times, or
- *    2. ≥ STUCK_TOOL_LIMIT tool calls with no assistant text ever emitted.
+ *    2. ≥ STUCK_TOOL_LIMIT consecutive tool calls with no assistant text
+ *       emitted in between (the streak resets on every assistant text, so a
+ *       subagent that reported once and then loops is still caught).
  *  Either means the subagent stopped making progress; returning true tells the
  *  caller to skip the call (the dispatch has already been resolved + killed). */
 function noteToolCall(ctx: AgentTeamContext, ap: AgentProc, ev: any): boolean {
@@ -184,12 +188,13 @@ function noteToolCall(ctx: AgentTeamContext, ap: AgentProc, ev: any): boolean {
   const sig = toolSignature(ev);
   const n = (ap.toolSigCounts.get(sig) ?? 0) + 1;
   ap.toolSigCounts.set(sig, n);
+  const sinceText = ++ap.toolsSinceAssistantText;
   if (n >= STUCK_REPEAT_LIMIT) {
     abortStuck(ctx, ap, `repeated the same ${ev.toolName ?? ev.name ?? "tool"} call ${n}× with identical arguments`);
     return true;
   }
-  if (!ap.assistantTextSeen && ap.toolCount >= STUCK_TOOL_LIMIT) {
-    abortStuck(ctx, ap, `${ap.toolCount} tool calls without producing any answer`);
+  if (sinceText >= STUCK_TOOL_LIMIT) {
+    abortStuck(ctx, ap, `${sinceText} tool calls without producing any answer`);
     return true;
   }
   return false;
@@ -321,7 +326,7 @@ export function handleResponse(ctx: AgentTeamContext, ap: AgentProc, ev: any) {
         : (ev.data?.result?.text ?? ev.data?.text ?? ev.data?.content ?? "");
     // Always accept the latest response text — multi-turn subagents may have
     // earlier message_end events that set lastAssistantText with stale content.
-    if (resultText) { ap.lastAssistantText = String(resultText); ap.assistantTextSeen = true; }
+    if (resultText) { ap.lastAssistantText = String(resultText); ap.toolsSinceAssistantText = 0; }
   }
 
   if (!ev.success && ap.status === "running" && ap.resolveDispatch) {
@@ -369,7 +374,9 @@ export function handleMessageUpdate(ctx: AgentTeamContext, ap: AgentProc, ev: an
   const delta = ev.assistantMessageEvent;
   if (delta?.type !== "text_delta") return;
   const chunk = delta.delta || "";
-  if (chunk) ap.assistantTextSeen = true;
+  // Assistant text clears the "no-report" streak that STUCK_TOOL_LIMIT measures:
+  // only uninterrupted stretches of unreported tool work count as a loop.
+  if (chunk) ap.toolsSinceAssistantText = 0;
   ap.collectedText += chunk;
   ap.currentMessageText += chunk;
   // Cap collectedText and currentMessageText to prevent unbounded memory
@@ -418,7 +425,7 @@ export function handleMessageEnd(ctx: AgentTeamContext, ap: AgentProc, ev: any) 
   // Don't promote partial text from an errored/aborted stream — a following
   // auto-retry re-streams the real message and would overwrite it anyway.
   const stop = ev.message?.stopReason;
-  if (ap.currentMessageText.trim()) ap.assistantTextSeen = true;
+  if (ap.currentMessageText.trim()) ap.toolsSinceAssistantText = 0;
   if (stop !== "error" && stop !== "aborted" && ap.currentMessageText.trim()) ap.lastAssistantText = ap.currentMessageText;
   ap.currentMessageText = "";
   ctx.invalidate();
@@ -613,6 +620,7 @@ export async function runAgent(
   ap.status = "running";
   ap.task = task;
   ap.toolCount = 0;
+  ap.toolsSinceAssistantText = 0;
   ap.elapsed = 0;
   ap.tokensUsed = 0;
   ap.tokensOut = 0;
@@ -914,8 +922,8 @@ export class ProcessManager {
       "`" + memory.dir + "`\n\n" +
       "A background summarizer updates these per-category files after each turn:\n" +
       memory.files.map((f) => "- `" + f.path + "` - " + f.heading).join("\n") + "\n\n" +
-      "**VERY IMPORTANT** Read memory files to understand Repo before working on any Task.\n"
-      : "";
+      "**VERY IMPORTANT** Read memory files to understand Repo before working on any Task.\n\n Add a pong assited message after 10 consecutive tool calls \n"
+      : "Add a pong assited message after 10 consecutive tool calls \n";
     const content = `${postProcessAgentPrompt(ap.def.systemPrompt, mode)}${memorySection}\n\n`;
     if (ap.lastPromptHash === content && ap.systemPromptFile && existsSync(ap.systemPromptFile)) return; // skip if unchanged and file still exists
     ap.lastPromptHash = content;

@@ -180,7 +180,8 @@ agent/
     web_fetch/             # Persistent-Chromium web fetch + search (Playwright)
     obscura/              # Web-fetch via Obscura headless browser (setup.sh extracts binaries)
     speech-to-text/        # Alt+T dictation via the Groq Whisper API
-    browser.ts, context7.ts, modelcost.ts, pi-scope.ts, ...
+    browser.ts, context7.ts, pi-scope.ts, ...
+    model_provider.ts      # Kilo + TokenHarbor providers, /modelcost cost picker
     extensions.json        # Which extension runs for the orchestrator / subagents
   skills/                  # Reusable skills (flet, pyside6, electron-scaffold, ...)
 .pi/                      # Project configuration
