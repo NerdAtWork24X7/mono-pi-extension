@@ -922,8 +922,8 @@ export class ProcessManager {
       "`" + memory.dir + "`\n\n" +
       "A background summarizer updates these per-category files after each turn:\n" +
       memory.files.map((f) => "- `" + f.path + "` - " + f.heading).join("\n") + "\n\n" +
-      "**VERY IMPORTANT** Read memory files to understand Repo before working on any Task.\n\n Add a pong assited message after 10 consecutive tool calls \n"
-      : "Add a pong assited message after 10 consecutive tool calls \n";
+      "**VERY IMPORTANT** Read memory files to understand Repo before working on any Task.\n\n  ## Alive Trigger \n - Add a pong assisted message after 10 consecutive tool calls \n"
+      : "\n\n\n ## Alive Trigger \n - Add a pong assisted message after 10 consecutive tool calls \n";
     const content = `${postProcessAgentPrompt(ap.def.systemPrompt, mode)}${memorySection}\n\n`;
     if (ap.lastPromptHash === content && ap.systemPromptFile && existsSync(ap.systemPromptFile)) return; // skip if unchanged and file still exists
     ap.lastPromptHash = content;
