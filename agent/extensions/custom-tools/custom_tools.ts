@@ -1,11 +1,19 @@
 // ── Custom file tools: custom_read, custom_write, custom_edit ──
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { detectSupportedImageMimeTypeFromFile, resizeImage, type ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Text } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { dirname, resolve } from "path";
+import { dirname, extname, resolve } from "path";
 import { randomBytes } from "crypto";
+
+/** Refuse to load oversized images into memory; vision models cannot use them
+ *  at full resolution anyway. Callers should downscale first. */
+const MAX_IMAGE_BYTES = 25 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION = 2000;
+/** Extensions worth probing. The extension check keeps the hot text-read path
+ *  from opening every file twice; MIME detection still validates the bytes. */
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
 // ── File helpers shared by the custom read/write/edit tools ──
 
@@ -234,7 +242,7 @@ export function registerCustomReadTool(pi: ExtensionAPI) {
   pi.registerTool({
     name: "custom_read",
     label: "Custom Read",
-    description: "Read file text or line range. Accepts path or file alias, plus optional offset and limit.",
+    description: "Read file text or line range, or an image (PNG/JPEG/WebP/GIF) as vision content. Accepts path or file alias, plus optional offset and limit.",
     parameters: Type.Object({
       path: Type.Optional(Type.String()),
       file: Type.Optional(Type.String()),
@@ -253,8 +261,56 @@ export function registerCustomReadTool(pi: ExtensionAPI) {
         throw new Error(`File not found: ${filePath}`);
       }
       // Rejects directories (EISDIR) and FIFOs/sockets (which would hang a read).
-      if (!statSync(absolutePath).isFile()) {
+      const fileStat = statSync(absolutePath);
+      if (!fileStat.isFile()) {
         throw new Error(`Not a regular file: ${filePath}`);
+      }
+
+      // Images are returned as vision content so a subagent (image_analyzer)
+      // can inspect pixels directly. Detection is best-effort: any failure
+      // falls through to the normal text path.
+      const ext = extname(absolutePath).toLowerCase();
+      const isImageExt = IMAGE_EXTENSIONS.has(ext);
+      // Check the extension-based size before MIME detection: the detector may
+      // reject an oversized file, which would otherwise fall through to the
+      // binary text path and hide the real reason.
+      if (isImageExt && fileStat.size > MAX_IMAGE_BYTES) {
+        throw new Error(`Image is too large (${fileStat.size} bytes; max ${MAX_IMAGE_BYTES}). Downscale it first.`);
+      }
+      const imageMime = (isImageExt || ext === "")
+        ? await detectSupportedImageMimeTypeFromFile(absolutePath).catch(() => null)
+        : null;
+      if (imageMime) {
+        if (fileStat.size > MAX_IMAGE_BYTES) {
+          throw new Error(`Image is too large (${fileStat.size} bytes; max ${MAX_IMAGE_BYTES}). Downscale it first.`);
+        }
+        const bytes = new Uint8Array(readFileSync(absolutePath));
+        // Resize to a vision-friendly size; fall back to raw bytes if the
+        // decoder refuses so the model still receives the image.
+        const resized = await resizeImage(bytes, imageMime, {
+          maxWidth: MAX_IMAGE_DIMENSION,
+          maxHeight: MAX_IMAGE_DIMENSION,
+        }).catch(() => null);
+        const data = resized?.data ?? Buffer.from(bytes).toString("base64");
+        const mimeType = resized?.mimeType ?? imageMime;
+        const width = resized?.width ?? 0;
+        const height = resized?.height ?? 0;
+        const dims = width && height ? `${width}x${height}` : "unknown dimensions";
+        return {
+          content: [
+            { type: "image" as const, data, mimeType },
+            { type: "text" as const, text: `[custom_read: image ${absolutePath} (${dims}, ${mimeType}, ${fileStat.size} bytes)]` },
+          ],
+          details: {
+            ok: true,
+            filePath,
+            image: true,
+            mimeType,
+            width,
+            height,
+            bytes: fileStat.size,
+          },
+        };
       }
 
       const offset = typeof input.offset === "number" ? Math.max(1, Math.floor(input.offset)) : 1;
@@ -301,6 +357,13 @@ export function registerCustomReadTool(pi: ExtensionAPI) {
       const details = result.details as any;
       const text = (result.content[0] as any)?.text || "";
       if (details?.ok === false) return new Text(theme.fg("error", text), 0, 0);
+      if (details?.image) {
+        const dims = details.width && details.height ? `${details.width}x${details.height}` : "image";
+        return new Text(
+          theme.fg("dim", `— ${dims} ${details.mimeType || ""} `) + theme.fg("accent", details.filePath),
+          0, 0,
+        );
+      }
       // Collapsed (Ctrl+O off): show a one-line summary only. Note that pi's
       // tool container still renders a trailing "…" line, which ends up above
       // this body — same as the built-in tools, so the affordance stays.
