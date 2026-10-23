@@ -13,3 +13,4 @@ tmp/
 agent/extensions/obscura/obscura
 agent/extensions/obscura/obscura-worker
 
+.pi-scope/

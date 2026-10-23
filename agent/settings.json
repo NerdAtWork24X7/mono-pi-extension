@@ -1,9 +1,9 @@
 {
-  "lastChangelogVersion": "1.1.0",
+  "lastChangelogVersion": "1.4.0",
   "doubleEscapeAction": "tree",
   "quietStartup": true,
-  "defaultProvider": "opencode-go",
-  "defaultModel": "step-5-preview-free",
+  "defaultProvider": "tokenharbor",
+  "defaultModel": "deepseek-v4.1-flash-1017",
   "defaultThinkingLevel": "high",
   "packages": [
     "npm:@juicesharp/rpiv-ask-user-question",
@@ -22,21 +22,21 @@
     "-skills/pyside6/SKILL.md",
     "-skills/improve-codebase-architecture/SKILL.md",
     "-skills/electron-scaffold/SKILL.md",
-    "-skills/graphify/SKILL.md"
+    "-skills/graphify/SKILL.md",
+    "-skills/video-creator/SKILL.md"
   ],
   "enabledModels": [
-    "kilo/stepfun/step-3.7-flash:free",
-    "opencode-go/glm-5.3-flash",
-    "opencode-go/muse-spark-1.3-contributor",
-    "opencode-go/glm-5.3",
-    "opencode-go/kimi-k3",
+    "opencode-go/beam-free",
     "opencode-go/deepseek-v4.1-flash",
-    "tokenharbor/deepseek-v4.1-flash",
     "xiaomi-token-plan-ams/mimo-v2.6-flash",
     "xiaomi-token-plan-ams/mimo-v2.6-pro",
     "opencode/space-bunny-free",
     "opencode/mimo-v2.6-flash-free",
-    "tokenharbor/mimo-v2.6-flash:free"
+    "tokenharbor/mimo-v2.6-flash:free",
+    "kilo/inclusionai/ling-3.1-flash",
+    "opencode-go/longcat-2.5-preview-free",
+    "opencode-go/cat-jam-free",
+    "opencode-go/glm-5.3-flash"
   ],
   "extensions": [
     "+extensions/agent-team/index.ts",

@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "fs";
 import { join, dirname, delimiter } from "path";
 import { homedir } from "node:os";
+import { getAgentDir } from "@mariozechner/pi-coding-agent";
 import type { SerpRecord } from "./search";
 
 // ── Config ──────────────────────────────────────────────────────────────
@@ -100,12 +101,28 @@ function resolveUvBin(): string {
 }
 const UV_BIN = resolveUvBin();
 
-/** `uv run` resolves the interpreter and syncs requirements.txt into a cached
- *  env, so neither a venv nor an interpreter path is hardcoded. A direct
- *  interpreter can still be forced via `WEB_FETCH_PY_BIN`. */
+/** The shared Python venv (see apps/scope-desktop/pi-python-install.mjs): the
+ *  `web_fetch` requirements are installed there, so prefer its interpreter over
+ *  a per-call ephemeral uv environment. `SCOPE_PYTHON_VENV` names it when Pi
+ *  Scope launched the agent; otherwise it is derived from the agent dir, so the
+ *  same extension works under a global `pi` (whose agent dir is ~/.pi/agent). */
+function sharedVenvPython(): string | null {
+	const venv = process.env.SCOPE_PYTHON_VENV || join(dirname(getAgentDir()), ".venv");
+	const py = process.platform === "win32"
+		? join(venv, "Scripts", "python.exe")
+		: join(venv, "bin", "python3");
+	return existsSync(py) ? py : null;
+}
+const SHARED_PY = sharedVenvPython();
+
+/** Prefer, in order: the explicit `WEB_FETCH_PY_BIN`, the shared Pi Scope venv
+ *  (built by pi-python-install.mjs), then `uv run`, which resolves the
+ *  interpreter and syncs requirements.txt into a cached env. */
 const PY_CMD: readonly string[] = process.env.WEB_FETCH_PY_BIN
 	? [process.env.WEB_FETCH_PY_BIN, PY_SCRIPT]
-	: [UV_BIN, "run", "--no-project", "--with-requirements", PY_REQUIREMENTS, "python", PY_SCRIPT];
+	: SHARED_PY
+		? [SHARED_PY, PY_SCRIPT]
+		: [UV_BIN, "run", "--no-project", "--with-requirements", PY_REQUIREMENTS, "python", PY_SCRIPT];
 const PY_LABEL = PY_CMD.join(" ");
 
 // ── Process helpers ──────────────────────────────────────────────────────
